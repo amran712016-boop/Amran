@@ -108,6 +108,7 @@ public class MainActivity extends Activity {
     boolean small;                        // picture-in-picture
     boolean started;                      // on the screen (between onStart and onStop)
     String reportCopy = "";
+    NoticeCenter notices;                 // التنبيهات داخل التطبيق (الجرس والقائمة المنبثقة)
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -321,6 +322,8 @@ public class MainActivity extends Activity {
         tabBrowser = tab("المتصفح");
         tabBrowser.setOnClickListener(v -> showTab(true));
         bar.addView(tabBrowser, gap(dp(6)));
+        notices = new NoticeCenter(this);
+        bar.addView(notices.bell(), gap(dp(6)));
         Button more = tab("⋮");
         more.setMinWidth(dp(40));
         more.setMinimumWidth(dp(40));
@@ -360,6 +363,8 @@ public class MainActivity extends Activity {
         drawerOverlay = buildDrawer();
         drawerOverlay.setVisibility(View.GONE);
         content.addView(drawerOverlay, fill());
+
+        content.addView(notices.buildOverlay(), fill());
 
         fitToScreen(root);
         showTab(false);
@@ -562,6 +567,16 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void accounts(String json, int active, int max, boolean anyRunning) {
             main.post(() -> onAccountsChanged(json, active, max, anyRunning));
+        }
+
+        /** The page sends an alert or instruction to the in-app notifications list. kind is "ok"/"bad"/"info". */
+        @JavascriptInterface
+        public void notify(String kind, String text) {
+            main.post(() -> {
+                if (notices != null) {
+                    notices.add(kind, text);
+                }
+            });
         }
     }
 
@@ -983,6 +998,9 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
+        if (notices != null && notices.onBack()) {
+            return;
+        }
         if (drawerOpen) {
             closeDrawer();
         } else if (report.getVisibility() == View.VISIBLE) {

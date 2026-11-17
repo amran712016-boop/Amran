@@ -2018,6 +2018,15 @@ EMBEDDED_PAGE = r'''<!doctype html>
     notice.textContent = message;
     notice.className = "notice " + (success ? "is-ok" : "is-bad");
     notice.hidden = false;
+    pushNative(message, success ? "ok" : "bad");
+  }
+  // أرسل كل تنبيه/تعليمات إلى قائمة التنبيهات داخل التطبيق (الجرس في الشريط العلوي)، إن كان يعمل داخل التطبيق.
+  function pushNative(message, kind) {
+    try {
+      if (window.GroupsNative && typeof window.GroupsNative.notify === "function") {
+        window.GroupsNative.notify(kind || "info", String(message == null ? "" : message));
+      }
+    } catch (e) {}
   }
   // A notice about a task (stopped, ended, retried) belongs to the task's account: it shows on that account's
   // panel only. One that comes while another account is shown waits until its account is shown again.

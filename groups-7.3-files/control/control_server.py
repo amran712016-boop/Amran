@@ -49,6 +49,7 @@ SECRETS_PATH = DATA_DIR / "secrets.json"
 CODES_PATH = DATA_DIR / "codes.json"
 KEYS_PATH = DATA_DIR / "keys.json"
 USAGE_PATH = DATA_DIR / "usage.json"
+NOTICES_PATH = DATA_DIR / "notices.json"
 CERT_PATH = DATA_DIR / "server.crt"
 CERT_KEY_PATH = DATA_DIR / "server.key"
 
@@ -286,6 +287,101 @@ def usage_by_account(code_id: str) -> dict:
         key=lambda item: -item["n"])
     total = int(row.get("total") or 0)
     return {"total": total, "cost": round(total * COST_PER_COMMENT, 2), "price": COST_PER_COMMENT, "accounts": accounts}
+
+
+# ----------------------------------------------------------------------------- notices to the apps
+# تنبيهات وتعليمات يرسلها المالك من اللوحة إلى التطبيقات: للكل أو لمستخدم واحد (رمز). كل تنبيه برقم يزيد،
+# والتطبيق يطلب ما بعد آخر رقم وصله، فلا يصله التنبيه مرتين.
+NOTICE_KINDS = {"info": "معلومة", "warn": "تنبيه", "urgent": "عاجل"}
+NOTICE_MAX = 200                   # أحدث ٢٠٠ تنبيه تبقى على الخادم
+NOTICE_TEXT_MAX = 1000
+NOTICE_FIRST_DAYS = 7              # جهاز جديد (لم يصله شيء بعد) يأخذ تنبيهات آخر ٧ أيام فقط
+
+
+def load_notices() -> dict:
+    data = read_private_json(NOTICES_PATH) or {}
+    items = data.get("items")
+    return {"seq": int(data.get("seq") or 0), "items": items if isinstance(items, list) else []}
+
+
+def save_notices(data: dict) -> None:
+    write_private_json(NOTICES_PATH, {"version": 1, "seq": int(data.get("seq") or 0), "items": data.get("items") or []})
+
+
+def add_notice(text: str, kind: str, target: str) -> None:
+    text = (text or "").strip()[:NOTICE_TEXT_MAX]
+    if not text:
+        return
+    kind = kind if kind in NOTICE_KINDS else "info"
+    target = target or "all"
+    with LOCK:
+        if target != "all" and not any(row.get("id") == target for row in load_codes()):
+            return                         # (the user was deleted meanwhile: a message for one person goes to no one else)
+        data = load_notices()
+        data["seq"] += 1
+        data["items"].insert(0, {"id": data["seq"], "text": text, "kind": kind, "target": target,
+                                 "at": int(time.time()), "seen": []})
+        del data["items"][NOTICE_MAX:]
+        save_notices(data)
+
+
+def delete_notice(notice_id) -> None:
+    try:
+        notice_id = int(notice_id)
+    except (TypeError, ValueError):
+        return
+    with LOCK:
+        data = load_notices()
+        data["items"] = [item for item in data["items"] if item.get("id") != notice_id]
+        save_notices(data)
+
+
+def notices_for(code_id: str, after: int) -> tuple[list, int]:
+    """The notices for this code (to all, or to it) after the number its app last got, oldest first; and the
+    newest number, which the app keeps. Each one remembers which codes got it, for the owner to see."""
+    now = int(time.time())
+    with LOCK:
+        data = load_notices()
+        if after > data["seq"]:            # the server's notices were started again: the app's number is stale
+            after = 0
+        out = []
+        changed = False
+        for item in data["items"]:
+            if item.get("target") not in ("all", code_id):
+                continue
+            if int(item.get("id") or 0) <= after:
+                continue
+            if after <= 0 and now - int(item.get("at") or 0) > NOTICE_FIRST_DAYS * 86400:
+                continue
+            out.append({"id": item["id"], "text": item.get("text", ""), "kind": item.get("kind", "info"),
+                        "at": item.get("at", 0)})
+            seen = item.setdefault("seen", [])
+            if code_id not in seen:
+                seen.append(code_id)
+                changed = True
+        if changed:
+            save_notices(data)
+        return sorted(out, key=lambda item: item["id"])[-30:], data["seq"]
+
+
+def notice_rows(codes: list) -> list:
+    names = {row.get("id"): (row.get("label") or row.get("code") or "") for row in codes}
+    total = len(codes)
+    rows = []
+    for item in load_notices()["items"]:
+        target = item.get("target") or "all"
+        seen = len(item.get("seen") or [])
+        if target == "all":
+            to = "الكل"
+            reach = f"وصل إلى {seen} من {total}"
+        else:
+            to = names.get(target) or "مستخدم محذوف"
+            reach = "وصل" if seen else "لم يصل بعد"
+        delta = int(time.time()) - int(item.get("at") or 0)
+        ago = ("الآن" if delta < 60 else f"قبل {delta // 60} د" if delta < 3600
+               else f"قبل {delta // 3600} س" if delta < 86400 else f"قبل {delta // 86400} يوم")
+        rows.append(dict(item, to=to, reach=reach, ago=ago, kind_name=NOTICE_KINDS.get(item.get("kind"), "معلومة")))
+    return rows
 
 
 GEMINI_DEFAULT_MODEL = "gemini-3.5-flash"
@@ -1002,6 +1098,18 @@ input::placeholder{color:var(--mut);opacity:.8}
 .opt:has(input:checked) .ck{background:var(--pri);border-color:var(--pri);color:var(--prik)}
 .opt:has(input:focus-visible){outline:2px solid var(--pri);outline-offset:2px}
 .pi{width:42px;height:42px;border-radius:12px;display:grid;place-items:center;flex:none;font:700 17px/1 var(--mono);background:var(--card);border:1px solid var(--line)}
+.ta{width:100%;box-sizing:border-box;min-height:110px;padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:var(--soft);color:var(--ink);font:inherit;font-size:16px;line-height:1.6;outline:0;resize:vertical}
+.ta:focus,.fs:focus{border-color:var(--pri);box-shadow:0 0 0 3px var(--ring);background:var(--card)}
+.ta::placeholder{color:var(--mut);opacity:.8}
+.fs{width:100%;height:46px;padding:0 12px;border:1px solid var(--line);border-radius:12px;background:var(--soft);font-size:16px;outline:0}
+.nk .opt{min-height:58px}
+.pi.k-info{color:var(--pri)}.pi.k-warn{color:var(--warn);background:var(--warnsoft)}.pi.k-urgent{color:var(--bad);background:var(--badsoft)}
+.nl{list-style:none;padding:0;margin:12px 0 0;display:grid;gap:10px}
+.nl li{border:1px solid var(--line);border-radius:14px;padding:10px 12px 12px;background:var(--soft)}
+.nh{display:flex;align-items:center;gap:8px;font-size:13px}.nh form{margin-inline-start:auto}.nh .ib{width:36px;height:36px}
+.nb{border-radius:99px;padding:1px 10px;font-size:12.5px;font-weight:600;background:var(--prisoft);color:var(--pri)}
+.nb.k-warn{background:var(--warnsoft);color:var(--warn)}.nb.k-urgent{background:var(--badsoft);color:var(--bad)}
+.nx{margin-top:6px;white-space:pre-wrap;overflow-wrap:anywhere}.nr{font-size:12.5px;margin-top:4px}
 .g2{display:grid;gap:12px;margin-top:12px}.g2 .card{margin:0}
 .ph{display:flex;gap:12px;align-items:center}
 .b{display:inline-flex;gap:6px;align-items:center;font-size:12.5px;font-weight:600}
@@ -1103,6 +1211,7 @@ main{padding-bottom:56px}
 <symbol id="i-sort" viewBox="0 0 24 24"><path d="M3 6h18M6 12h12M10 18h4"/></symbol>
 <symbol id="i-alert" viewBox="0 0 24 24"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01"/></symbol>
 <symbol id="i-lock" viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></symbol>
+<symbol id="i-bell" viewBox="0 0 24 24"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9M13.73 21a2 2 0 0 1-3.46 0"/></symbol>
 <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></symbol>
 </defs></svg>
 
@@ -1111,6 +1220,7 @@ main{padding-bottom:56px}
 <nav class="nav" aria-label="أقسام اللوحة">
 <button type="button" data-t="users" aria-current="page">{{ic('users')}}<span>المستخدمون</span></button>
 <button type="button" data-t="keys">{{ic('key')}}<span>المفاتيح</span>{% if nokey %}<i class="dot" title="لا يوجد مفتاح للكاتب الحالي"></i>{% endif %}</button>
+<button type="button" data-t="notices">{{ic('bell')}}<span>التنبيهات</span></button>
 <button type="button" data-t="link">{{ic('link')}}<span>الرابط</span></button>
 </nav>
 <div class="acts"><button class="ib th" id="th" type="button" aria-label="تبديل المظهر"><span class="m">{{ic('moon')}}</span><span class="s">{{ic('sun')}}</span></button>
@@ -1197,6 +1307,26 @@ main{padding-bottom:56px}
 </div>
 </section>
 
+<section class="panel" id="p-notices">
+<form class="card pad" method="post" action="/{{admin}}/notice/new" data-toast="تم إرسال التنبيه">
+<h2>إرسال تنبيه أو تعليمات</h2><p class="mut">تصل الرسالة إلى التطبيق خلال دقيقة تقريبًا، فتفتح قائمة التنبيهات داخله وحدها، ويظهر إشعار على الجوال إن كان التطبيق في الخلفية.</p>
+<label class="l" for="n-text">الرسالة</label>
+<textarea id="n-text" class="ta" name="text" rows="4" maxlength="1000" required placeholder="اكتب التنبيه أو التعليمات…"></textarea>
+<p class="l">النوع</p>
+<div class="eng nk">{% for k, name in notice_kinds.items() %}<label class="opt"><input type="radio" name="kind" value="{{k}}" {{ 'checked' if k=='info' else '' }}><span class="pi k-{{k}}" aria-hidden="true">{{ {'info':'i','warn':'!','urgent':'!!'}[k] }}</span><span><b>{{name}}</b><small>{{ {'info':'رسالة عادية','warn':'شيء يجب الانتباه له','urgent':'مهم جدًا، يُعرض بالأحمر'}[k] }}</small></span><span class="ck">{{ic('check')}}</span></label>{% endfor %}</div>
+<label class="l" for="n-to">إلى</label>
+<select id="n-to" class="fs" name="target"><option value="all">كل المستخدمين</option>{% for c in codes %}<option value="{{c.id}}">{{ c.label or 'بدون اسم' }} — {{c.code}}</option>{% endfor %}</select>
+<button class="btn wide" style="margin-top:18px">{{ic('bell')}}إرسال</button>
+</form>
+<div class="card pad"><h2>المرسَلة</h2>
+{% if notices %}<ul class="nl">{% for n in notices %}<li>
+<div class="nh"><span class="nb k-{{n.kind}}">{{n.kind_name}}</span><span class="mut">إلى {{n.to}} · {{n.ago}}</span>
+<form method="post" action="/{{admin}}/notice/delete" data-title="حذف التنبيه؟" data-confirm="يُحذف من الخادم فلا يصل إلى من لم يستلمه بعد. ما وصل إلى الأجهزة يبقى في قوائمها." data-yes="حذف" data-kind="danger" data-toast="تم حذف التنبيه"><input type="hidden" name="id" value="{{n.id}}"><button class="ib" aria-label="حذف التنبيه">{{ic('trash')}}</button></form></div>
+<p class="nx">{{n.text}}</p><p class="mut nr">{{n.reach}}</p></li>{% endfor %}</ul>
+{% else %}<p class="mut" style="margin-top:8px">لم ترسل أي تنبيه بعد.</p>{% endif %}
+</div>
+</section>
+
 <section class="panel" id="p-link">
 <div class="card pad"><h2>رابط التطبيق</h2><p class="mut">انسخه كاملًا وضعه في التطبيق عند إعداد الخادم.</p>
 <code class="lk">{{app_link}}</code>
@@ -1248,7 +1378,7 @@ function take(k){var v=sget(k);if(v==null)return null;sset(k);var at=v.indexOf('
 function toast(m){var t=D.createElement('div');t.className='toast';t.textContent=m;$('.toasts').appendChild(t);setTimeout(function(){t.classList.add('out');setTimeout(function(){t.remove()},300)},2400)}
 
 /* sections */
-var TABS=['users','keys','link'];
+var TABS=['users','keys','notices','link'];
 function tab(n,byUser){if(TABS.indexOf(n)<0)n='users';
 $$('.panel').forEach(function(p){p.classList.toggle('on',p.id==='p-'+n)});
 $$('.nav button').forEach(function(b){if(b.dataset.t===n)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current')});
@@ -1366,8 +1496,10 @@ def dashboard():
              "bound": sum(1 for r in rows if r.get("bound_device")),
              "comments": sum(r["usage"]["total"] for r in rows),
              "cost": round(sum(r["usage"]["cost"] for r in rows), 2)}
+    notices = notice_rows(codes)
     return render_template_string(
         DASHBOARD, admin=ADMIN, app_link=app_link(), codes=rows, stats=stats,
+        notices=notices, notice_kinds=NOTICE_KINDS,
         engine=keys["engine"], gemini_set=gemini_ready(keys), claude_set=bool(keys["claude_sealed"]),
         gemini_model=keys["gemini_model"], claude_model=keys["claude_model"],
         gemini_default=GEMINI_DEFAULT_MODEL, claude_default=CLAUDE_DEFAULT_MODEL,
@@ -1519,6 +1651,22 @@ def set_engine():
     return redirect(f"/{ADMIN}")
 
 
+@app.post(f"/{ADMIN}/notice/new")
+def notice_new():
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    add_notice(request.form.get("text") or "", request.form.get("kind") or "info", request.form.get("target") or "all")
+    return redirect(f"/{ADMIN}")
+
+
+@app.post(f"/{ADMIN}/notice/delete")
+def notice_delete():
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    delete_notice(request.form.get("id"))
+    return redirect(f"/{ADMIN}")
+
+
 # ----------------------------------------------------------------------------- the app API (link protocol)
 def api_ok(**data):
     return jsonify(ok=True, **data)
@@ -1569,6 +1717,21 @@ def api_usage():
     if not row:
         return api_err("انتهت صلاحية الدخول أو أوقِف الرمز أو نُقل لجهاز آخر. أعد إدخال الرمز.", 200)
     return api_ok(**usage_by_account(row["id"]))
+
+
+@app.post(f"/{API}/notices")
+def api_notices():
+    """The owner's notices for this app (to all, or to its code) after the last number it got."""
+    body = request.get_json(silent=True) or {}
+    row = code_from_token(body.get("token"))
+    if not row:
+        return api_err("انتهت صلاحية الدخول أو أوقِف الرمز أو نُقل لجهاز آخر. أعد إدخال الرمز.", 200)
+    try:
+        after = max(0, int(body.get("after") or 0))
+    except (TypeError, ValueError):
+        after = 0
+    items, last = notices_for(row["id"], after)
+    return api_ok(notices=items, last=last)
 
 
 @app.post(f"/{API}/comment")

@@ -2503,6 +2503,30 @@ EMBEDDED_PAGE = r'''<!doctype html>
   syncGemini();
   loadCommentsUsage(false);
   setInterval(() => loadCommentsUsage(false), 60000);
+
+  // تنبيهات المالك وتعليماته من لوحة التحكّم: داخل التطبيق تذهب إلى قائمة التنبيهات (تفتح وحدها)، وفي
+  // المتصفح العادي تظهر في شريط التنبيه أعلى الصفحة.
+  let noticesBusy = false;
+  async function loadAdminNotices() {
+    if (noticesBusy) return;
+    noticesBusy = true;
+    try {
+      const response = await fetchWithTimeout(apiRoot + "/notices", {headers: {"X-CSRF-Token": csrf}, cache: "no-store"}, 20000);
+      const data = await response.json();
+      if (!response.ok || !data.success) return;
+      const inApp = Boolean(window.GroupsNative && typeof window.GroupsNative.notify === "function");
+      for (const item of data.notices || []) {
+        if (inApp) pushNative(item.text, "admin-" + item.kind);
+        else showNotice("📢 " + item.text, item.kind === "info");
+      }
+    } catch (_) {
+    } finally {
+      noticesBusy = false;
+    }
+  }
+  loadAdminNotices();
+  setInterval(loadAdminNotices, 45000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) loadAdminNotices(); });
   loadActionCounts();
   setInterval(loadActionCounts, 5000);
   // The invisible top-left button (the owner's copy only): with the password, the comment cost starts
@@ -12474,6 +12498,57 @@ def control_comment(tweet_text: str, image: bytes | None, voice: str, account: s
     forget_comments_usage()
     remember_reply(account, tweet_id, text)
     return text
+
+
+# تنبيهات المالك وتعليماته من لوحة خادم التحكّم: تُطلب كل فترة، ويُحفظ آخر رقم وصل فلا يصل التنبيه مرتين.
+NOTICES_SEEN_PATH = DATA_DIR / "notices_seen.json"
+_notices_lock = threading.Lock()
+
+
+def control_notices() -> list:
+    """التنبيهات الجديدة من خادم التحكّم (الأقدم أولًا)، أو قائمة فارغة إن لم يكن مضبوطًا أو تعذّر الوصول."""
+    if not control_configured():
+        return []
+    token = _current_token()
+    if not token:
+        return []
+    with _notices_lock:
+        try:
+            after = int((read_private_json(NOTICES_SEEN_PATH) or {}).get("last") or 0)
+        except (TypeError, ValueError):
+            after = 0
+        try:
+            answer = _control_request("notices", {"token": token, "after": after}, seconds=10)
+        except RuntimeError:                       # (_ControlUnreachable منها): يُعاد الطلب في المرة القادمة
+            return []
+        items = []
+        for item in answer.get("notices") or []:
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("text") or "").strip()[:1000]
+            if not text:
+                continue
+            kind = str(item.get("kind") or "info")
+            items.append({"id": int(item.get("id") or 0), "text": text,
+                          "kind": kind if kind in ("info", "warn", "urgent") else "info", "at": int(item.get("at") or 0)})
+        try:
+            last = int(answer.get("last") or 0)
+        except (TypeError, ValueError):
+            last = after
+        if last != after:
+            write_private_json(NOTICES_SEEN_PATH, {"last": last})
+    for item in items:
+        print(f"تنبيه من الإدارة: {item['text']}", flush=True)
+    return items
+
+
+@app.get("/<access_path>/notices")
+def notices_endpoint(access_path: str):
+    if not hmac.compare_digest(access_path, ACCESS_PATH):
+        abort(404)
+    if not csrf_matches(request.headers.get("X-CSRF-Token", "")):
+        return jsonify(success=False, message="انتهت صلاحية الصفحة. أعد تحميلها ثم حاول مجددًا."), 400
+    return jsonify(success=True, notices=control_notices())
 
 
 UNLOCK_PAGE = """<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">

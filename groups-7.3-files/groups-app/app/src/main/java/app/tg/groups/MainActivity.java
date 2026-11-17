@@ -130,6 +130,9 @@ public class MainActivity extends Activity {
         exitOverlay();
         BrowserHost.setVisible(true);
         askOverlayPermission();
+        if (notices != null) {
+            notices.onShown();
+        }
     }
 
     @Override

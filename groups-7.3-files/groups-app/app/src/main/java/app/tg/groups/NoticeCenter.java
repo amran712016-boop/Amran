@@ -28,6 +28,8 @@ import java.util.List;
 public final class NoticeCenter {
     static final int MAX = 60;                 // أحدث ٦٠ تنبيهًا تُحفظ، والأقدم يسقط
     static final int BADGE = 0xFFB42318;       // أحمر العدّاد (نفس CLAY)
+    static final int OK = 0xFF067647;
+    static final int WARN = 0xFFB54708;
 
     private final MainActivity page;
     private final SharedPreferences store;
@@ -41,10 +43,11 @@ public final class NoticeCenter {
     private LinearLayout list;
     private TextView empty;
     private boolean open;
+    private boolean openWhenShown;             // وصلت رسالة من الإدارة والتطبيق خارج الشاشة: تفتح القائمة عند العودة
 
     static final class Item {
         final String text;
-        final String kind;      // ok / bad / info
+        final String kind;      // ok / bad / info، أو من لوحة التحكّم: admin-info / admin-warn / admin-urgent
         final long when;
         Item(String text, String kind, long when) {
             this.text = text;
@@ -101,8 +104,9 @@ public final class NoticeCenter {
             body = body.substring(0, 500);
         }
         String tag = normalizeKind(kind);
-        // لا تكرّر نفس الرسالة المتتالية (بعض التنبيهات تتكرر أثناء الانتظار).
-        if (!items.isEmpty()) {
+        boolean admin = tag.startsWith("admin-");
+        // لا تكرّر نفس الرسالة المتتالية (بعض تنبيهات الصفحة تتكرر أثناء الانتظار). رسائل الإدارة لا تتكرر أصلًا.
+        if (!admin && !items.isEmpty()) {
             Item top = items.get(0);
             if (top.text.equals(body) && top.kind.equals(tag)) {
                 return;
@@ -112,18 +116,52 @@ public final class NoticeCenter {
         while (items.size() > MAX) {
             items.remove(items.size() - 1);
         }
-        if (!open) {
-            unread++;
-            paintBell();
-        } else {
-            render();
-        }
         save();
+        if (open) {
+            render();
+            return;
+        }
+        unread++;
+        paintBell();
+        if (admin) {
+            // رسالة المالك تُعرض فورًا: تفتح القائمة إن كان التطبيق على الشاشة، وإلا إشعار على الجوال وتفتح عند العودة.
+            if (page.started && !page.small) {
+                openList();
+            } else {
+                openWhenShown = true;
+                Alerts.notice(adminTitle(tag), body);
+            }
+        }
+    }
+
+    /** التطبيق عاد إلى الشاشة: تفتح القائمة إن وصلت رسالة من الإدارة وهو خارجها. */
+    void onShown() {
+        if (openWhenShown && !page.small) {
+            openWhenShown = false;
+            openList();
+        }
+    }
+
+    static String adminTitle(String tag) {
+        switch (tag) {
+            case "admin-urgent":
+                return "عاجل من الإدارة";
+            case "admin-warn":
+                return "تنبيه من الإدارة";
+            default:
+                return "رسالة من الإدارة";
+        }
     }
 
     private static String normalizeKind(String kind) {
         if ("ok".equals(kind) || "bad".equals(kind) || "info".equals(kind)) {
             return kind;
+        }
+        if ("admin-info".equals(kind) || "admin-warn".equals(kind) || "admin-urgent".equals(kind)) {
+            return kind;
+        }
+        if (kind != null && kind.startsWith("admin")) {
+            return "admin-info";
         }
         if ("true".equalsIgnoreCase(kind)) {
             return "ok";
@@ -164,7 +202,7 @@ public final class NoticeCenter {
         head.addView(close, page.gap(0));
         slide.addView(head);
 
-        TextView sub = page.text("كل تنبيه أو تعليمات تصل من اللوحة تظهر هنا.", 13, MainActivity.MUTED, false);
+        TextView sub = page.text("رسائل الإدارة من لوحة التحكّم، وتنبيهات المهام، تظهر هنا.", 13, MainActivity.MUTED, false);
         sub.setPadding(0, page.dp(4), 0, page.dp(12));
         slide.addView(sub);
 
@@ -188,6 +226,7 @@ public final class NoticeCenter {
             return;
         }
         open = true;
+        openWhenShown = false;
         unread = 0;
         paintBell();
         render();
@@ -243,8 +282,29 @@ public final class NoticeCenter {
         LinearLayout row = new LinearLayout(page);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
-        int line = "ok".equals(item.kind) ? 0xFF067647 : "bad".equals(item.kind) ? MainActivity.CLAY : MainActivity.PINE;
-        row.setBackground(page.shape(MainActivity.SHEET, MainActivity.LINE, 12));
+        boolean admin = item.kind.startsWith("admin-");
+        int line;
+        switch (item.kind) {
+            case "ok":
+                line = OK;
+                break;
+            case "bad":
+            case "admin-urgent":
+                line = MainActivity.CLAY;
+                break;
+            case "admin-warn":
+                line = WARN;
+                break;
+            default:
+                line = MainActivity.PINE;
+        }
+        if ("admin-urgent".equals(item.kind)) {
+            row.setBackground(page.shape(0xFFFDEAE7, MainActivity.CLAY, 12));
+        } else if (admin) {
+            row.setBackground(page.shape(MainActivity.SHEET, line, 12));
+        } else {
+            row.setBackground(page.shape(MainActivity.SHEET, MainActivity.LINE, 12));
+        }
         row.setPadding(page.dp(12), page.dp(12), page.dp(12), page.dp(12));
 
         View dot = new View(page);
@@ -259,6 +319,11 @@ public final class NoticeCenter {
 
         LinearLayout col = new LinearLayout(page);
         col.setOrientation(LinearLayout.VERTICAL);
+        if (admin) {
+            TextView who = page.text(adminTitle(item.kind), 12, line, true);
+            who.setPadding(0, 0, 0, page.dp(3));
+            col.addView(who);
+        }
         TextView body = page.text(item.text, 14, MainActivity.INK, false);
         col.addView(body);
         TextView time = page.text(ago(item.when, now), 12, MainActivity.MUTED, false);

@@ -1539,11 +1539,12 @@ EMBEDDED_PAGE = r'''<!doctype html>
     const card = document.createElement("article");
     card.className = "task-card";
     card.dataset.token = task.token || "";
-    card.innerHTML = '<div class="progress-top"><div><h3></h3><p class="task-phase"></p><p class="task-msg"></p></div><b class="task-count">0</b></div><div class="meter is-indeterminate"><span class="task-bar"></span></div><div class="task-actions"><button class="btn btn-ghost task-stop" type="button">إيقاف هذه المهمة</button><button class="btn btn-ghost task-copy" type="button" hidden>نسخ التغريدات</button><button class="btn task-retry" type="button" hidden>إعادة المحاولة</button></div>';
+    card.innerHTML = '<div class="progress-top"><div><h3></h3><p class="task-phase"></p><p class="task-msg"></p></div><b class="task-count">0</b></div><div class="meter is-indeterminate"><span class="task-bar"></span></div><div class="task-actions"><button class="btn btn-ghost task-stop" type="button">إيقاف هذه المهمة</button><button class="btn btn-ghost task-copy" type="button" hidden>نسخ التغريدات</button><button class="btn task-retry" type="button" hidden>إعادة المحاولة</button><button class="btn task-retry-failed" type="button" hidden>إعادة المحاولة للفاشلة</button></div>';
     card.querySelector("h3").textContent = task.title || "مهمة";
     const stopButton = card.querySelector(".task-stop");
     const retryButton = card.querySelector(".task-retry");
     const copyButton = card.querySelector(".task-copy");
+    const retryFailedButton = card.querySelector(".task-retry-failed");
     let links = [];
     let linksWanted = true;
     copyButton.addEventListener("click", async () => {
@@ -1605,6 +1606,26 @@ EMBEDDED_PAGE = r'''<!doctype html>
         retryButton.disabled = false;
       }
     });
+    // «إعادة المحاولة للفاشلة»: a new task with only the tweets whose actions failed, each with only those actions.
+    retryFailedButton.addEventListener("click", async () => {
+      retryFailedButton.disabled = true;
+      try {
+        const data = await postJson("/retry-failed", {job_id: task.id, job_key: task.key});
+        if (!data.success || !data.job_id || !data.job_key) {
+          showNotice(data.message || "تعذّرت إعادة المحاولة للفاشلة.", false);
+          retryFailedButton.disabled = false;
+          return;
+        }
+        retryFailedButton.hidden = true;
+        writeTasks(readTasks().filter((row) => row.id !== task.id));
+        const base = (task.title || "مهمة").replace(/^إعادة الفاشلة · /, "");
+        followTask({id: data.job_id, key: data.job_key, token: task.token, title: "إعادة الفاشلة · " + base, startedAt: Date.now()});
+        showTaskNotice(task, base + ": " + (data.message || "بدأت إعادة المحاولة للفاشلة."), true);
+      } catch (_) {
+        showNotice("تعذّر الاتصال أثناء إعادة المحاولة للفاشلة.", false);
+        retryFailedButton.disabled = false;
+      }
+    });
     taskList.prepend(card);
     filterTaskCards();
     const paint = (data) => {
@@ -1622,6 +1643,9 @@ EMBEDDED_PAGE = r'''<!doctype html>
       stopButton.hidden = data.status !== "running";
       retryButton.hidden = !(data.status !== "running" && data.resumable);
       retryButton.disabled = false;
+      const failedCount = data.status !== "running" ? Number(data.retry_failed || 0) : 0;
+      retryFailedButton.hidden = !failedCount;
+      if (failedCount) retryFailedButton.textContent = "إعادة المحاولة للفاشلة (" + failedCount + ")";
       if (Array.isArray(data.items) && data.items.length) links = data.items.map((item) => item && item.url).filter(Boolean);
       if (!links.length && linksWanted && phase === "act") loadLinks();
       copyButton.hidden = !links.length;
@@ -1651,7 +1675,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
             // (its results show on its own account's panel only: elsewhere they wait for it, see loadAccountFromServer)
             if (Array.isArray(data.results) && data.results.length && (!task.token || task.token === tokenField.value.trim())) renderResults(data);
             // A task stopped with a retry button stays in the saved task list so it is still there after a reload.
-            if (!data.resumable) writeTasks(readTasks().filter((row) => row.id !== task.id));
+            // (and one with failed actions to retry, so its «إعادة المحاولة للفاشلة» is there after a reload too)
+            if (!data.resumable && !data.retry_failed) writeTasks(readTasks().filter((row) => row.id !== task.id));
             loadActionCounts();
             break;
           }
@@ -5070,6 +5095,8 @@ class CommentsAhead:
         status_id = tweet_status_id(url)
         if not status_id or self.closed or (self.should_stop and self.should_stop()):
             return
+        if "comment" not in item_actions(item or {}, self.actions):
+            return                          # (a retry of the failed: this tweet's comment is not asked again)
         if (already_done_recently(self.account, status_id, self.actions)
                 or already_done_recently(self.account, status_id, ["comment"]) or tweet_is_ignored(url)):
             return                          # it is skipped: no reply is needed
@@ -5606,10 +5633,9 @@ def execute_comment_actions(page, items: list[dict], actions: list[str], api_key
             ahead.close()
 
 
-def _execute_comment_actions(page, items: list[dict], actions: list[str], api_key: str, model: str, on_progress,
+def _execute_comment_actions(page, items: list[dict], task_actions: list[str], api_key: str, model: str, on_progress,
                              should_stop, on_snapshot, account: str, voice: str, ahead) -> list[dict]:
     results: list[dict] = []
-    plain = [action for action in actions if action != "comment"]
     total = len(items)
     failures = FailedTweets()
     # Where each tweet's result starts in results: going back after a pause drops them from there on.
@@ -5621,6 +5647,8 @@ def _execute_comment_actions(page, items: list[dict], actions: list[str], api_ke
     while index + 1 < total:
         index += 1
         item = items[index]
+        actions = item_actions(item, task_actions)      # (all the task's, or only those that failed on it before)
+        plain = [action for action in actions if action != "comment"]
         if should_stop and should_stop():
             break
         starts[index] = len(results)
@@ -8929,7 +8957,66 @@ def apply_actions_immediately(page, url: str, actions: list[str]) -> dict[str, s
     return outcome
 
 
-def visit_and_apply(page, items: list[dict], actions: list[str], on_progress=None, on_snapshot=None, should_stop=None, account: str = "") -> list[dict]:
+# ---------------------------------------------------------------------------- إعادة المحاولة للفاشلة
+# مهمة اكتملت وفيها إجراءات فشلت على بعض التغريدات: «إعادة المحاولة للفاشلة» تبدأ مهمة جديدة على نفس الحساب
+# بتلك التغريدات وحدها، ولكل تغريدة الإجراءات التي فشلت عليها فقط (item["only"]).
+# الرتويت والإعجاب والمرجعية آمنة الإعادة دائمًا: تُقرأ حالة الزر قبل النقر فلا يُلغى ما نجح. أما التعليق فلا
+# يُعاد إلا إن فشل قبل إرساله، حتى لا يُنشر ردّان على التغريدة نفسها.
+COMMENT_RETRY_SAFE = (
+    "تعذر فتح التغريدة", "تعذر العثور على المنشور", "لم يُرجع النموذج تعليقًا صالحًا", "لم يظهر مربع كتابة الرد",
+    "زر النشر بقي معطّلًا", "لم تُفتح التغريدة في الوقت المناسب", "الحساب وصل حد الردود مؤقتًا",
+)
+
+
+def item_actions(item: dict, actions: list[str]) -> list[str]:
+    """The actions to take on this tweet: all of the task's, or in a retry of the failed only those that failed."""
+    only = item.get("only") if isinstance(item, dict) else None
+    if isinstance(only, list):
+        return [action for action in actions if action in only]
+    return list(actions)
+
+
+def action_failed(note: str) -> bool:
+    """As the page counts it: not done, and not skipped (on already, done before, deleted, not available)."""
+    note = str(note or "")
+    return note != "تم التنفيذ" and not any(word in note for word in ("مفعّل", "تخطي", "تجاوز"))
+
+
+def action_retryable(action: str, note: str) -> bool:
+    if not action_failed(note):
+        return False
+    if action != "comment":
+        return True
+    note = str(note or "")
+    if note.startswith("تعذر نشر التعليق: "):
+        note = note[len("تعذر نشر التعليق: "):]
+    return note in COMMENT_RETRY_SAFE or note.startswith("تعذر توليد التعليق") or note.startswith("تعذر الاتصال")
+
+
+def failed_retry_items(job: dict) -> list[dict]:
+    """The finished task's tweets with an action to retry, each with only those actions."""
+    out: list[dict] = []
+    seen: set[str] = set()
+    for row in job.get("results") or []:
+        if not isinstance(row, dict):
+            continue
+        url = str(row.get("url") or "")
+        only = [action for action, note in (row.get("actions") or {}).items()
+                if action in ALLOWED_ACTIONS and action_retryable(action, note)]
+        if not only or not url or url in seen or tweet_is_ignored(url):
+            continue
+        seen.add(url)
+        out.append({"url": url, "text": str(row.get("text") or ""), "only": only})
+    return out
+
+
+def failed_retry_count(job: dict) -> int:
+    if job.get("status") != "done" or job.get("retried_by") or (job.get("kind") or "") != "execute":
+        return 0
+    return len(failed_retry_items(job))
+
+
+def visit_and_apply(page, items: list[dict], task_actions: list[str], on_progress=None, on_snapshot=None, should_stop=None, account: str = "") -> list[dict]:
     results: list[dict] = []
     total = len(items)
     failures = FailedTweets()
@@ -8942,6 +9029,7 @@ def visit_and_apply(page, items: list[dict], actions: list[str], on_progress=Non
     while index + 1 < total:
         index += 1
         item = items[index]
+        actions = item_actions(item, task_actions)      # (all the task's, or only those that failed on it before)
         if should_stop and should_stop():
             break
         starts[index] = len(results)
@@ -10750,6 +10838,7 @@ def public_job(job: dict, light: bool = False, links: bool = False) -> dict:
         "items": job.get("items") or [],
         "results": job.get("results") or [],
         "resumable": bool(job.get("resumable")) and job.get("status") == "done",
+        "retry_failed": failed_retry_count(job),
     }
     if light and job["status"] == "running":
         payload["items"] = []
@@ -11202,6 +11291,82 @@ def retry_job_endpoint(access_path: str):
         publish_job(job_id, phase="queue", message=waiting_message(ahead))
     threading.Thread(target=run_group_job_in_turn, args=(job_id, auth_digest, start_phase, start_message, args), daemon=True).start()
     return jsonify(success=True, message=waiting_message(ahead) if ahead else "بدأت إعادة المحاولة.")
+
+
+@app.post("/<access_path>/retry-failed")
+def retry_failed_endpoint(access_path: str):
+    """«إعادة المحاولة للفاشلة»: a new task on the same account with the finished task's failed tweets only, and on
+    each only the actions that failed on it."""
+    if not hmac.compare_digest(access_path, ACCESS_PATH):
+        abort(404)
+    data = request.get_json(silent=True) or {}
+    if not csrf_ok(data):
+        return jsonify(success=False, message="انتهت صلاحية الصفحة. أعد تحميلها ثم حاول مجددًا."), 400
+    job_id = str(data.get("job_id") or "").strip()
+    job_key = str(data.get("job_key") or "").strip()
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if not job or (not job_key_matches(job, job_key)
+                       and not (job.get("owner") and job.get("owner") == session.get("csrf_token", ""))):
+            return jsonify(success=False, message="لم يعد سجل هذه المهمة متاحًا."), 404
+        if job.get("status") == "running":
+            return jsonify(success=False, message="المهمة تعمل الآن. انتظر انتهاءها."), 409
+        if job.get("retried_by"):
+            return jsonify(success=False, message="أُعيدت المحاولة لفاشلة هذه المهمة من قبل."), 409
+        items = failed_retry_items(job)
+        actions = [action for action in (job.get("actions") or []) if action in ALLOWED_ACTIONS]
+        args = job_run_args.get(job_id)
+        account = str(job.get("account") or "")
+        title = str(job.get("username") or LINKS_TASK_NAME)
+    if not items:
+        return jsonify(success=False, message="لا توجد إجراءات فاشلة يمكن إعادتها في هذه المهمة."), 400
+    actions = [action for action in actions if any(action in item["only"] for item in items)] or \
+        list(dict.fromkeys(action for item in items for action in item["only"]))
+    # The account's token: as the task had it, or (after the app restarted) from the saved accounts.
+    auth_token = str(args[0]) if args else ""
+    if not auth_token and account:
+        auth_token = next((row["token"] for row in saved_sessions if profile_key(row["token"]) == account), "")
+    if not valid_auth_token(auth_token):
+        return jsonify(success=False, message="لم يعد حساب هذه المهمة محفوظًا. اختره وأعد المهمة."), 400
+    gemini_api_key = str(args[5]) if args else ""
+    gemini_model = str(args[6]) if args else ""
+    reply_voice = str(args[9]) if args and args[9] in REPLY_VOICES else DEFAULT_REPLY_VOICE
+    if "comment" in actions and not is_owner_copy():
+        wait_for_owner_keys()
+    if "comment" in actions and gemini_writes_comments() and not control_configured():
+        gemini_api_key = gemini_api_key or saved_gemini.get("api_key") or ""
+        gemini_model = gemini_model or normalize_gemini_model(saved_gemini.get("model") or "") or ""
+        if not valid_gemini_key(gemini_api_key) or not gemini_model:
+            return jsonify(success=False, message=no_keys_message() if not is_owner_copy()
+                           else "أدخل مفتاح Gemini واسم النموذج قبل التعليق."), 400
+    if updating.is_set():
+        return jsonify(success=False, message="يجري تحديث البرنامج. انتظر قليلًا ثم أعد المحاولة."), 503
+    auth_digest = hashlib.sha256(auth_token.encode("utf-8")).hexdigest()
+    if account_line_size(auth_digest) >= MAX_TASKS_PER_ACCOUNT:
+        return jsonify(success=False, message=f"لهذا الحساب {MAX_TASKS_PER_ACCOUNT} مهام بين عاملة ومنتظرة (الحد الأقصى). "
+                                              "انتظر انتهاء بعضها ثم أعد المحاولة."), 429
+    name = (title if title.startswith("إعادة الفاشلة") else "إعادة الفاشلة · " + title)[:80]
+    new_id, new_key = begin_job(session.get("csrf_token", ""), request_client_id(), len(items), "prepare",
+                                "التحقق من الجلسة…", "execute", name)
+    with jobs_lock:
+        if new_id in jobs:
+            jobs[new_id]["auth_digest"] = auth_digest
+            jobs[new_id]["account"] = profile_key(auth_token)
+        old = jobs.get(job_id)
+        if old is not None:
+            old["retried_by"] = new_id              # (its button goes: the retry is the new task)
+        persist_jobs_unlocked()
+    ahead = account_line_join(auth_digest, new_id)
+    if ahead:
+        publish_job(new_id, phase="queue", message=waiting_message(ahead))
+    run_args = (auth_token, "", name, len(items), actions, gemini_api_key, gemini_model, "", DEFAULT_GROUP_WAIT_SECONDS,
+                reply_voice, items)
+    threading.Thread(target=run_group_job_in_turn, args=(new_id, auth_digest, "prepare", "التحقق من الجلسة…", run_args),
+                     daemon=True).start()
+    count = sum(len(item["only"]) for item in items)
+    return jsonify(success=True, job_id=new_id, job_key=new_key, queued=bool(ahead), tweets=len(items), actions=count,
+                   message=(waiting_message(ahead) if ahead
+                            else f"بدأت إعادة {count} إجراء فاشل على {len(items)} تغريدة."))
 
 
 @app.post("/<access_path>/stop")

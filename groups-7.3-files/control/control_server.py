@@ -1114,6 +1114,9 @@ input::placeholder{color:var(--mut);opacity:.8}
 .code:hover{border-color:var(--pri)}
 .code.ok{border-style:solid;border-color:var(--pri);background:var(--prisoft)}.code.ok .i{color:var(--pri)}
 .cr .ib{width:46px;height:46px}
+.vw{display:inline-flex;align-items:center;gap:6px;height:46px;padding:0 13px;border:1px solid var(--line);border-radius:12px;background:var(--card);color:var(--ink);font-size:14px;font-weight:500;text-decoration:none;flex:none}
+.vw .i{width:18px;height:18px;margin:0;color:var(--pri)}
+.vw:hover{background:var(--soft)}
 .facts{grid-column:1/-1;display:flex;flex-wrap:wrap;align-items:center;gap:0 14px;font-size:13.5px;color:var(--mut)}
 .facts b{color:var(--ink);font-weight:600;font-variant-numeric:tabular-nums}
 .dev{display:inline-flex;align-items:center;gap:5px;margin-inline-start:auto;font-size:12.5px;font-weight:500}
@@ -1331,7 +1334,7 @@ main{padding-bottom:56px}
 <div class="who"><div class="av" style="--h:{{hue}}" aria-hidden="true">{{ (c.label or '؟')[:1] }}</div>
 <div class="nm"><h3>{{ c.label or 'بدون اسم' }}</h3><p><span class="st">{{ 'يعمل' if c.active else 'موقوف' }}</span><span>{% if c.last_seen %}آخر دخول {{c.last_seen_text}}{% else %}لم يدخل بعد{% endif %}</span></p></div></div>
 <form method="post" action="/{{admin}}/code/toggle" data-toast="{{ 'تم إيقاف الرمز' if c.active else 'تم تشغيل الرمز' }}"><input type="hidden" name="id" value="{{c.id}}"><button class="sw{{ ' on' if c.active else '' }}" role="switch" aria-checked="{{ 'true' if c.active else 'false' }}" aria-label="رمز {{ c.label or 'بدون اسم' }} يعمل"><i></i></button></form>
-<div class="cr"><button type="button" class="code" data-copy="{{c.code}}" aria-label="نسخ الرمز {{c.code}}"><bdi>{{c.code}}</bdi>{{ic('copy')}}</button><button type="button" class="ib" data-more aria-label="خيارات {{ c.label or 'المستخدم' }}">{{ic('more')}}</button></div>
+<div class="cr"><button type="button" class="code" data-copy="{{c.code}}" aria-label="نسخ الرمز {{c.code}}"><bdi>{{c.code}}</bdi>{{ic('copy')}}</button>{% if c.bound_device and c.active %}<a class="vw" href="/{{admin}}/view/{{c.id}}" target="_blank" rel="noopener" title="معاينة شاشة تطبيقه مباشرة (بموافقته)" aria-label="معاينة شاشة {{ c.label or 'المستخدم' }}">{{ic('eye')}}<span>معاينة</span></a>{% endif %}<button type="button" class="ib" data-more aria-label="خيارات {{ c.label or 'المستخدم' }}">{{ic('more')}}</button></div>
 {% set facts %}<span><b>{{ '{:,}'.format(c.usage.total) }}</b> تعليق</span><span title="التكلفة التقديرية"><b>${{ '%.2f'|format(c.usage.cost) }}</b></span><span class="dev{{ ' on' if c.bound_device else '' }}">{{ic('phone')}}{{ 'جهاز مربوط' if c.bound_device else 'غير مربوط' }}</span>{% endset %}
 {% if c.usage.accounts %}<details class="acc"><summary class="facts" title="التعليقات حسب حساب X">{{facts}}{{ic('chev')}}</summary>
 <p class="alh">حسابات X ({{c.usage.accounts|length}})</p><ul class="al">
@@ -1753,6 +1756,236 @@ def notice_delete():
     return redirect(f"/{ADMIN}")
 
 
+# ----------------------------------------------------------------------------- «معاينة الشاشة»
+# The owner sees a user's app screen live, to find the problem they meet. Only with the user's yes in the app,
+# each time; a red bar shows on their screen all along, and they can stop it. View only: nothing goes back.
+# Kept in memory (nothing on disk): a session per code, its state, and the last picture the app sent.
+VIEW_LOCK = threading.Condition()
+VIEWS: dict[str, dict] = {}
+VIEW_LISTEN: dict[str, float] = {}        # when each code's app last waited for a request (it is connected)
+VIEW_WAIT = 20                            # seconds an app's request waits for a viewing to start
+VIEW_VIEWER_GONE = 20                     # seconds without the owner's page asking: the viewing ends
+VIEW_MAX = 15 * 60                        # a viewing ends by itself after this
+VIEW_IMAGE_MAX = 1_500_000
+
+
+def _view_end(v: dict, reason: str) -> None:
+    if v["state"] != "ended":
+        v["state"] = "ended"
+        v["reason"] = reason
+        v["ended_at"] = time.time()
+
+
+def _view_check(v: dict | None, now: float) -> None:
+    """Ends a viewing whose owner left its page, or whose time is up."""
+    if not v or v["state"] in ("ended", "refused", "noanswer"):
+        return
+    if now - v["viewer_seen"] > VIEW_VIEWER_GONE:
+        _view_end(v, "owner")
+    elif now - v["started"] > VIEW_MAX:
+        _view_end(v, "time")
+
+
+def view_message(code_id: str, v: dict, now: float) -> str:
+    state = v["state"]
+    if state == "waiting":
+        if now - VIEW_LISTEN.get(code_id, 0) < VIEW_WAIT + 15:
+            return "جارٍ إرسال الطلب إلى تطبيق المستخدم…"
+        return ("تطبيق المستخدم غير متصل الآن (مغلق، أو بلا إنترنت، أو بإصدار قديم). "
+                "يبقى الطلب قائمًا ما دامت هذه الصفحة مفتوحة، وتبدأ المعاينة حين يتصل.")
+    if state == "connecting":
+        return "وصل الطلب إلى التطبيق…"
+    if state == "asking":
+        return "بانتظار موافقة المستخدم على المعاينة…"
+    if state == "away":
+        return "التطبيق ليس على الشاشة. أُرسل للمستخدم إشعار ليفتحه ويوافق على المعاينة."
+    if state == "refused":
+        return "رفض المستخدم المعاينة."
+    if state == "noanswer":
+        return "لم يردّ المستخدم على طلب المعاينة."
+    if state == "background":
+        return "التطبيق في الخلفية الآن (ليس على الشاشة). تظهر الصورة حين يعود إليه المستخدم."
+    if state == "live":
+        return "مباشر"
+    reason = v.get("reason")
+    if reason == "user":
+        return "أوقف المستخدم المعاينة من التطبيق."
+    if reason == "time":
+        return "انتهت مدة المعاينة (١٥ دقيقة). ابدأها من جديد إن احتجت."
+    if reason == "app":
+        return "انقطع الاتصال بتطبيق المستخدم."
+    return "أُوقفت المعاينة."
+
+
+def _view_for_app(token) -> tuple[dict | None, str]:
+    row = code_from_token(token)
+    return row, (row or {}).get("id", "")
+
+
+VIEW_PAGE = r"""<!doctype html>
+<html lang="ar" dir="rtl"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow"><title>معاينة الشاشة · {{ label }}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Readex+Pro:wght@300..700&display=swap">
+<script>try{document.documentElement.dataset.theme=localStorage.getItem('th')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light')}catch(e){}</script>
+<style>
+:root{--bg:#eef2f1;--card:#fff;--soft:#f3f6f5;--line:#dce4e2;--ink:#10201f;--mut:#566664;--pri:#0f6b66;--prik:#fff;--prisoft:#def0ed;
+--bad:#b42318;--badsoft:#fdeae7;--warn:#7a4f00;--warnsoft:#fbefd2;color-scheme:light}
+[data-theme=dark]{--bg:#0a1211;--card:#111b1a;--soft:#182423;--line:#243432;--ink:#e3eeec;--mut:#8c9e9b;--pri:#56c8bf;--prik:#05201e;--prisoft:#12322f;
+--bad:#f6817a;--badsoft:#3a1b19;--warn:#f1c35c;--warnsoft:#33290f;color-scheme:dark}
+*{box-sizing:border-box}[hidden]{display:none!important}
+body{margin:0;background:var(--bg);color:var(--ink);font:400 15px/1.6 "Readex Pro","IBM Plex Sans Arabic","Segoe UI",system-ui,sans-serif;min-height:100vh}
+.top{position:sticky;top:0;z-index:2;background:var(--card);border-bottom:1px solid var(--line)}
+.topin{max-width:980px;margin:0 auto;padding:10px 16px;display:flex;align-items:center;gap:12px}
+.top h1{font-size:16px;font-weight:600;margin:0;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.top small{display:block;color:var(--mut);font-size:12.5px;font-weight:400;white-space:normal}
+.btn{height:40px;padding:0 16px;border-radius:11px;border:1px solid var(--line);background:var(--card);color:var(--ink);font:inherit;font-weight:600;cursor:pointer}
+.btn.stop{background:var(--bad);border-color:var(--bad);color:#fff}
+.btn:disabled{opacity:.55;cursor:default}
+main{max-width:980px;margin:0 auto;padding:16px}
+.st{display:flex;align-items:center;gap:10px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:11px 14px;font-size:14px}
+.dot{width:10px;height:10px;border-radius:50%;background:var(--mut);flex:none}
+.st.live .dot{background:#e5484d;box-shadow:0 0 0 0 rgba(229,72,77,.6);animation:pulse 1.6s infinite}
+.st.wait .dot{background:var(--warn)}.st.bad{background:var(--badsoft);color:var(--bad);border-color:transparent}.st.bad .dot{background:var(--bad)}
+@keyframes pulse{70%{box-shadow:0 0 0 9px rgba(229,72,77,0)}100%{box-shadow:0 0 0 0 rgba(229,72,77,0)}}
+@media (prefers-reduced-motion:reduce){.st.live .dot{animation:none}}
+.meta{display:flex;flex-wrap:wrap;gap:4px 14px;color:var(--mut);font-size:12.5px;margin:8px 4px 0}
+.stage{margin-top:14px;display:grid;place-items:center}
+.phone{position:relative;width:min(100%,400px);border-radius:22px;border:1px solid var(--line);background:#000;padding:8px;box-shadow:0 18px 48px rgba(12,32,30,.18)}
+.phone img{display:block;width:100%;height:auto;border-radius:15px;background:#111}
+.phone .ph{aspect-ratio:9/19;border-radius:15px;background:var(--soft);display:grid;place-items:center;color:var(--mut);font-size:14px;text-align:center;padding:24px}
+.phone.stale img{opacity:.45;filter:grayscale(.6)}
+.note{margin-top:14px;color:var(--mut);font-size:13px;text-align:center}
+</style></head><body>
+<header class="top"><div class="topin">
+<h1>معاينة الشاشة · {{ label }}<small>عرض فقط: لا يمكنك الضغط أو الكتابة في تطبيق المستخدم</small></h1>
+<button class="btn stop" id="stop" type="button">إيقاف المعاينة</button>
+</div></header>
+<main>
+<div class="st wait" id="st" role="status" aria-live="polite"><span class="dot" aria-hidden="true"></span><span id="msg">جارٍ البدء…</span></div>
+<div class="meta" id="meta"></div>
+<div class="stage"><div class="phone" id="phone"><div class="ph" id="ph">تظهر هنا شاشة التطبيق بعد موافقة المستخدم.</div><img id="img" alt="شاشة تطبيق المستخدم" hidden></div></div>
+<p class="note">يرى المستخدم شريطًا أحمر أعلى شاشته طوال المعاينة، ويستطيع إيقافها. تنتهي وحدها بعد ١٥ دقيقة أو عند إغلاق هذه الصفحة.</p>
+</main>
+<script>
+(function(){
+var base="/{{ admin }}/view/{{ code_id }}",session="",shown=0,ended=false,timer=0;
+var st=document.getElementById("st"),msg=document.getElementById("msg"),meta=document.getElementById("meta"),
+img=document.getElementById("img"),ph=document.getElementById("ph"),phone=document.getElementById("phone"),stopBtn=document.getElementById("stop");
+var TABS={panel:"اللوحة",browser:"المتصفح"};
+function paint(d){
+  msg.textContent=d.message||"";
+  st.className="st "+(d.state==="live"&&!d.stale?"live":(["refused","noanswer","ended"].indexOf(d.state)>=0?"bad":"wait"));
+  var bits=[];
+  if(d.tab)bits.push("على الشاشة: «"+(TABS[d.tab]||d.tab)+"»");
+  if(d.frame_age!=null)bits.push("آخر صورة قبل "+d.frame_age+" ث");
+  if(d.left!=null&&!d.over)bits.push("تبقّى "+Math.floor(d.left/60)+":"+String(d.left%60).padStart(2,"0"));
+  meta.textContent=bits.join(" · ");
+  phone.classList.toggle("stale",!!d.stale||d.state!=="live");
+  if(d.frame_n&&d.frame_n!==shown){shown=d.frame_n;var next=new Image();next.onload=function(){img.src=next.src;img.hidden=false;ph.hidden=true};next.src=base+"/frame?s="+encodeURIComponent(session)+"&n="+d.frame_n}
+  if(d.over){ended=true;stopBtn.disabled=true;stopBtn.textContent="انتهت المعاينة"}
+}
+function poll(){
+  if(ended)return;
+  fetch(base+"/state?s="+encodeURIComponent(session),{cache:"no-store",credentials:"same-origin"})
+   .then(function(r){if(r.status===401){location.href="/{{ admin }}";throw 0}return r.json()})
+   .then(function(d){paint(d)}).catch(function(){msg.textContent="انقطع الاتصال بالخادم. جارٍ إعادة المحاولة…"})
+   .then(function(){if(!ended)timer=setTimeout(poll,900)});
+}
+fetch(base+"/start",{method:"POST",cache:"no-store",credentials:"same-origin"}).then(function(r){return r.json()}).then(function(d){
+  if(!d.ok){msg.textContent=d.error||"تعذّر بدء المعاينة.";st.className="st bad";ended=true;stopBtn.disabled=true;return}
+  session=d.session;poll();
+}).catch(function(){msg.textContent="تعذّر الاتصال بالخادم.";st.className="st bad"});
+function stop(){if(!session||ended)return;ended=true;clearTimeout(timer);
+  try{navigator.sendBeacon(base+"/stop?s="+encodeURIComponent(session))}catch(e){}}
+stopBtn.addEventListener("click",function(){stop();stopBtn.disabled=true;stopBtn.textContent="انتهت المعاينة";msg.textContent="أُوقفت المعاينة.";st.className="st bad";phone.classList.add("stale")});
+addEventListener("pagehide",stop);
+})();
+</script></body></html>
+"""
+
+
+@app.get(f"/{ADMIN}/view/<code_id>")
+def view_page(code_id: str):
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    row = next((c for c in load_codes() if c.get("id") == code_id), None)
+    if not row:
+        return redirect(f"/{ADMIN}")
+    return render_template_string(VIEW_PAGE, admin=ADMIN, code_id=code_id, label=row.get("label") or row.get("code") or "")
+
+
+@app.post(f"/{ADMIN}/view/<code_id>/start")
+def view_start(code_id: str):
+    if not logged_in():
+        return jsonify(ok=False, error="سجّل الدخول من جديد."), 401
+    row = next((c for c in load_codes() if c.get("id") == code_id), None)
+    if not row:
+        return jsonify(ok=False, error="المستخدم غير موجود.")
+    if not row.get("active"):
+        return jsonify(ok=False, error="رمز هذا المستخدم موقوف، فتطبيقه مقفل.")
+    if not row.get("bound_device"):
+        return jsonify(ok=False, error="لم يفعّل هذا المستخدم التطبيق على جوال بعد.")
+    now = time.time()
+    with VIEW_LOCK:
+        old = VIEWS.get(code_id)
+        if old:
+            _view_end(old, "owner")         # (a new page: the one before ends)
+        VIEWS[code_id] = {"session": secrets.token_urlsafe(16), "state": "waiting", "reason": "", "started": now,
+                          "viewer_seen": now, "frame": b"", "frame_n": 0, "frame_at": 0.0, "tab": ""}
+        VIEW_LOCK.notify_all()
+        return jsonify(ok=True, session=VIEWS[code_id]["session"])
+
+
+@app.get(f"/{ADMIN}/view/<code_id>/state")
+def view_state(code_id: str):
+    if not logged_in():
+        return jsonify(ok=False), 401
+    now = time.time()
+    with VIEW_LOCK:
+        v = VIEWS.get(code_id)
+        if not v or v["session"] != request.args.get("s"):
+            return jsonify(ok=True, state="ended", message="انتهت هذه المعاينة (فُتحت معاينة أحدث، أو أُعيد تشغيل الخادم).", over=True)
+        _view_check(v, now)
+        if v["state"] != "ended":
+            v["viewer_seen"] = now
+        age = int(now - v["frame_at"]) if v["frame_at"] else None
+        stale = v["state"] == "live" and (age is None or age > 6)
+        message = view_message(code_id, v, now)
+        if stale and age is not None:
+            message = "لم تصل صورة جديدة منذ " + str(age) + " ث (ضعف في الإنترنت، أو التطبيق ليس على الشاشة)."
+        over = v["state"] in ("ended", "refused", "noanswer")
+        return jsonify(ok=True, state=v["state"], message=message, frame_n=v["frame_n"], frame_age=age, stale=stale,
+                       tab=v["tab"], over=over, left=max(0, int(VIEW_MAX - (now - v["started"]))))
+
+
+@app.get(f"/{ADMIN}/view/<code_id>/frame")
+def view_frame(code_id: str):
+    if not logged_in():
+        return "", 401
+    with VIEW_LOCK:
+        v = VIEWS.get(code_id)
+        if not v or v["session"] != request.args.get("s") or not v["frame"]:
+            return "", 404
+        frame = v["frame"]
+    response = app.response_class(frame, mimetype="image/jpeg")
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.post(f"/{ADMIN}/view/<code_id>/stop")
+def view_stop(code_id: str):
+    if not logged_in():
+        return "", 401
+    with VIEW_LOCK:
+        v = VIEWS.get(code_id)
+        if v and v["session"] == request.args.get("s"):
+            _view_end(v, "owner")
+            v["frame"] = b""
+    return "", 204
+
+
 # ----------------------------------------------------------------------------- the app API (link protocol)
 def api_ok(**data):
     return jsonify(ok=True, **data)
@@ -1817,6 +2050,94 @@ def api_stats():
         return api_err("لم تصل الأرقام.")
     save_acts_of(row["id"], accounts)
     return api_ok()
+
+
+@app.post(f"/{API}/view-wait")
+def api_view_wait():
+    """The app waits here (up to VIEW_WAIT seconds) for the owner to start viewing its screen."""
+    body = request.get_json(silent=True) or {}
+    row, code_id = _view_for_app(body.get("token"))
+    if not row:
+        return api_err("انتهت صلاحية الدخول أو أوقِف الرمز أو نُقل لجهاز آخر. أعد إدخال الرمز.", 200)
+    deadline = time.time() + VIEW_WAIT
+    with VIEW_LOCK:
+        while True:
+            now = time.time()
+            VIEW_LISTEN[code_id] = now
+            v = VIEWS.get(code_id)
+            _view_check(v, now)
+            if v and v["state"] == "waiting":
+                v["state"] = "connecting"
+                return api_ok(view=True, session=v["session"])
+            if now >= deadline:
+                return api_ok(view=False)
+            VIEW_LOCK.wait(deadline - now)
+
+
+@app.post(f"/{API}/view-state")
+def api_view_state():
+    """The app says where the viewing is: asking, away, refused, noanswer, live, background, or ended (by the user)."""
+    body = request.get_json(silent=True) or {}
+    row, code_id = _view_for_app(body.get("token"))
+    if not row:
+        return api_err("انتهت صلاحية الدخول.", 200)
+    state = str(body.get("state") or "")
+    now = time.time()
+    with VIEW_LOCK:
+        v = VIEWS.get(code_id)
+        if not v or v["session"] != body.get("session"):
+            return api_ok(stop=True)
+        _view_check(v, now)
+        if v["state"] == "ended":
+            return api_ok(stop=True)
+        if state in ("asking", "away", "live", "background", "refused", "noanswer"):
+            v["state"] = state
+        elif state == "ended":
+            _view_end(v, str(body.get("reason") or "user") if body.get("reason") in ("user", "time", "app") else "user")
+        return api_ok(stop=v["state"] in ("ended", "refused", "noanswer"))
+
+
+@app.post(f"/{API}/view-frame")
+def api_view_frame():
+    """A picture of the app's screen (JPEG, base64), or same: true when it did not change; answers stop: true once
+    the owner closed the viewing or its time is up."""
+    body = request.get_json(silent=True) or {}
+    row, code_id = _view_for_app(body.get("token"))
+    if not row:
+        return api_err("انتهت صلاحية الدخول.", 200)
+    image = b""
+    raw = body.get("image")
+    if isinstance(raw, str) and raw:
+        if len(raw) > VIEW_IMAGE_MAX * 4 // 3 + 8:
+            return api_err("الصورة أكبر من المسموح.")
+        try:
+            image = base64.b64decode(raw, validate=True)
+        except ValueError:
+            return api_err("صورة غير صالحة.")
+        if not image.startswith(b"\xff\xd8"):
+            return api_err("صورة غير صالحة.")
+    now = time.time()
+    with VIEW_LOCK:
+        v = VIEWS.get(code_id)
+        if not v or v["session"] != body.get("session"):
+            return api_ok(stop=True)
+        _view_check(v, now)
+        if v["state"] == "ended":
+            v["frame"] = b""
+            return api_ok(stop=True)
+        tab = str(body.get("tab") or "")
+        v["tab"] = tab if tab in ("panel", "browser") else ""
+        if image:
+            v["frame"] = image
+            v["frame_n"] += 1
+            v["frame_at"] = now
+            v["state"] = "live"
+        elif body.get("same") and v["frame"]:
+            v["frame_at"] = now
+            v["state"] = "live"
+        else:
+            v["state"] = "background"
+        return api_ok(stop=False)
 
 
 @app.post(f"/{API}/notices")

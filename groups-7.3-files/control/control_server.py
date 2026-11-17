@@ -50,6 +50,7 @@ CODES_PATH = DATA_DIR / "codes.json"
 KEYS_PATH = DATA_DIR / "keys.json"
 USAGE_PATH = DATA_DIR / "usage.json"
 NOTICES_PATH = DATA_DIR / "notices.json"
+ACTS_PATH = DATA_DIR / "acts.json"
 CERT_PATH = DATA_DIR / "server.crt"
 CERT_KEY_PATH = DATA_DIR / "server.key"
 
@@ -287,6 +288,60 @@ def usage_by_account(code_id: str) -> dict:
         key=lambda item: -item["n"])
     total = int(row.get("total") or 0)
     return {"total": total, "cost": round(total * COST_PER_COMMENT, 2), "price": COST_PER_COMMENT, "accounts": accounts}
+
+
+# ----------------------------------------------------------------------------- what each user's app did
+# أرقام التنفيذ التي يعرضها التطبيق في رأس صفحته (الرتويت والإعجاب والمرجعية والتعليقات) لكل حساب X، كما
+# يرسلها التطبيق: قيمها كاملة في كل مرة (لا زيادات)، فتُستبدل ولا تُعدّ مرتين.
+ACT_NAMES = ("repost", "like", "bookmark", "comment")
+ACT_MAX_ACCOUNTS = 10
+
+
+def load_acts() -> dict:
+    data = read_private_json(ACTS_PATH) or {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_acts_of(code_id: str, accounts: list) -> None:
+    """The app's numbers now, for each of its X accounts: they replace what it sent before."""
+    clean = {}
+    for row in accounts[:ACT_MAX_ACCOUNTS]:
+        if not isinstance(row, dict):
+            continue
+        key = re.sub(r"[^A-Za-z0-9]", "", str(row.get("id") or ""))[:48]
+        if not key:
+            continue
+        name = str(row.get("name") or "").strip().lstrip("@")
+        if not re.fullmatch(r"[A-Za-z0-9_]{1,15}", name):
+            name = ""
+        counts = {}
+        for act in ACT_NAMES:
+            try:
+                counts[act] = min(max(0, int(row.get(act) or 0)), 10 ** 9)
+            except (TypeError, ValueError):
+                counts[act] = 0
+        clean[key] = dict(counts, name=name)
+    with LOCK:
+        data = load_acts()
+        data[code_id] = {"at": int(time.time()), "accounts": clean}
+        write_private_json(ACTS_PATH, data)
+
+
+def acts_of(code_id: str, data: dict | None = None) -> dict:
+    """A user's totals and, by X account (by @name, as the comments are), what their app shows; at is when it
+    last sent them (0: never)."""
+    row = (data if data is not None else load_acts()).get(code_id) or {}
+    merged: dict[str, dict] = {}
+    for key, value in (row.get("accounts") or {}).items():
+        if not isinstance(value, dict):
+            continue
+        name = str(value.get("name") or "")
+        slot = merged.setdefault(name.lower() if name else "id:" + key, dict({act: 0 for act in ACT_NAMES}, name=name))
+        for act in ACT_NAMES:
+            slot[act] += int(value.get(act) or 0)
+    accounts = sorted(merged.values(), key=lambda item: -(item["repost"] + item["like"] + item["bookmark"]))
+    totals = {act: sum(item[act] for item in accounts) for act in ACT_NAMES}
+    return dict(totals, accounts=accounts, at=int(row.get("at") or 0))
 
 
 # ----------------------------------------------------------------------------- notices to the apps
@@ -1080,6 +1135,19 @@ input::placeholder{color:var(--mut);opacity:.8}
 .al span{font-variant-numeric:tabular-nums}
 .pg{grid-column:1/-1;height:4px;border-radius:9px;background:var(--line);overflow:hidden}
 .pg i{display:block;height:100%;border-radius:9px;background:var(--pri)}
+.kp div:nth-child(3n+1){padding-inline-start:0;border-inline-start:0}
+.kp div:nth-child(n+4){border-top:1px solid var(--heroline)}
+.ax{grid-column:1/-1;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.ax div{background:var(--soft);border:1px solid var(--line);border-radius:12px;padding:8px 10px;text-align:center;line-height:1.35}
+.ax b{display:block;font-size:18px;font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}
+.ax span{font-size:12px;color:var(--mut)}
+.axs{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--mut)}
+.axl{list-style:none;padding:0;margin:10px 0 0;display:grid;gap:9px}
+.axl li{display:grid;grid-template-columns:minmax(0,1fr) auto auto auto;gap:4px 12px;align-items:baseline;font-size:13px;color:var(--mut)}
+.axl li>b{font-weight:500;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.axl span b{color:var(--ink);font-weight:600;font-variant-numeric:tabular-nums}
+.axe{font-size:13px;margin-top:8px}
+.axn{grid-column:1/-1;font-size:12.5px;color:var(--mut)}
 .empty{text-align:center;padding:40px 20px;color:var(--mut);background:var(--card);border:1px dashed var(--dash);border-radius:16px}
 .empty h3{color:var(--ink);margin-bottom:4px}
 .empty .btn{margin-top:16px}
@@ -1180,7 +1248,7 @@ main{padding-bottom:56px}
 .hero{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.15fr);align-items:center;gap:0 30px;padding:22px 26px;margin-top:22px}
 .kp{margin:0;border-top:0;border-inline-start:1px solid var(--heroline)}
 .kp div{padding:6px 0;padding-inline-start:22px}
-.kp div:first-child{padding-inline-start:26px}
+.kp div:first-child,.kp div:nth-child(3n+1){padding-inline-start:26px}
 .kp dd{font-size:24px}
 .tb{padding-top:14px}
 .search{max-width:420px}
@@ -1242,6 +1310,9 @@ main{padding-bottom:56px}
 <div><dt>أجهزة مربوطة</dt><dd>{{stats.bound}}</dd></div>
 <div><dt>تعليقات مكتوبة</dt><dd>{{ '{:,}'.format(stats.comments) }}</dd></div>
 <div><dt>التكلفة التقديرية</dt><dd>${{ '%.2f'|format(stats.cost) }}</dd></div>
+<div><dt>الرتويت</dt><dd>{{ '{:,}'.format(stats.repost) }}</dd></div>
+<div><dt>الإعجاب</dt><dd>{{ '{:,}'.format(stats.like) }}</dd></div>
+<div><dt>المرجعية</dt><dd>{{ '{:,}'.format(stats.bookmark) }}</dd></div>
 </dl>
 </section>
 <div class="tb">
@@ -1250,13 +1321,13 @@ main{padding-bottom:56px}
 </div>
 <div class="fr">
 <div class="seg" id="flt" role="group" aria-label="تصفية حسب الحالة"><button type="button" data-f="all" aria-pressed="true">الكل</button><button type="button" data-f="on" aria-pressed="false">يعمل</button><button type="button" data-f="off" aria-pressed="false">موقوف</button></div>
-<label class="sort">{{ic('sort')}}<span id="sol">الأحدث</span><select id="so" aria-label="ترتيب المستخدمين"><option value="new" data-s="الأحدث">الأحدث إضافةً</option><option value="seen" data-s="آخر دخول">آخر دخول</option><option value="top" data-s="الأكثر تعليقًا">الأكثر تعليقًا</option><option value="name" data-s="الاسم">الاسم</option></select></label>
+<label class="sort">{{ic('sort')}}<span id="sol">الأحدث</span><select id="so" aria-label="ترتيب المستخدمين"><option value="new" data-s="الأحدث">الأحدث إضافةً</option><option value="seen" data-s="آخر دخول">آخر دخول</option><option value="top" data-s="الأكثر تعليقًا">الأكثر تعليقًا</option><option value="acts" data-s="الأكثر تنفيذًا">الأكثر تنفيذًا</option><option value="name" data-s="الاسم">الاسم</option></select></label>
 </div>
 {% endif %}
 
 <div class="list" id="list">
 {% for c in codes %}{% set hue = (c.id[:2]|int(0,16)) * 360 // 256 %}
-<article class="u{{ '' if c.active else ' off' }}" data-id="{{c.id}}" data-s="{{ 'on' if c.active else 'off' }}" data-name="{{c.label}}" data-code="{{c.code}}" data-bound="{{ '1' if c.bound_device else '' }}" data-n="{{c.usage.total}}" data-seen="{{c.last_seen or 0}}" data-q="{{ (c.label ~ ' ' ~ c.code ~ ' ' ~ c.code|replace('-','') ~ ' ' ~ c.usage.accounts|map(attribute='name')|join(' '))|lower }}">
+<article class="u{{ '' if c.active else ' off' }}" data-id="{{c.id}}" data-s="{{ 'on' if c.active else 'off' }}" data-name="{{c.label}}" data-code="{{c.code}}" data-bound="{{ '1' if c.bound_device else '' }}" data-n="{{c.usage.total}}" data-x="{{ c.acts.repost + c.acts.like + c.acts.bookmark }}" data-seen="{{c.last_seen or 0}}" data-q="{{ (c.label ~ ' ' ~ c.code ~ ' ' ~ c.code|replace('-','') ~ ' ' ~ c.usage.accounts|map(attribute='name')|join(' '))|lower }}">
 <div class="who"><div class="av" style="--h:{{hue}}" aria-hidden="true">{{ (c.label or '؟')[:1] }}</div>
 <div class="nm"><h3>{{ c.label or 'بدون اسم' }}</h3><p><span class="st">{{ 'يعمل' if c.active else 'موقوف' }}</span><span>{% if c.last_seen %}آخر دخول {{c.last_seen_text}}{% else %}لم يدخل بعد{% endif %}</span></p></div></div>
 <form method="post" action="/{{admin}}/code/toggle" data-toast="{{ 'تم إيقاف الرمز' if c.active else 'تم تشغيل الرمز' }}"><input type="hidden" name="id" value="{{c.id}}"><button class="sw{{ ' on' if c.active else '' }}" role="switch" aria-checked="{{ 'true' if c.active else 'false' }}" aria-label="رمز {{ c.label or 'بدون اسم' }} يعمل"><i></i></button></form>
@@ -1266,6 +1337,15 @@ main{padding-bottom:56px}
 <p class="alh">حسابات X ({{c.usage.accounts|length}})</p><ul class="al">
 {% for a in c.usage.accounts %}<li><b><bdi>{{ ('@' ~ a.name) if a.name else ('#' ~ a.id[:8]) }}</bdi></b><span>{{ '{:,}'.format(a.n) }} تعليق</span><span>${{ '%.2f'|format(a.cost) }}</span><div class="pg"><i style="width:{{ ((a.n * 100 / c.usage.total)|round|int) if c.usage.total else 0 }}%"></i></div></li>{% endfor %}
 </ul></details>{% else %}<div class="facts">{{facts}}</div>{% endif %}
+{% if c.acts.at %}<div class="ax" role="group" aria-label="التنفيذ في تطبيق {{ c.label or 'المستخدم' }}">
+<div><b>{{ '{:,}'.format(c.acts.repost) }}</b><span>الرتويت</span></div>
+<div><b>{{ '{:,}'.format(c.acts.like) }}</b><span>الإعجاب</span></div>
+<div><b>{{ '{:,}'.format(c.acts.bookmark) }}</b><span>المرجعية</span></div></div>
+<details class="acc axd"><summary class="axs"><span>حسابات <bdi>X</bdi> ({{c.acts.accounts|length}}) · آخر تحديث {{c.acts_text}}</span>{{ic('chev')}}</summary>
+{% if c.acts.accounts %}<ul class="axl">
+{% for a in c.acts.accounts %}<li><b><bdi>{{ ('@' ~ a.name) if a.name else 'حساب بلا اسم' }}</bdi></b><span><b>{{ '{:,}'.format(a.repost) }}</b> رتويت</span><span><b>{{ '{:,}'.format(a.like) }}</b> إعجاب</span><span><b>{{ '{:,}'.format(a.bookmark) }}</b> مرجعية</span></li>{% endfor %}
+</ul>{% else %}<p class="mut axe">لا يوجد حساب X في تطبيقه الآن.</p>{% endif %}</details>
+{% else %}<p class="axn">لم يرسل تطبيقه أرقام التنفيذ بعد.</p>{% endif %}
 </article>
 {% endfor %}
 </div>
@@ -1399,6 +1479,7 @@ var ORDER={
 'new':function(a,b){return a._i-b._i},
 seen:function(a,b){return b.dataset.seen-a.dataset.seen||a._i-b._i},
 top:function(a,b){return b.dataset.n-a.dataset.n||a._i-b._i},
+acts:function(a,b){return b.dataset.x-a.dataset.x||a._i-b._i},
 name:function(a,b){return a.dataset.name.localeCompare(b.dataset.name,'ar')||a._i-b._i}};
 function filter(){if(!q)return;var s=q.value.trim().toLowerCase(),n=0;
 rows.forEach(function(u){var ok=(fl==='all'||u.dataset.s===fl)&&(!s||u.dataset.q.indexOf(s)>-1);u.hidden=!ok;if(ok)n++});
@@ -1491,11 +1572,16 @@ def dashboard():
     keys = load_keys()
     with LOCK:
         codes = load_codes()
-    rows = [dict(c, last_seen_text=seen_text(c), usage=usage_of(c["id"])) for c in codes]
+    acts_data = load_acts()
+    rows = [dict(c, last_seen_text=seen_text(c), usage=usage_of(c["id"]), acts=acts_of(c["id"], acts_data)) for c in codes]
+    for r in rows:
+        r["acts_text"] = ("الآن" if time.time() - r["acts"]["at"] < 60 else seen_text({"last_seen": r["acts"]["at"]})) if r["acts"]["at"] else ""
     stats = {"users": len(rows), "active": sum(1 for r in rows if r.get("active")),
              "bound": sum(1 for r in rows if r.get("bound_device")),
              "comments": sum(r["usage"]["total"] for r in rows),
-             "cost": round(sum(r["usage"]["cost"] for r in rows), 2)}
+             "cost": round(sum(r["usage"]["cost"] for r in rows), 2),
+             "repost": sum(r["acts"]["repost"] for r in rows), "like": sum(r["acts"]["like"] for r in rows),
+             "bookmark": sum(r["acts"]["bookmark"] for r in rows)}
     notices = notice_rows(codes)
     return render_template_string(
         DASHBOARD, admin=ADMIN, app_link=app_link(), codes=rows, stats=stats,
@@ -1717,6 +1803,20 @@ def api_usage():
     if not row:
         return api_err("انتهت صلاحية الدخول أو أوقِف الرمز أو نُقل لجهاز آخر. أعد إدخال الرمز.", 200)
     return api_ok(**usage_by_account(row["id"]))
+
+
+@app.post(f"/{API}/stats")
+def api_stats():
+    """The app's numbers (as at the top of its page) for each of its X accounts, for the owner to see."""
+    body = request.get_json(silent=True) or {}
+    row = code_from_token(body.get("token"))
+    if not row:
+        return api_err("انتهت صلاحية الدخول أو أوقِف الرمز أو نُقل لجهاز آخر. أعد إدخال الرمز.", 200)
+    accounts = body.get("accounts")
+    if not isinstance(accounts, list):
+        return api_err("لم تصل الأرقام.")
+    save_acts_of(row["id"], accounts)
+    return api_ok()
 
 
 @app.post(f"/{API}/notices")

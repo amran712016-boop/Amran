@@ -8666,6 +8666,7 @@ def count_successes(outcome: dict[str, str], account: str = "") -> None:
             write_private_json(ACTION_COUNTS_PATH, {"by_account": action_counts})
         except Exception:
             pass
+    stats_changed()
 
 
 def remember_done(account: str, status_id: str, outcome: dict[str, str]) -> None:
@@ -11530,6 +11531,7 @@ def forget_account_data(auth_token: str) -> None:
                 write_private_json(ACTION_COUNTS_PATH, {"by_account": action_counts})
             except Exception:
                 pass
+    stats_changed()
     with done_history_lock:
         if done_history.pop(key, None) is not None:
             try:
@@ -12446,6 +12448,7 @@ def control_activate(code: str) -> str:
     write_private_json(UNLOCK_PATH, {"token": token, "code": code})
     with _unlock_lock:
         _unlock_cache.update(token=token, code=code, ok=True, at=time.monotonic())
+    stats_changed()
     return str(data.get("engine") or "")
 
 
@@ -12549,6 +12552,62 @@ def notices_endpoint(access_path: str):
     if not csrf_matches(request.headers.get("X-CSRF-Token", "")):
         return jsonify(success=False, message="انتهت صلاحية الصفحة. أعد تحميلها ثم حاول مجددًا."), 400
     return jsonify(success=True, notices=control_notices())
+
+
+# أرقام التنفيذ (كما في رأس الصفحة) لكل حساب X تُرسل إلى خادم التحكّم ليراها المالك عند كل مستخدم. تُرسل قيمها
+# كاملة لا زيادات، بعد كل تنفيذ (تُجمع ثوانيَ قليلة في إرسال واحد)، وكل ساعة حتى لو لم تتغيّر.
+_stats_wake = threading.Event()
+_stats_sent = {"body": "", "at": 0.0}
+_STATS_GATHER = 20            # ثوانٍ: تُجمع فيها عدة تنفيذات في إرسال واحد
+_STATS_EVERY = 3600           # ثوانٍ: يُرسل كل ساعة ولو لم يتغيّر شيء (إن فُقد إرسال أو أُعيد ضبط الخادم)
+
+
+def stats_changed() -> None:
+    _stats_wake.set()
+
+
+def stats_snapshot() -> list:
+    with action_counts_lock:
+        rows = {key: dict(row) for key, row in action_counts.items()}
+    return [dict({action: int(row.get(action) or 0) for action in ACTION_NAMES}, id=key, name=account_names.get(key, ""))
+            for key, row in rows.items()]
+
+
+def report_stats() -> bool:
+    """يرسل الأرقام إن تغيّرت منذ آخر إرسال ناجح (أو مضت ساعة). يعيد True إن لم يبقَ شيء يُرسل."""
+    if not control_configured():
+        return True
+    token = _current_token()
+    if not token:
+        return True
+    accounts = stats_snapshot()
+    body = json.dumps(accounts, sort_keys=True, ensure_ascii=False)
+    if body == _stats_sent["body"] and time.monotonic() - _stats_sent["at"] < _STATS_EVERY:
+        return True
+    try:
+        _control_request("stats", {"token": token, "accounts": accounts}, seconds=15)
+    except RuntimeError:
+        return False
+    _stats_sent.update(body=body, at=time.monotonic())
+    return True
+
+
+def report_stats_in_background() -> None:
+    _stats_wake.set()                         # أول إرسال بعد التشغيل
+    while True:
+        _stats_wake.wait(_STATS_EVERY)
+        _stats_wake.clear()
+        time.sleep(_STATS_GATHER)
+        try:
+            done = report_stats()
+        except Exception:
+            done = False
+        if not done:                          # تعذّر الوصول: يُعاد بعد دقيقتين
+            time.sleep(120)
+            _stats_wake.set()
+
+
+threading.Thread(target=report_stats_in_background, name="stats-to-control", daemon=True).start()
 
 
 UNLOCK_PAGE = """<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">

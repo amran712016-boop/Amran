@@ -109,7 +109,6 @@ public class MainActivity extends Activity {
     boolean started;                      // on the screen (between onStart and onStop)
     String reportCopy = "";
     NoticeCenter notices;                 // التنبيهات داخل التطبيق (الجرس والقائمة المنبثقة)
-    LinearLayout shareBar;                // شريط أحمر ظاهر طوال «معاينة الشاشة» من لوحة التحكّم (انظر ScreenShare)
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -134,37 +133,6 @@ public class MainActivity extends Activity {
         if (notices != null) {
             notices.onShown();
         }
-        ScreenShare.onShown(this);
-    }
-
-    /** «معاينة الشاشة»: while the owner views this app's screen, this bar says so, with a button to stop it. */
-    LinearLayout buildShareBar() {
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.HORIZONTAL);
-        box.setGravity(Gravity.CENTER_VERTICAL);
-        box.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
-        box.setBackgroundColor(CLAY);
-        box.setPadding(dp(14), dp(6), dp(10), dp(6));
-        TextView note = text("● صاحب البرنامج يشاهد شاشة التطبيق الآن (عرض فقط)", 13, ON_PINE, true);
-        box.addView(note, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        Button stop = new Button(this);
-        stop.setText("إيقاف");
-        stop.setAllCaps(false);
-        stop.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
-        stop.setTextColor(CLAY);
-        stop.setTypeface(Typeface.DEFAULT_BOLD);
-        stop.setBackground(shape(ON_PINE, 0, 8));
-        stop.setStateListAnimator(null);
-        stop.setMinHeight(dp(32));
-        stop.setMinimumHeight(dp(32));
-        stop.setPadding(dp(14), 0, dp(14), 0);
-        stop.setOnClickListener(v -> {
-            ScreenShare.end();
-            Toast.makeText(this, "أُوقفت معاينة الشاشة.", Toast.LENGTH_SHORT).show();
-        });
-        box.addView(stop, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        box.setVisibility(ScreenShare.isOn() ? View.VISIBLE : View.GONE);
-        return box;
     }
 
     @Override
@@ -330,8 +298,6 @@ public class MainActivity extends Activity {
     View buildPage() {
         root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        shareBar = buildShareBar();
-        root.addView(shareBar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         root.setBackgroundColor(PAPER);
         root.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
 

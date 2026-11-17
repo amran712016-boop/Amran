@@ -1,3 +1,4 @@
 control-data/
 *.tmp
 *.corrupt
+__pycache__/

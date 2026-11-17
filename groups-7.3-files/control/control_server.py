@@ -32,6 +32,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import ssl
 import subprocess
 import threading
@@ -41,7 +42,7 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import quote
 
-from flask import Flask, jsonify, redirect, render_template_string, request, session
+from flask import Flask, jsonify, redirect, render_template_string, request, send_file, session
 
 # ----------------------------------------------------------------------------- where everything lives
 DATA_DIR = Path(os.environ.get("CONTROL_DATA") or (Path(__file__).resolve().parent / "control-data"))
@@ -51,6 +52,8 @@ KEYS_PATH = DATA_DIR / "keys.json"
 USAGE_PATH = DATA_DIR / "usage.json"
 NOTICES_PATH = DATA_DIR / "notices.json"
 ACTS_PATH = DATA_DIR / "acts.json"
+SUPPORT_PATH = DATA_DIR / "support.json"
+SUPPORT_DIR = DATA_DIR / "support"
 CERT_PATH = DATA_DIR / "server.crt"
 CERT_KEY_PATH = DATA_DIR / "server.key"
 
@@ -342,6 +345,91 @@ def acts_of(code_id: str, data: dict | None = None) -> dict:
     accounts = sorted(merged.values(), key=lambda item: -(item["repost"] + item["like"] + item["bookmark"]))
     totals = {act: sum(item[act] for item in accounts) for act in ACT_NAMES}
     return dict(totals, accounts=accounts, at=int(row.get("at") or 0))
+
+
+# ----------------------------------------------------------------------------- the users' messages («مساعدة»)
+# From the app's «مساعدة» button: a description of the problem, with up to five pictures or short videos, and what
+# the app adds by itself (its version, the phone, its last log lines). Files come one by one first (support-file),
+# then the message that names them (support). They are kept in SUPPORT_DIR/<message id>/.
+SUPPORT_MAX = 300                     # the newest messages kept (older ones go, with their files)
+SUPPORT_TEXT_MAX = 2000
+SUPPORT_FILES_MAX = 5
+SUPPORT_IMAGE_MAX = 8 * 1024 * 1024
+SUPPORT_VIDEO_MAX = 25 * 1024 * 1024
+SUPPORT_PENDING_HOURS = 3             # a file never named by a message goes after this
+SUPPORT_PER_HOUR = 10                 # messages a code may send in an hour
+
+
+def sniff_media(data: bytes) -> tuple[str, str]:
+    """(mime type, extension) by the file's own first bytes, or ("", "") when it is not a picture or video."""
+    head = data[:16]
+    if head.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg", "jpg"
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png", "png"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp", "webp"
+    if head[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif", "gif"
+    if head[4:8] == b"ftyp":
+        brand = head[8:12]
+        if brand.startswith(b"3g"):
+            return "video/3gpp", "3gp"
+        if brand == b"qt  ":
+            return "video/quicktime", "mov"
+        if brand in (b"heic", b"heix", b"mif1", b"msf1"):
+            return "", ""                # (HEIC pictures: browsers do not show them)
+        return "video/mp4", "mp4"
+    if head.startswith(b"\x1a\x45\xdf\xa3"):
+        return "video/webm", "webm"
+    return "", ""
+
+
+def load_support() -> dict:
+    data = read_private_json(SUPPORT_PATH) or {}
+    items = data.get("items")
+    return {"seq": int(data.get("seq") or 0), "items": items if isinstance(items, list) else []}
+
+
+def save_support(data: dict) -> None:
+    write_private_json(SUPPORT_PATH, {"version": 1, "seq": int(data.get("seq") or 0), "items": data.get("items") or []})
+
+
+def _support_pending_dir() -> Path:
+    path = SUPPORT_DIR / "pending"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def prune_support_pending() -> None:
+    cutoff = time.time() - SUPPORT_PENDING_HOURS * 3600
+    for path in _support_pending_dir().glob("*"):
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+        except OSError:
+            pass
+
+
+def support_unread() -> int:
+    return sum(1 for item in load_support()["items"] if not item.get("read"))
+
+
+def support_rows(codes: list) -> list:
+    names = {row.get("id"): row for row in codes}
+    rows = []
+    now = int(time.time())
+    for item in load_support()["items"]:
+        code = names.get(item.get("code_id")) or {}
+        delta = now - int(item.get("at") or 0)
+        ago = ("الآن" if delta < 60 else f"قبل {delta // 60} د" if delta < 3600
+               else f"قبل {delta // 3600} س" if delta < 86400 else f"قبل {delta // 86400} يوم")
+        replies = [dict(r, when=time.strftime("%Y-%m-%d %H:%M", time.localtime(int(r.get("at") or 0))))
+                   for r in item.get("replies") or [] if isinstance(r, dict)]
+        rows.append(dict(item, replies=replies, who=code.get("label") or item.get("label") or "مستخدم محذوف",
+                         code=code.get("code") or "", exists=bool(code), ago=ago,
+                         when=time.strftime("%Y-%m-%d %H:%M", time.localtime(int(item.get("at") or 0)))))
+    return rows
 
 
 # ----------------------------------------------------------------------------- notices to the apps
@@ -1177,6 +1265,27 @@ input::placeholder{color:var(--mut);opacity:.8}
 .nh{display:flex;align-items:center;gap:8px;font-size:13px}.nh form{margin-inline-start:auto}.nh .ib{width:36px;height:36px}
 .nb{border-radius:99px;padding:1px 10px;font-size:12.5px;font-weight:600;background:var(--prisoft);color:var(--pri)}
 .nb.k-warn{background:var(--warnsoft);color:var(--warn)}.nb.k-urgent{background:var(--badsoft);color:var(--bad)}
+.nav .cnt{position:absolute;top:6px;inset-inline-start:calc(50% + 6px);min-width:18px;height:18px;padding:0 5px;border-radius:99px;background:var(--bad);color:var(--badk);font-style:normal;font-size:11px;font-weight:700;line-height:18px;text-align:center;box-shadow:0 0 0 2px var(--card)}
+.sh{display:flex;align-items:center;gap:10px;justify-content:space-between}.sh .btn{margin:0}
+.btn.sm{min-height:38px;height:38px;padding:0 13px;font-size:13.5px}
+.ml{display:grid;gap:12px;margin-top:16px}
+.msg{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:14px;display:grid;gap:10px;min-width:0}
+.msg.new{border-color:var(--pri);box-shadow:inset 3px 0 0 var(--pri)}
+.mh{display:flex;gap:12px;align-items:center;min-width:0}
+.mh p{font-size:12.5px;color:var(--mut)}
+.nw{display:inline-block;vertical-align:middle;border-radius:99px;padding:0 9px;font-size:11.5px;font-weight:600;background:var(--prisoft);color:var(--pri)}
+.mt{white-space:pre-wrap;overflow-wrap:anywhere;font-size:15px;line-height:1.75}
+.mf{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px}
+.mi{display:block;border-radius:12px;overflow:hidden;border:1px solid var(--line);background:var(--soft);aspect-ratio:3/4}
+.mi img{width:100%;height:100%;object-fit:cover;display:block}
+.mv{grid-column:1/-1;width:100%;max-height:420px;border-radius:12px;background:#000}
+.mm summary{min-height:36px;margin:0}
+.md{display:grid;gap:6px;margin:8px 0;font-size:13px}.md div{display:flex;gap:10px}.md dt{color:var(--mut);min-width:64px}.md dd{margin:0;overflow-wrap:anywhere}
+.lg{margin:0;max-height:260px;overflow:auto;padding:10px 12px;border-radius:10px;background:var(--soft);border:1px solid var(--line);font:12px/1.6 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere;direction:rtl;text-align:start}
+.mr{border-radius:12px;background:var(--prisoft);padding:9px 12px;font-size:14px}.mr p{white-space:pre-wrap;overflow-wrap:anywhere;margin-top:2px}
+.ma{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start}.ma .btn{margin:0}.ma .ib{width:38px;height:38px}
+.ma form{margin:0}.rp{flex-basis:100%}.rp summary{list-style:none;cursor:pointer;display:inline-flex}.rp summary::-webkit-details-marker{display:none}
+.rp[open] summary{margin-bottom:10px}.rp .i{width:16px;height:16px}
 .nx{margin-top:6px;white-space:pre-wrap;overflow-wrap:anywhere}.nr{font-size:12.5px;margin-top:4px}
 .g2{display:grid;gap:12px;margin-top:12px}.g2 .card{margin:0}
 .ph{display:flex;gap:12px;align-items:center}
@@ -1243,6 +1352,7 @@ dialog[open]{animation:pop .22s cubic-bezier(.2,.8,.2,1)}
 .nav [aria-current]{background:var(--prisoft)}
 .nav [aria-current]::before{display:none}
 .nav .dot{position:static;margin-inline-start:-2px;box-shadow:none}
+.nav .cnt{position:static;box-shadow:none}
 main{padding-bottom:56px}
 .toasts{bottom:24px}
 .hero{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.15fr);align-items:center;gap:0 30px;padding:22px 26px;margin-top:22px}
@@ -1279,6 +1389,7 @@ main{padding-bottom:56px}
 <symbol id="i-sort" viewBox="0 0 24 24"><path d="M3 6h18M6 12h12M10 18h4"/></symbol>
 <symbol id="i-alert" viewBox="0 0 24 24"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01"/></symbol>
 <symbol id="i-lock" viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></symbol>
+<symbol id="i-msg" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></symbol>
 <symbol id="i-bell" viewBox="0 0 24 24"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9M13.73 21a2 2 0 0 1-3.46 0"/></symbol>
 <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></symbol>
 </defs></svg>
@@ -1289,6 +1400,7 @@ main{padding-bottom:56px}
 <button type="button" data-t="users" aria-current="page">{{ic('users')}}<span>المستخدمون</span></button>
 <button type="button" data-t="keys">{{ic('key')}}<span>المفاتيح</span>{% if nokey %}<i class="dot" title="لا يوجد مفتاح للكاتب الحالي"></i>{% endif %}</button>
 <button type="button" data-t="notices">{{ic('bell')}}<span>التنبيهات</span></button>
+<button type="button" data-t="support">{{ic('msg')}}<span>الرسائل</span>{% if unread %}<i class="cnt" title="{{unread}} رسالة جديدة">{{unread}}</i>{% endif %}</button>
 <button type="button" data-t="link">{{ic('link')}}<span>الرابط</span></button>
 </nav>
 <div class="acts"><button class="ib th" id="th" type="button" aria-label="تبديل المظهر"><span class="m">{{ic('moon')}}</span><span class="s">{{ic('sun')}}</span></button>
@@ -1407,6 +1519,27 @@ main{padding-bottom:56px}
 </div>
 </section>
 
+<section class="panel" id="p-support">
+<div class="card pad"><div class="sh"><h2>رسائل العملاء</h2>{% if unread %}<form method="post" action="/{{admin}}/support/read" data-toast="تم تعليم الكل كمقروء"><input type="hidden" name="id" value="0"><button class="btn ghost sm">تعليم الكل كمقروء</button></form>{% endif %}</div>
+<p class="mut">تصل من زر «مساعدة» في تطبيق كل مستخدم: وصف المشكلة، والصور أو الفيديو، ومعلومات الجهاز وآخر سطور السجل. ردّك يصل إلى تطبيقه في قائمة التنبيهات.</p></div>
+{% if messages %}<div class="ml">{% for m in messages %}{% set hue = ((m.code_id or '00')[:2]|int(0,16)) * 360 // 256 %}
+<article class="msg{{ '' if m.read else ' new' }}" id="m{{m.id}}">
+<div class="mh"><div class="av" style="--h:{{hue}}" aria-hidden="true">{{ (m.who or '؟')[:1] }}</div>
+<div class="nm"><h3>{{m.who}}{% if not m.read %} <span class="nw">جديدة</span>{% endif %}</h3><p>{% if m.code %}<bdi>{{m.code}}</bdi> · {% endif %}{{m.ago}} · <span dir="ltr">{{m.when}}</span></p></div></div>
+{% if m.text %}<p class="mt">{{m.text}}</p>{% endif %}
+{% if m.files %}<div class="mf">{% for f in m.files %}{% set url = '/' ~ admin ~ '/support/' ~ m.id ~ '/' ~ loop.index0 %}{% if (f.type or '').startswith('image/') %}<a class="mi" href="{{url}}" target="_blank" rel="noopener" aria-label="فتح الصورة {{loop.index}}"><img src="{{url}}" alt="صورة {{loop.index}} من المستخدم" loading="lazy"></a>{% else %}<video class="mv" src="{{url}}" controls preload="metadata" playsinline aria-label="فيديو {{loop.index}} من المستخدم"></video>{% endif %}{% endfor %}</div>{% endif %}
+{% if m.meta and (m.meta.version or m.meta.device or m.meta.log) %}<details class="acc mm"><summary class="axs"><span>معلومات الجهاز والسجل</span>{{ic('chev')}}</summary>
+<dl class="md">{% if m.meta.version %}<div><dt>الإصدار</dt><dd dir="ltr">{{m.meta.version}}</dd></div>{% endif %}{% if m.meta.device %}<div><dt>الجهاز</dt><dd dir="ltr">{{m.meta.device}}</dd></div>{% endif %}{% if m.meta.accounts %}<div><dt>حسابات X</dt><dd dir="ltr">{{m.meta.accounts}}</dd></div>{% endif %}</dl>
+{% if m.meta.log %}<pre class="lg">{{m.meta.log}}</pre>{% endif %}</details>{% endif %}
+{% for r in m.replies %}<div class="mr"><b>ردّك</b> <span class="mut" dir="ltr">{{r.when}}</span><p>{{r.text}}</p></div>{% endfor %}
+<div class="ma">
+{% if m.exists %}<details class="rp"><summary class="btn sm">{{ic('edit')}}ردّ</summary><form method="post" action="/{{admin}}/support/reply" data-toast="تم إرسال الرد"><input type="hidden" name="id" value="{{m.id}}"><textarea class="ta" name="text" rows="3" maxlength="1000" required placeholder="اكتب ردّك… يصل إلى تطبيقه في قائمة التنبيهات"></textarea><button class="btn wide" style="margin-top:10px">إرسال الرد</button></form></details>{% endif %}
+<form method="post" action="/{{admin}}/support/read"><input type="hidden" name="id" value="{{m.id}}"><button class="btn ghost sm">{{ 'تعليم كغير مقروءة' if m.read else 'تعليم كمقروءة' }}</button></form>
+<form method="post" action="/{{admin}}/support/delete" data-title="حذف الرسالة؟" data-confirm="تُحذف الرسالة ومرفقاتها نهائيًا." data-yes="حذف" data-kind="danger" data-toast="تم حذف الرسالة"><input type="hidden" name="id" value="{{m.id}}"><button class="ib" aria-label="حذف الرسالة">{{ic('trash')}}</button></form>
+</div></article>{% endfor %}</div>
+{% else %}<div class="empty" style="margin-top:16px"><h3>لا توجد رسائل بعد</h3><p>تظهر هنا رسائل المستخدمين من زر «مساعدة» في التطبيق.</p></div>{% endif %}
+</section>
+
 <section class="panel" id="p-link">
 <div class="card pad"><h2>رابط التطبيق</h2><p class="mut">انسخه كاملًا وضعه في التطبيق عند إعداد الخادم.</p>
 <code class="lk">{{app_link}}</code>
@@ -1458,7 +1591,7 @@ function take(k){var v=sget(k);if(v==null)return null;sset(k);var at=v.indexOf('
 function toast(m){var t=D.createElement('div');t.className='toast';t.textContent=m;$('.toasts').appendChild(t);setTimeout(function(){t.classList.add('out');setTimeout(function(){t.remove()},300)},2400)}
 
 /* sections */
-var TABS=['users','keys','notices','link'];
+var TABS=['users','keys','notices','support','link'];
 function tab(n,byUser){if(TABS.indexOf(n)<0)n='users';
 $$('.panel').forEach(function(p){p.classList.toggle('on',p.id==='p-'+n)});
 $$('.nav button').forEach(function(b){if(b.dataset.t===n)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current')});
@@ -1583,9 +1716,11 @@ def dashboard():
              "repost": sum(r["acts"]["repost"] for r in rows), "like": sum(r["acts"]["like"] for r in rows),
              "bookmark": sum(r["acts"]["bookmark"] for r in rows)}
     notices = notice_rows(codes)
+    messages = support_rows(codes)
     return render_template_string(
         DASHBOARD, admin=ADMIN, app_link=app_link(), codes=rows, stats=stats,
-        notices=notices, notice_kinds=NOTICE_KINDS,
+        notices=notices, notice_kinds=NOTICE_KINDS, messages=messages,
+        unread=sum(1 for m in messages if not m.get("read")),
         engine=keys["engine"], gemini_set=gemini_ready(keys), claude_set=bool(keys["claude_sealed"]),
         gemini_model=keys["gemini_model"], claude_model=keys["claude_model"],
         gemini_default=GEMINI_DEFAULT_MODEL, claude_default=CLAUDE_DEFAULT_MODEL,
@@ -1753,6 +1888,82 @@ def notice_delete():
     return redirect(f"/{ADMIN}")
 
 
+@app.get(f"/{ADMIN}/support/<int:message_id>/<int:index>")
+def support_file(message_id: int, index: int):
+    if not logged_in():
+        return "", 401
+    item = next((row for row in load_support()["items"] if row.get("id") == message_id), None)
+    files = (item or {}).get("files") or []
+    if not 0 <= index < len(files):
+        return "", 404
+    entry = files[index]
+    path = SUPPORT_DIR / str(message_id) / str(entry.get("stored") or "")
+    if not path.is_file():
+        return "", 404
+    response = send_file(path, mimetype=entry.get("type") or "application/octet-stream", conditional=True,
+                         download_name=f"{message_id}-{index + 1}.{path.suffix.lstrip('.')}")
+    response.headers["Cache-Control"] = "private, max-age=3600"
+    return response
+
+
+@app.post(f"/{ADMIN}/support/read")
+def support_read():
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    try:
+        message_id = int(request.form.get("id") or 0)
+    except ValueError:
+        return redirect(f"/{ADMIN}")
+    with LOCK:
+        data = load_support()
+        for item in data["items"]:
+            if message_id == 0 or item.get("id") == message_id:
+                item["read"] = True if message_id == 0 else not item.get("read")
+        save_support(data)
+    return redirect(f"/{ADMIN}")
+
+
+@app.post(f"/{ADMIN}/support/delete")
+def support_delete():
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    try:
+        message_id = int(request.form.get("id") or 0)
+    except ValueError:
+        return redirect(f"/{ADMIN}")
+    with LOCK:
+        data = load_support()
+        data["items"] = [item for item in data["items"] if item.get("id") != message_id]
+        save_support(data)
+    shutil.rmtree(SUPPORT_DIR / str(message_id), ignore_errors=True)
+    return redirect(f"/{ADMIN}")
+
+
+@app.post(f"/{ADMIN}/support/reply")
+def support_reply():
+    """The owner's answer: it goes to that user's app as a notice (its notifications list opens by itself)."""
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    try:
+        message_id = int(request.form.get("id") or 0)
+    except ValueError:
+        return redirect(f"/{ADMIN}")
+    text = (request.form.get("text") or "").strip()[:NOTICE_TEXT_MAX]
+    if not text:
+        return redirect(f"/{ADMIN}")
+    with LOCK:
+        data = load_support()
+        item = next((row for row in data["items"] if row.get("id") == message_id), None)
+        code_id = (item or {}).get("code_id") or ""
+        if item is not None:
+            item.setdefault("replies", []).append({"text": text, "at": int(time.time())})
+            item["read"] = True
+            save_support(data)
+    if code_id:
+        add_notice("ردّ على رسالتك: " + text, "info", code_id)
+    return redirect(f"/{ADMIN}")
+
+
 # ----------------------------------------------------------------------------- the app API (link protocol)
 def api_ok(**data):
     return jsonify(ok=True, **data)
@@ -1817,6 +2028,91 @@ def api_stats():
         return api_err("لم تصل الأرقام.")
     save_acts_of(row["id"], accounts)
     return api_ok()
+
+
+@app.post(f"/{API}/support-file")
+def api_support_file():
+    """One picture or short video for a message about to be sent; answers its file number for that message."""
+    body = request.get_json(silent=True) or {}
+    row = code_from_token(body.get("token"))
+    if not row:
+        return api_err("انتهت صلاحية الدخول أو أوقِف الرمز أو نُقل لجهاز آخر. أعد إدخال الرمز.", 200)
+    raw = body.get("data")
+    if not isinstance(raw, str) or not raw:
+        return api_err("لم يصل الملف.")
+    if len(raw) > SUPPORT_VIDEO_MAX * 4 // 3 + 8:
+        return api_err("الملف أكبر من المسموح (الفيديو حتى ٢٥ ميجابايت، والصورة حتى ٨).")
+    try:
+        data = base64.b64decode(raw, validate=True)
+    except ValueError:
+        return api_err("وصل الملف تالفًا. أعد المحاولة.")
+    mime, ext = sniff_media(data)
+    if not mime:
+        return api_err("نوع الملف غير مدعوم. أرفق صورة (JPG أو PNG) أو فيديو (MP4).")
+    if len(data) > (SUPPORT_IMAGE_MAX if mime.startswith("image/") else SUPPORT_VIDEO_MAX):
+        return api_err("الملف أكبر من المسموح (الفيديو حتى ٢٥ ميجابايت، والصورة حتى ٨).")
+    prune_support_pending()
+    file_id = secrets.token_hex(12)
+    folder = _support_pending_dir()
+    (folder / f"{file_id}.{ext}").write_bytes(data)
+    name = re.sub(r"[\x00-\x1f/\\]", "", str(body.get("name") or ""))[:80]
+    write_private_json(folder / f"{file_id}.json", {"code_id": row["id"], "type": mime, "ext": ext, "name": name,
+                                                    "size": len(data)})
+    return api_ok(file=file_id)
+
+
+@app.post(f"/{API}/support")
+def api_support():
+    """A message from a user's app (its «مساعدة» button), naming the files it sent before."""
+    body = request.get_json(silent=True) or {}
+    row = code_from_token(body.get("token"))
+    if not row:
+        return api_err("انتهت صلاحية الدخول أو أوقِف الرمز أو نُقل لجهاز آخر. أعد إدخال الرمز.", 200)
+    text = str(body.get("text") or "").strip()[:SUPPORT_TEXT_MAX]
+    ids = body.get("files") if isinstance(body.get("files"), list) else []
+    ids = [str(item) for item in ids if re.fullmatch(r"[0-9a-f]{24}", str(item))][:SUPPORT_FILES_MAX]
+    if not text and not ids:
+        return api_err("اكتب وصف المشكلة.")
+    meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+    meta = {key: str(meta.get(key) or "")[:limit] for key, limit in
+            (("version", 40), ("device", 300), ("accounts", 300), ("log", 12000))}
+    now = int(time.time())
+    folder = _support_pending_dir()
+    with LOCK:
+        data = load_support()
+        recent = sum(1 for item in data["items"] if item.get("code_id") == row["id"] and now - int(item.get("at") or 0) < 3600)
+        if recent >= SUPPORT_PER_HOUR:
+            return api_err("أرسلت رسائل كثيرة خلال ساعة. انتظر قليلًا ثم أعد الإرسال.")
+        files = []
+        for file_id in ids:
+            info = read_private_json(folder / f"{file_id}.json") or {}
+            if info.get("code_id") != row["id"]:
+                continue
+            source = folder / f"{file_id}.{info.get('ext')}"
+            if source.is_file():
+                files.append((source, info))
+        data["seq"] += 1
+        message_id = data["seq"]
+        target = SUPPORT_DIR / str(message_id)
+        target.mkdir(parents=True, exist_ok=True)
+        stored = []
+        for index, (source, info) in enumerate(files):
+            name = f"{index + 1}.{info.get('ext')}"
+            shutil.move(str(source), str(target / name))
+            try:
+                (folder / f"{source.stem}.json").unlink()
+            except OSError:
+                pass
+            stored.append({"stored": name, "type": info.get("type"), "name": info.get("name") or "",
+                           "size": int(info.get("size") or 0)})
+        data["items"].insert(0, {"id": message_id, "code_id": row["id"], "label": row.get("label") or "", "text": text,
+                                 "files": stored, "meta": meta, "at": now, "read": False, "replies": []})
+        dropped = data["items"][SUPPORT_MAX:]
+        del data["items"][SUPPORT_MAX:]
+        save_support(data)
+    for item in dropped:
+        shutil.rmtree(SUPPORT_DIR / str(item.get("id")), ignore_errors=True)
+    return api_ok(id=message_id)
 
 
 @app.post(f"/{API}/notices")

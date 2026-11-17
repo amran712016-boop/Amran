@@ -33,6 +33,7 @@ import android.view.WindowManager;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.URLUtil;
+import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
@@ -109,6 +110,8 @@ public class MainActivity extends Activity {
     boolean started;                      // on the screen (between onStart and onStop)
     String reportCopy = "";
     NoticeCenter notices;                 // التنبيهات داخل التطبيق (الجرس والقائمة المنبثقة)
+    static final int PICK_FILES = 41;     // «مساعدة» في الصفحة: اختيار صور أو فيديو من الجوال
+    ValueCallback<Uri[]> fileCallback;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -606,7 +609,12 @@ public class MainActivity extends Activity {
         settings.setSupportMultipleWindows(false);
         settings.setMediaPlaybackRequiresUserGesture(true);
         view.setBackgroundColor(PAPER);
-        view.setWebChromeClient(new WebChromeClient());        // (the page's own «هل أنت متأكد؟» questions show)
+        view.setWebChromeClient(new WebChromeClient() {         // (the page's own «هل أنت متأكد؟» questions show)
+            @Override
+            public boolean onShowFileChooser(WebView web, ValueCallback<Uri[]> callback, FileChooserParams params) {
+                return chooseFiles(callback, params);
+            }
+        });
         view.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView web, WebResourceRequest request) {
@@ -651,6 +659,63 @@ public class MainActivity extends Activity {
         view.setDownloadListener((url, agent, disposition, mime, length) -> download(url, agent, disposition, mime));
         view.addJavascriptInterface(new AccountsBridge(), "GroupsNative");
         return view;
+    }
+
+    /** A file field on the page («مساعدة»: pictures or a short video): the phone's own picker, its choice back to the page. */
+    boolean chooseFiles(ValueCallback<Uri[]> callback, WebChromeClient.FileChooserParams params) {
+        if (fileCallback != null) {
+            fileCallback.onReceiveValue(null);
+        }
+        fileCallback = callback;
+        java.util.List<String> types = new java.util.ArrayList<>();
+        for (String accept : params.getAcceptTypes()) {
+            for (String one : String.valueOf(accept).split(",")) {
+                if (!one.trim().isEmpty() && one.contains("/")) {
+                    types.add(one.trim());
+                }
+            }
+        }
+        Intent pick = new Intent(Intent.ACTION_GET_CONTENT);
+        pick.addCategory(Intent.CATEGORY_OPENABLE);
+        pick.setType(types.size() == 1 ? types.get(0) : "*/*");
+        if (types.size() > 1) {
+            pick.putExtra(Intent.EXTRA_MIME_TYPES, types.toArray(new String[0]));
+        }
+        pick.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, params.getMode() == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE);
+        try {
+            startActivityForResult(Intent.createChooser(pick, "اختر صورًا أو فيديو"), PICK_FILES);
+            return true;
+        } catch (ActivityNotFoundException e) {
+            fileCallback = null;
+            Toast.makeText(this, "لا يوجد في الجوال تطبيق لاختيار الملفات.", Toast.LENGTH_SHORT).show();
+            return false;
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        if (requestCode != PICK_FILES) {
+            super.onActivityResult(requestCode, resultCode, data);
+            return;
+        }
+        ValueCallback<Uri[]> callback = fileCallback;
+        fileCallback = null;
+        if (callback == null) {
+            return;
+        }
+        Uri[] picked = null;
+        if (resultCode == RESULT_OK && data != null) {
+            ClipData clip = data.getClipData();
+            if (clip != null && clip.getItemCount() > 0) {
+                picked = new Uri[clip.getItemCount()];
+                for (int i = 0; i < clip.getItemCount(); i++) {
+                    picked[i] = clip.getItemAt(i).getUri();
+                }
+            } else if (data.getData() != null) {
+                picked = new Uri[] {data.getData()};
+            }
+        }
+        callback.onReceiveValue(picked);
     }
 
     LinearLayout buildReport() {

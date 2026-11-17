@@ -405,6 +405,23 @@ EMBEDDED_PAGE = r'''<!doctype html>
     .usage-table .empty { color: var(--muted); text-align: center; }
     .usage-foot { display: flex; gap: 8px; margin-top: 12px; }
     .usage-foot .btn { flex: 1; }
+    /* «مساعدة»: describe a problem to the program's owner, with pictures or a short video. */
+    .help-sheet { width: min(460px, 100%); }
+    .help-label { display: block; margin: 2px 0 6px; font-size: 13px; font-weight: 600; }
+    .help-text { width: 100%; min-height: 120px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper);
+      color: var(--ink); font: inherit; font-size: 15px; line-height: 1.7; resize: vertical; }
+    .help-text:focus { outline: none; border-color: var(--pine); box-shadow: 0 0 0 3px rgba(47, 91, 234, 0.16); }
+    .help-attach { width: 100%; margin-top: 10px; }
+    .help-list { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 8px; }
+    .help-list li { display: flex; align-items: center; gap: 10px; padding: 6px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); }
+    .help-list .thumb { width: 46px; height: 46px; flex: none; border-radius: 9px; object-fit: cover; background: var(--line); display: grid; place-items: center; font-size: 20px; }
+    .help-list .name { flex: 1; min-width: 0; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .help-list .name small { display: block; color: var(--muted); font-size: 12px; }
+    .help-list .bar { height: 3px; margin-top: 4px; border-radius: 9px; background: var(--line); overflow: hidden; }
+    .help-list .bar i { display: block; height: 100%; width: 0; background: var(--pine); transition: width .2s; }
+    .help-status { margin: 10px 0 0; padding: 9px 12px; border-radius: 10px; font-size: 13px; background: var(--paper); }
+    .help-status.is-bad { color: var(--clay); background: var(--clay-bg); }
+    .help-status.is-ok { color: var(--ok-ink); background: var(--ok-bg); }
     /* «تسجيل الدخول»: the steps shown before the browser opens. */
     .guide-steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
     .guide-steps li { display: flex; align-items: flex-start; gap: 10px; padding: 10px; border-radius: 12px; background: var(--paper); }
@@ -1015,6 +1032,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
             <bdi id="usage-cost" class="usage-cost" dir="ltr">$0.00</bdi>
           </button>
           <button id="phone-check" class="btn btn-ghost" type="button">اختبار قدرة الهاتف</button>
+          {% if control_on %}<button id="help-open" class="btn btn-ghost help-open" type="button" aria-haspopup="dialog">؟ مساعدة</button>{% endif %}
         </div>
       </div>
       <ol class="counts" aria-label="الإجراءات الناجحة">
@@ -1246,6 +1264,26 @@ EMBEDDED_PAGE = r'''<!doctype html>
     </div>
   </div>
 </div>
+{% if control_on %}<div id="help-box" class="pc-backdrop" hidden>
+  <div class="usage-sheet help-sheet" role="dialog" aria-modal="true" aria-labelledby="help-title">
+    <div class="usage-head">
+      <b id="help-title">المساعدة</b>
+      <button id="help-close" class="usage-x" type="button" aria-label="إغلاق">×</button>
+    </div>
+    <p class="usage-note">صف المشكلة التي تواجهك، وأرفق صورًا أو فيديو قصيرًا إن أمكن. تصل رسالتك إلى صاحب البرنامج، ويصلك ردّه في قائمة التنبيهات.</p>
+    <label class="help-label" for="help-text">وصف المشكلة</label>
+    <textarea id="help-text" class="help-text" rows="5" maxlength="2000" placeholder="مثال: المهمة تتوقف عند التغريدة ١٣ وتظهر رسالة «تعذّر فتح التغريدة»."></textarea>
+    <input id="help-files" type="file" accept="image/*,video/*" multiple hidden>
+    <button id="help-attach" class="btn btn-ghost help-attach" type="button">📎 إرفاق صور أو فيديو</button>
+    <ul id="help-list" class="help-list" hidden></ul>
+    <p class="hint">حتى ٥ ملفات: الصورة حتى ٨ ميجابايت، والفيديو القصير حتى ٢٥ ميجابايت. يُرفق تلقائيًا إصدار التطبيق ونوع الجهاز وآخر سطور السجل، لتسهيل معرفة المشكلة.</p>
+    <p id="help-status" class="help-status" role="status" hidden></p>
+    <div class="usage-foot">
+      <button id="help-cancel" class="btn btn-ghost" type="button">إلغاء</button>
+      <button id="help-send" class="btn btn-pine" type="button">إرسال</button>
+    </div>
+  </div>
+</div>{% endif %}
 <div id="usage-box" class="pc-backdrop" hidden>
   <div class="usage-sheet" role="dialog" aria-modal="true" aria-labelledby="usage-title">
     <div class="usage-head">
@@ -2551,6 +2589,162 @@ EMBEDDED_PAGE = r'''<!doctype html>
   }
   loadAdminNotices();
   setInterval(loadAdminNotices, 45000);
+
+  // «مساعدة»: وصف المشكلة مع صور أو فيديو قصير، يُرسل إلى صاحب البرنامج (يصل إلى «الرسائل» في لوحة التحكّم).
+  const helpBox = document.getElementById("help-box");
+  if (helpBox) {
+    const helpText = document.getElementById("help-text");
+    const helpInput = document.getElementById("help-files");
+    const helpList = document.getElementById("help-list");
+    const helpStatus = document.getElementById("help-status");
+    const helpSend = document.getElementById("help-send");
+    const helpAttach = document.getElementById("help-attach");
+    const HELP_MAX_FILES = 5, HELP_IMAGE_MB = 8, HELP_VIDEO_MB = 25;
+    let helpFiles = [];
+    let helpBusy = false;
+    const sizeText = (bytes) => bytes >= 1048576 ? (bytes / 1048576).toFixed(1) + " ميجابايت" : Math.max(1, Math.round(bytes / 1024)) + " كيلوبايت";
+    function helpSay(text, kind) {
+      helpStatus.textContent = text || "";
+      helpStatus.className = "help-status" + (kind ? " " + kind : "");
+      helpStatus.hidden = !text;
+    }
+    function renderHelpFiles() {
+      helpList.replaceChildren();
+      helpFiles.forEach((entry, index) => {
+        const row = document.createElement("li");
+        let thumb;
+        if (entry.url) {
+          thumb = document.createElement("img");
+          thumb.src = entry.url;
+          thumb.alt = "";
+        } else {
+          thumb = document.createElement("span");
+          thumb.textContent = "🎬";
+        }
+        thumb.className = "thumb";
+        const name = document.createElement("div");
+        name.className = "name";
+        name.textContent = entry.file.name || (entry.url ? "صورة" : "فيديو");
+        const small = document.createElement("small");
+        small.textContent = sizeText(entry.file.size);
+        const bar = document.createElement("div");
+        bar.className = "bar";
+        entry.bar = document.createElement("i");
+        bar.appendChild(entry.bar);
+        name.append(small, bar);
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "usage-x";
+        remove.textContent = "×";
+        remove.setAttribute("aria-label", "إزالة الملف");
+        remove.disabled = helpBusy;
+        remove.addEventListener("click", () => {
+          if (entry.url) URL.revokeObjectURL(entry.url);
+          helpFiles.splice(index, 1);
+          renderHelpFiles();
+        });
+        row.append(thumb, name, remove);
+        helpList.appendChild(row);
+      });
+      helpList.hidden = !helpFiles.length;
+      helpAttach.disabled = helpBusy || helpFiles.length >= HELP_MAX_FILES;
+    }
+    function openHelp() {
+      helpBox.hidden = false;
+      if (!helpBusy) helpSay("");
+      setTimeout(() => helpText.focus(), 50);
+    }
+    function closeHelp() { helpBox.hidden = true; }
+    function resetHelp() {
+      helpFiles.forEach((entry) => entry.url && URL.revokeObjectURL(entry.url));
+      helpFiles = [];
+      helpText.value = "";
+      renderHelpFiles();
+    }
+    document.getElementById("help-open").addEventListener("click", openHelp);
+    document.getElementById("help-close").addEventListener("click", closeHelp);
+    document.getElementById("help-cancel").addEventListener("click", closeHelp);
+    helpBox.addEventListener("click", (event) => { if (event.target === helpBox) closeHelp(); });
+    helpAttach.addEventListener("click", () => helpInput.click());
+    helpInput.addEventListener("change", () => {
+      const problems = [];
+      for (const file of Array.from(helpInput.files || [])) {
+        const video = (file.type || "").startsWith("video/");
+        const image = (file.type || "").startsWith("image/");
+        if (helpFiles.length >= HELP_MAX_FILES) { problems.push("الحد الأقصى " + HELP_MAX_FILES + " ملفات."); break; }
+        if (!video && !image) { problems.push("«" + file.name + "» ليس صورة ولا فيديو."); continue; }
+        if (file.size > (video ? HELP_VIDEO_MB : HELP_IMAGE_MB) * 1048576) {
+          problems.push("«" + file.name + "» أكبر من " + (video ? HELP_VIDEO_MB + " ميجابايت. قصّ الفيديو أو صوّر مقطعًا أقصر." : HELP_IMAGE_MB + " ميجابايت."));
+          continue;
+        }
+        helpFiles.push({file, url: image ? URL.createObjectURL(file) : ""});
+      }
+      helpInput.value = "";
+      renderHelpFiles();
+      helpSay(problems.join(" "), problems.length ? "is-bad" : "");
+    });
+    function uploadHelpFile(entry) {
+      return new Promise((resolve, reject) => {
+        const request = new XMLHttpRequest();
+        request.open("POST", apiRoot + "/support/upload");
+        request.setRequestHeader("X-CSRF-Token", csrf);
+        request.setRequestHeader("X-File-Type", entry.file.type || "");
+        request.setRequestHeader("X-File-Name", encodeURIComponent(entry.file.name || ""));
+        request.upload.onprogress = (event) => {
+          if (entry.bar && event.lengthComputable) entry.bar.style.width = Math.round((event.loaded / event.total) * 100) + "%";
+        };
+        request.onload = () => {
+          let data = {};
+          try { data = JSON.parse(request.responseText); } catch (_) {}
+          if (request.status === 200 && data.success && data.id) resolve(data.id);
+          else reject(new Error(data.message || "تعذّر تجهيز الملف «" + (entry.file.name || "") + "»."));
+        };
+        request.onerror = () => reject(new Error("تعذّر تجهيز الملف «" + (entry.file.name || "") + "»."));
+        request.send(entry.file);
+      });
+    }
+    async function waitForHelpSend(id) {
+      for (;;) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        let data;
+        try {
+          const response = await fetchWithTimeout(apiRoot + "/support/status", {headers: {"X-CSRF-Token": csrf}, cache: "no-store"});
+          data = await response.json();
+        } catch (_) { continue; }
+        if (!data || data.id !== id) return {state: "failed", message: "انقطع الإرسال. أعد المحاولة."};
+        if (data.state === "sending") { helpSay(data.message, ""); continue; }
+        return data;
+      }
+    }
+    helpSend.addEventListener("click", async () => {
+      const text = helpText.value.trim();
+      if (text.length < 5 && !helpFiles.length) { helpSay("اكتب وصفًا للمشكلة (كلمتان على الأقل).", "is-bad"); helpText.focus(); return; }
+      helpBusy = true;
+      helpSend.disabled = true;
+      renderHelpFiles();
+      try {
+        const ids = [];
+        for (let i = 0; i < helpFiles.length; i += 1) {
+          helpSay("يجهّز الملف " + (i + 1) + " من " + helpFiles.length + "…", "");
+          ids.push(await uploadHelpFile(helpFiles[i]));
+        }
+        helpSay("يرسل الرسالة…", "");
+        const started = await postJson("/support/send", {text, files: ids});
+        if (!started.success) throw new Error(started.message || "تعذّر الإرسال.");
+        const done = await waitForHelpSend(started.id);
+        if (done.state !== "done") throw new Error(done.message || "تعذّر الإرسال.");
+        resetHelp();
+        closeHelp();
+        showNotice(done.message, true);
+      } catch (error) {
+        helpSay(error.message || "تعذّر الإرسال. أعد المحاولة.", "is-bad");
+      } finally {
+        helpBusy = false;
+        helpSend.disabled = false;
+        renderHelpFiles();
+      }
+    });
+  }
   document.addEventListener("visibilitychange", () => { if (!document.hidden) loadAdminNotices(); });
   loadActionCounts();
   setInterval(loadActionCounts, 5000);
@@ -9491,7 +9685,7 @@ def valid_auth_token(value: str) -> bool:
 
 @app.before_request
 def limit_request_size():
-    if (request.content_length or 0) > SMALL_REQUEST_BYTES and request.endpoint != "group_run_endpoint":
+    if (request.content_length or 0) > SMALL_REQUEST_BYTES and request.endpoint not in ("group_run_endpoint", "support_upload_endpoint"):
         abort(413)
 
 
@@ -12717,6 +12911,156 @@ def notices_endpoint(access_path: str):
     if not csrf_matches(request.headers.get("X-CSRF-Token", "")):
         return jsonify(success=False, message="انتهت صلاحية الصفحة. أعد تحميلها ثم حاول مجددًا."), 400
     return jsonify(success=True, notices=control_notices())
+
+
+# «مساعدة»: رسالة من المستخدم إلى صاحب البرنامج (تصل إلى «الرسائل» في لوحة التحكّم) فيها وصف المشكلة وصور أو فيديو
+# قصير. الصفحة تسلّم الملفات هنا واحدًا واحدًا (support/upload)، ثم ترسل الرسالة (support/send) فتُرفع الملفات إلى
+# الخادم واحدًا واحدًا ثم الرسالة، في الخلفية، وتسأل الصفحة عن الحال (support/status).
+SUPPORT_OUTBOX = DATA_DIR / "support-outbox"
+SUPPORT_IMAGE_MAX = 8 * 1024 * 1024
+SUPPORT_VIDEO_MAX = 25 * 1024 * 1024
+SUPPORT_FILES_MAX = 5
+_support_lock = threading.Lock()
+_support_state = {"id": "", "state": "idle", "message": ""}
+
+
+def _media_kind(head: bytes) -> str:
+    """"image" or "video" by the file's own first bytes, or "" (the control server checks again)."""
+    if head.startswith(b"\xff\xd8\xff") or head.startswith(b"\x89PNG") or head[:6] in (b"GIF87a", b"GIF89a") \
+            or (head[:4] == b"RIFF" and head[8:12] == b"WEBP"):
+        return "image"
+    if head[4:8] == b"ftyp" and head[8:12] not in (b"heic", b"heix", b"mif1", b"msf1"):
+        return "video"
+    if head.startswith(b"\x1a\x45\xdf\xa3"):
+        return "video"
+    return ""
+
+
+def _support_set(**fields) -> None:
+    with _support_lock:
+        _support_state.update(fields)
+
+
+def support_meta() -> dict:
+    """What is added to the message by itself, to help find the problem: the version, the phone, the accounts and
+    the last lines of the log."""
+    meta = {"version": shown_version(), "device": "", "log": "",
+            "accounts": ", ".join("@" + name for name in sorted(set(account_names.values())) if name)}
+    if IN_APP:
+        try:
+            import ggapp
+            meta["device"] = str(ggapp.device_line())
+            meta["log"] = (str(ggapp.log_text(60)) + "\n\n" + str(ggapp.general_log_text(40)))[-12000:]
+        except Exception:
+            pass
+    return meta
+
+
+def _support_send(send_id: str, text: str, ids: list[str]) -> None:
+    token = _current_token()
+    try:
+        if not token:
+            raise RuntimeError("التطبيق غير مُفعّل. أدخل رمز الدخول.")
+        sent = []
+        for number, file_id in enumerate(ids, 1):
+            _support_set(state="sending", message=f"يرفع الملف {number} من {len(ids)}… (قد يأخذ وقتًا مع الفيديو)")
+            path = SUPPORT_OUTBOX / file_id
+            name = (read_private_json(SUPPORT_OUTBOX / (file_id + ".json")) or {}).get("name") or ""
+            body = {"token": token, "name": name, "data": base64.b64encode(path.read_bytes()).decode("ascii")}
+            sent.append(str(_control_request("support-file", body, seconds=300).get("file") or ""))
+        _support_set(state="sending", message="يرسل الرسالة…")
+        _control_request("support", {"token": token, "text": text, "files": [f for f in sent if f], "meta": support_meta()},
+                         seconds=60)
+        _support_set(state="done", message="وصلت رسالتك إلى صاحب البرنامج. يصلك ردّه في قائمة التنبيهات.")
+        print("أُرسلت رسالة «مساعدة» إلى صاحب البرنامج.", flush=True)
+    except (RuntimeError, OSError) as exc:
+        _support_set(state="failed", message="لم تُرسل الرسالة: " + (str(exc) or "خطأ غير متوقع."))
+    finally:
+        for file_id in ids:
+            for path in (SUPPORT_OUTBOX / file_id, SUPPORT_OUTBOX / (file_id + ".json")):
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+
+
+@app.post("/<access_path>/support/upload")
+def support_upload_endpoint(access_path: str):
+    """One picture or video for «مساعدة», as the request's whole body (it is larger than the other requests)."""
+    if not hmac.compare_digest(access_path, ACCESS_PATH):
+        abort(404)
+    if not csrf_matches(request.headers.get("X-CSRF-Token", "")):
+        return jsonify(success=False, message="انتهت صلاحية الصفحة. أعد تحميلها ثم حاول مجددًا."), 400
+    if not control_configured():
+        return jsonify(success=False, message="المساعدة غير متاحة في هذه النسخة."), 400
+    video = (request.headers.get("X-File-Type") or "").startswith("video/")
+    limit = SUPPORT_VIDEO_MAX if video else SUPPORT_IMAGE_MAX
+    size = request.content_length or 0
+    if size <= 0:
+        return jsonify(success=False, message="لم يصل الملف."), 400
+    if size > limit:
+        return jsonify(success=False, message=f"الملف أكبر من {limit // 1048576} ميجابايت."), 413
+    SUPPORT_OUTBOX.mkdir(parents=True, exist_ok=True)
+    cutoff = time.time() - 3 * 3600                     # (files left by a send that never came)
+    for old in SUPPORT_OUTBOX.glob("*"):
+        try:
+            if old.stat().st_mtime < cutoff:
+                old.unlink()
+        except OSError:
+            pass
+    file_id = secrets.token_hex(12)
+    path = SUPPORT_OUTBOX / file_id
+    stream = request.environ.get("wsgi.input")
+    left = size
+    with open(path, "wb") as out:
+        while left > 0:
+            chunk = stream.read(min(65536, left)) if stream is not None else b""
+            if not chunk:
+                break
+            out.write(chunk)
+            left -= len(chunk)
+    with open(path, "rb") as handle:
+        head = handle.read(16)
+    if left > 0 or not _media_kind(head):
+        path.unlink(missing_ok=True)
+        return jsonify(success=False, message="وصل الملف ناقصًا أو بنوع غير مدعوم. أرفق صورة أو فيديو MP4."), 400
+    from urllib.parse import unquote
+    name = unquote(request.headers.get("X-File-Name") or "")[:80]
+    write_private_json(SUPPORT_OUTBOX / (file_id + ".json"), {"name": name})
+    return jsonify(success=True, id=file_id)
+
+
+@app.post("/<access_path>/support/send")
+def support_send_endpoint(access_path: str):
+    if not hmac.compare_digest(access_path, ACCESS_PATH):
+        abort(404)
+    data = request.get_json(silent=True) or {}
+    if not csrf_ok(data):
+        return jsonify(success=False, message="انتهت صلاحية الصفحة. أعد تحميلها ثم حاول مجددًا."), 400
+    if not control_configured():
+        return jsonify(success=False, message="المساعدة غير متاحة في هذه النسخة."), 400
+    text = str(data.get("text") or "").strip()[:2000]
+    ids = [str(item) for item in (data.get("files") or []) if re.fullmatch(r"[0-9a-f]{24}", str(item))][:SUPPORT_FILES_MAX]
+    ids = [item for item in ids if (SUPPORT_OUTBOX / item).is_file()]
+    if not text and not ids:
+        return jsonify(success=False, message="اكتب وصف المشكلة."), 400
+    with _support_lock:
+        if _support_state["state"] == "sending":
+            return jsonify(success=False, message="رسالة سابقة تُرسل الآن. انتظر انتهاءها."), 409
+        send_id = secrets.token_hex(8)
+        _support_state.update(id=send_id, state="sending", message="يبدأ الإرسال…")
+    threading.Thread(target=_support_send, args=(send_id, text, ids), name="support-send", daemon=True).start()
+    return jsonify(success=True, id=send_id)
+
+
+@app.get("/<access_path>/support/status")
+def support_status_endpoint(access_path: str):
+    if not hmac.compare_digest(access_path, ACCESS_PATH):
+        abort(404)
+    if not csrf_matches(request.headers.get("X-CSRF-Token", "")):
+        return jsonify(success=False, message="انتهت صلاحية الصفحة."), 400
+    with _support_lock:
+        return jsonify(success=True, **_support_state)
 
 
 # أرقام التنفيذ (كما في رأس الصفحة) لكل حساب X تُرسل إلى خادم التحكّم ليراها المالك عند كل مستخدم. تُرسل قيمها

@@ -26,6 +26,7 @@ Useful environment variables (all optional):
 from __future__ import annotations
 
 import base64
+import io
 import hashlib
 import hmac
 import json
@@ -35,6 +36,7 @@ import secrets
 import shutil
 import ssl
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -53,6 +55,7 @@ USAGE_PATH = DATA_DIR / "usage.json"
 NOTICES_PATH = DATA_DIR / "notices.json"
 ACTS_PATH = DATA_DIR / "acts.json"
 SUPPORT_PATH = DATA_DIR / "support.json"
+MOVE_PATH = DATA_DIR / "move.json"
 SUPPORT_DIR = DATA_DIR / "support"
 CERT_PATH = DATA_DIR / "server.crt"
 CERT_KEY_PATH = DATA_DIR / "server.key"
@@ -99,6 +102,219 @@ def hash_password(password: str, salt: str) -> str:
     return hashlib.scrypt(password.encode("utf-8"), salt=bytes.fromhex(salt), n=1 << 14, r=8, p=1, dklen=32).hex()
 
 
+# ---- Ed25519 (RFC 8032), pure Python: signs and checks the «ربط» move order (no crypto package needed) ----
+_ED_P = 2 ** 255 - 19
+_ED_L = 2 ** 252 + 27742317777372353535851937790883648493
+_ED_D = -121665 * pow(121666, _ED_P - 2, _ED_P) % _ED_P
+_ED_I = pow(2, (_ED_P - 1) // 4, _ED_P)
+
+
+def _ed_xrecover(y: int) -> int:
+    xx = (y * y - 1) * pow(_ED_D * y * y + 1, _ED_P - 2, _ED_P)
+    x = pow(xx, (_ED_P + 3) // 8, _ED_P)
+    if (x * x - xx) % _ED_P:
+        x = x * _ED_I % _ED_P
+    return _ED_P - x if x & 1 else x
+
+
+_ED_BY = 4 * pow(5, _ED_P - 2, _ED_P) % _ED_P
+_ED_BX = _ed_xrecover(_ED_BY)
+_ED_B = (_ED_BX, _ED_BY, 1, _ED_BX * _ED_BY % _ED_P)
+
+
+def _ed_add(p, q):
+    x1, y1, z1, t1 = p
+    x2, y2, z2, t2 = q
+    a = (y1 - x1) * (y2 - x2) % _ED_P
+    b = (y1 + x1) * (y2 + x2) % _ED_P
+    c = t1 * 2 * _ED_D * t2 % _ED_P
+    d = z1 * 2 * z2 % _ED_P
+    e, f, g, h = b - a, d - c, d + c, b + a
+    return (e * f % _ED_P, g * h % _ED_P, f * g % _ED_P, e * h % _ED_P)
+
+
+def _ed_mul(s: int, p):
+    q = (0, 1, 1, 0)
+    while s > 0:
+        if s & 1:
+            q = _ed_add(q, p)
+        p = _ed_add(p, p)
+        s >>= 1
+    return q
+
+
+def _ed_encode(p) -> bytes:
+    x, y, z, _ = p
+    zi = pow(z, _ED_P - 2, _ED_P)
+    x, y = x * zi % _ED_P, y * zi % _ED_P
+    return (y | ((x & 1) << 255)).to_bytes(32, "little")
+
+
+def _ed_decode(s: bytes):
+    y = int.from_bytes(s, "little")
+    sign, y = y >> 255, y & ((1 << 255) - 1)
+    if y >= _ED_P:
+        raise ValueError("bad point")
+    x = _ed_xrecover(y)
+    if (x & 1) != sign:
+        x = _ED_P - x
+    if (-x * x + y * y - 1 - _ED_D * x * x * y * y) % _ED_P or (x == 0 and sign):
+        raise ValueError("bad point")
+    return (x, y, 1, x * y % _ED_P)
+
+
+def _ed_secret(seed: bytes) -> tuple[int, bytes]:
+    h = hashlib.sha512(seed).digest()
+    a = int.from_bytes(h[:32], "little")
+    a = (a & ((1 << 254) - 8)) | (1 << 254)
+    return a, h[32:]
+
+
+def ed_public(seed: bytes) -> bytes:
+    return _ed_encode(_ed_mul(_ed_secret(seed)[0], _ED_B))
+
+
+def ed_sign(seed: bytes, message: bytes) -> bytes:
+    a, prefix = _ed_secret(seed)
+    public = _ed_encode(_ed_mul(a, _ED_B))
+    r = int.from_bytes(hashlib.sha512(prefix + message).digest(), "little") % _ED_L
+    big_r = _ed_encode(_ed_mul(r, _ED_B))
+    k = int.from_bytes(hashlib.sha512(big_r + public + message).digest(), "little") % _ED_L
+    return big_r + ((r + k * a) % _ED_L).to_bytes(32, "little")
+
+
+def ed_verify(public: bytes, message: bytes, signature: bytes) -> bool:
+    if len(public) != 32 or len(signature) != 64:
+        return False
+    try:
+        point_a, point_r = _ed_decode(public), _ed_decode(signature[:32])
+    except ValueError:
+        return False
+    s = int.from_bytes(signature[32:], "little")
+    if s >= _ED_L:
+        return False
+    k = int.from_bytes(hashlib.sha512(signature[:32] + public + message).digest(), "little") % _ED_L
+    return _ed_encode(_ed_mul(s, _ED_B)) == _ed_encode(_ed_add(point_r, _ed_mul(k, point_a)))
+
+
+# ---- «الربط»: moving the apps to a new server ----
+# A key pair made from the control panel's password alone (the same on any server with the same password): the
+# apps keep its public half (sent with every check), and a move order signed with it is the only one they follow.
+# Its private half is never kept: it is made again from the password when «ربط» is pressed.
+# The order travels through a public relay (ntfy.sh), encrypted, on a topic named from the public key; apps that
+# cannot reach their server read it there, check the signature, then move.
+MOVE_SALT = b"groups-control-move-v1"
+MOVE_RELAY = (os.environ.get("CONTROL_RELAY") or "https://ntfy.sh").rstrip("/")
+MOVE_REPEAT_HOURS = 6                 # the order is sent again this often (the relay keeps messages ~12 h)
+MOVE_REPEAT_DAYS = 90                 # and for this long, for phones that were off
+
+
+def move_seed(password: str) -> bytes:
+    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), MOVE_SALT, 600_000, 32)
+
+
+def move_topic(public: bytes) -> str:
+    return "gg" + hashlib.sha256(b"gg-relay|" + public).hexdigest()[:30]
+
+
+def move_code(public_hex: str) -> str:
+    """A short code for the owner to compare between the old and the new server (same password, same code)."""
+    if not public_hex:
+        return ""
+    digest = hashlib.sha256(b"gg-code|" + bytes.fromhex(public_hex)).hexdigest()[:8].upper()
+    return digest[:4] + "-" + digest[4:]
+
+
+def _move_stream(public: bytes, nonce: bytes, length: int) -> bytes:
+    key = hashlib.sha256(b"gg-move-enc|" + public).digest()
+    out = bytearray()
+    counter = 0
+    while len(out) < length:
+        out += hashlib.sha256(key + nonce + counter.to_bytes(4, "big")).digest()
+        counter += 1
+    return bytes(out[:length])
+
+
+def move_seal(seed: bytes, link: str, at: int) -> str:
+    public = ed_public(seed)
+    signature = ed_sign(seed, f"gg-move|{link}|{at}".encode("utf-8"))
+    plain = json.dumps({"v": 1, "link": link, "at": at, "sig": signature.hex()}, separators=(",", ":")).encode("utf-8")
+    nonce = secrets.token_bytes(16)
+    body = bytes(a ^ b for a, b in zip(plain, _move_stream(public, nonce, len(plain))))
+    return "ggmv1." + base64.urlsafe_b64encode(nonce + body).decode("ascii")
+
+
+def move_publish(record: str, public: bytes) -> str:
+    """Puts the order on the relay; "" when done, else why not."""
+    try:
+        request_ = urllib.request.Request(f"{MOVE_RELAY}/{move_topic(public)}", data=record.encode("ascii"), method="POST",
+                                          headers={"User-Agent": "groups-control/1.0", "Content-Type": "text/plain"})
+        with urllib.request.urlopen(request_, timeout=20) as answer:
+            answer.read(4096)
+        return ""
+    except Exception as exc:
+        return f"{type(exc).__name__}: {str(exc)[:120]}"
+
+
+def load_move() -> dict:
+    data = read_private_json(MOVE_PATH) or {}
+    return data if isinstance(data, dict) else {}
+
+
+def republish_moves_in_background() -> None:
+    while True:
+        move = load_move()
+        now = int(time.time())
+        if move.get("record") and move.get("public") and now < int(move.get("until") or 0) \
+                and now - int(move.get("published") or 0) >= MOVE_REPEAT_HOURS * 3600 - 60:
+            if not move_publish(move["record"], bytes.fromhex(move["public"])):
+                move["published"] = now
+                write_private_json(MOVE_PATH, move)
+        time.sleep(600)
+
+
+# ---- «نسخة احتياطية»: all the server's data in one file, encrypted with the control panel's password ----
+BACKUP_FILES = ("secrets.json", "codes.json", "keys.json", "usage.json", "notices.json", "acts.json", "support.json",
+                "move.json", "server.crt", "server.key")
+BACKUP_MAGIC = b"GGBAK1"
+
+
+def _backup_keys(password: str, salt: bytes) -> tuple[bytes, bytes]:
+    key = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 300_000, 64)
+    return key[:32], key[32:]
+
+
+def backup_pack(password: str) -> bytes:
+    files = {}
+    for name in BACKUP_FILES:
+        path = DATA_DIR / name
+        if path.is_file():
+            files[name] = base64.b64encode(path.read_bytes()).decode("ascii")
+    plain = json.dumps({"v": 1, "at": int(time.time()), "files": files}).encode("utf-8")
+    salt, nonce = secrets.token_bytes(16), secrets.token_bytes(16)
+    enc_key, mac_key = _backup_keys(password, salt)
+    body = bytes(a ^ b for a, b in zip(plain, key_stream(enc_key, nonce, len(plain))))
+    head = BACKUP_MAGIC + salt + nonce
+    return head + body + hmac.new(mac_key, head + body, hashlib.sha256).digest()
+
+
+def backup_unpack(blob: bytes, password: str) -> dict:
+    """The files in a backup, or raises ValueError with the reason for the owner."""
+    if not blob.startswith(BACKUP_MAGIC) or len(blob) < len(BACKUP_MAGIC) + 32 + 32:
+        raise ValueError("هذا ليس ملف نسخة احتياطية من لوحة التحكّم.")
+    salt, nonce = blob[6:22], blob[22:38]
+    body, mac = blob[38:-32], blob[-32:]
+    enc_key, mac_key = _backup_keys(password, salt)
+    if not hmac.compare_digest(hmac.new(mac_key, blob[:38] + body, hashlib.sha256).digest(), mac):
+        raise ValueError("كلمة المرور لا تطابق كلمة مرور هذه النسخة، أو الملف تالف.")
+    plain = bytes(a ^ b for a, b in zip(body, key_stream(enc_key, nonce, len(body))))
+    data = json.loads(plain.decode("utf-8"))
+    files = {name: base64.b64decode(value) for name, value in (data.get("files") or {}).items() if name in BACKUP_FILES}
+    if "secrets.json" not in files or "server.crt" not in files or "server.key" not in files:
+        raise ValueError("النسخة ناقصة: لا تحمل أسرار الخادم وشهادته.")
+    return {"at": int(data.get("at") or 0), "files": files}
+
+
 def load_secrets() -> dict:
     data = read_private_json(SECRETS_PATH) or {}
     changed = False
@@ -123,6 +339,10 @@ def load_secrets() -> dict:
         data["admin_salt"] = secrets.token_hex(16)
         data["admin_hash"] = hash_password(made, data["admin_salt"])
         data["admin_plain_once"] = made            # printed once on first start, then forgotten
+        changed = True
+    if forced or data.get("admin_plain_once"):
+        # «الربط»: the public half of the key made from the password (see move_seed); apps keep it.
+        data["move_public"] = ed_public(move_seed(forced or data["admin_plain_once"])).hex()
         changed = True
     if changed:
         write_private_json(SECRETS_PATH, data)
@@ -1265,6 +1485,13 @@ input::placeholder{color:var(--mut);opacity:.8}
 .nh{display:flex;align-items:center;gap:8px;font-size:13px}.nh form{margin-inline-start:auto}.nh .ib{width:36px;height:36px}
 .nb{border-radius:99px;padding:1px 10px;font-size:12.5px;font-weight:600;background:var(--prisoft);color:var(--pri)}
 .nb.k-warn{background:var(--warnsoft);color:var(--warn)}.nb.k-urgent{background:var(--badsoft);color:var(--bad)}
+.fl-ok{background:var(--prisoft);color:var(--pri)}.fl-bad{background:var(--badsoft);color:var(--bad)}
+.mvd{display:grid;gap:8px;margin:12px 0 4px;font-size:14px}.mvd div{display:flex;gap:12px;align-items:baseline}.mvd dt{color:var(--mut);min-width:72px;flex:none}.mvd dd{margin:0}
+.mc{font:700 16px/1 var(--mono);letter-spacing:1px;background:var(--soft);border:1px solid var(--line);border-radius:8px;padding:4px 8px;direction:ltr;display:inline-block}
+.bk{display:flex;gap:8px;align-items:center;font-size:14px;margin:10px 0 0;color:var(--pri)}.bk.none{color:var(--warn)}.bk .i{width:18px;height:18px;flex:none}
+.ckl{display:flex;gap:10px;align-items:center;margin:14px 0 0;font-size:14px;cursor:pointer}.ckl input{width:20px;height:20px;accent-color:var(--pri);flex:none}
+.rs{margin-top:14px}.rs summary{min-height:40px}
+input[type=file].fs{height:auto;padding:10px 12px}
 .nav .cnt{position:absolute;top:6px;inset-inline-start:calc(50% + 6px);min-width:18px;height:18px;padding:0 5px;border-radius:99px;background:var(--bad);color:var(--badk);font-style:normal;font-size:11px;font-weight:700;line-height:18px;text-align:center;box-shadow:0 0 0 2px var(--card)}
 .sh{display:flex;align-items:center;gap:10px;justify-content:space-between}.sh .btn{margin:0}
 .btn.sm{min-height:38px;height:38px;padding:0 13px;font-size:13.5px}
@@ -1401,7 +1628,7 @@ main{padding-bottom:56px}
 <button type="button" data-t="keys">{{ic('key')}}<span>المفاتيح</span>{% if nokey %}<i class="dot" title="لا يوجد مفتاح للكاتب الحالي"></i>{% endif %}</button>
 <button type="button" data-t="notices">{{ic('bell')}}<span>التنبيهات</span></button>
 <button type="button" data-t="support">{{ic('msg')}}<span>الرسائل</span>{% if unread %}<i class="cnt" title="{{unread}} رسالة جديدة">{{unread}}</i>{% endif %}</button>
-<button type="button" data-t="link">{{ic('link')}}<span>الرابط</span></button>
+<button type="button" data-t="link">{{ic('link')}}<span>الربط</span>{% if not backup_when %}<i class="dot" title="لم تُنزَّل نسخة احتياطية بعد"></i>{% endif %}</button>
 </nav>
 <div class="acts"><button class="ib th" id="th" type="button" aria-label="تبديل المظهر"><span class="m">{{ic('moon')}}</span><span class="s">{{ic('sun')}}</span></button>
 <form method="post" action="/{{admin}}/logout"><button class="ib" aria-label="تسجيل الخروج" title="تسجيل الخروج">{{ic('out')}}</button></form></div>
@@ -1541,10 +1768,35 @@ main{padding-bottom:56px}
 </section>
 
 <section class="panel" id="p-link">
+{% if flash %}<div class="note fl-{{flash.kind}}" role="status">{{ic('alert' if flash.kind != 'ok' else 'check')}}<p>{{flash.text}}</p></div>{% endif %}
 <div class="card pad"><h2>رابط التطبيق</h2><p class="mut">انسخه كاملًا وضعه في التطبيق عند إعداد الخادم.</p>
 <code class="lk">{{app_link}}</code>
 <div class="da"><button type="button" class="btn" data-copy="{{app_link}}">{{ic('copy')}}نسخ الرابط</button><button type="button" class="btn ghost" data-share="{{app_link}}">{{ic('share')}}مشاركة</button></div>
 <ul class="notes"><li>{{ic('shield')}}<span>يحمل الرابط بصمة شهادة الخادم، فلا يقبل التطبيق أي خادم آخر.</span></li><li>{{ic('lock')}}<span>الرابط سرّي: شاركه فقط مع من تعطيه رمز دخول.</span></li></ul></div>
+
+<div class="card pad"><h2>نقل التطبيقات إلى هذا الخادم</h2>
+<p class="mut">إذا تعطّل خادمك القديم وشغّلت لوحة التحكّم هنا: اضغط «ربط» وأدخل <b>كلمة مرور لوحة التحكّم نفسها التي كانت على الخادم القديم</b>. يصل للتطبيقات أمر موقَّع بها بأن الخادم انتقل إلى هنا، فتتصل بهذا الخادم خلال دقائق.</p>
+<dl class="mvd">
+<div><dt>رمز الربط</dt><dd>{% if move_code %}<bdi class="mc">{{move_code}}</bdi> <span class="mut">يجب أن يكون نفسه على الخادم القديم والجديد (يأتي من كلمة المرور).</span>{% else %}<span class="mut">يظهر بعد تسجيل الدخول مرة.</span>{% endif %}</dd></div>
+<div><dt>آخر ربط</dt><dd>{% if move_when %}{{move_when}}{% if move_active %} · <span class="b on">يُعاد إرساله تلقائيًا</span>{% endif %}{% if not move_moved_here %} <span class="mut">(لخادم آخر)</span>{% endif %}{% else %}<span class="mut">لم يُضغط «ربط» على هذا الخادم.</span>{% endif %}</dd></div>
+</dl>
+<button class="btn wide" type="button" data-open="mv">{{ic('link')}}ربط التطبيقات بهذا الخادم</button>
+<ul class="notes"><li>{{ic('shield')}}<span>لا تتبع التطبيقات إلا أمرًا موقَّعًا بمفتاح من كلمة مرورك، فلا يستطيع أحد غيرك نقلها. ويمرّ الأمر مشفّرًا عبر {{relay}}.</span></li>
+<li>{{ic('alert')}}<span>من غير نسخة احتياطية: تنتقل التطبيقات، لكن رموز المستخدمين القديمة لا تعمل هنا، فيطلب التطبيق رمزًا جديدًا تنشئه لهم من «المستخدمون».</span></li></ul></div>
+
+<div class="card pad"><h2>النسخة الاحتياطية</h2>
+<p class="mut">ملف واحد فيه كل بيانات الخادم: المستخدمون ورموزهم، والمفاتيح، والإحصاءات، والتنبيهات، وأسرار الخادم وشهادته. مشفّر بكلمة مرور لوحة التحكّم. احفظه خارج هذا الخادم (جوالك أو بريدك)، ونزّل نسخة جديدة كلما أضفت مستخدمين.</p>
+<p class="bk{{ '' if backup_when else ' none' }}">{{ic('shield' if backup_when else 'alert')}}<span>{% if backup_when %}آخر نسخة نُزّلت {{backup_when}}.{% else %}لم تُنزَّل أي نسخة احتياطية بعد.{% endif %}</span></p>
+<form method="post" action="/{{admin}}/backup"><label class="l" for="bk-pw">كلمة مرور لوحة التحكّم</label>
+<div class="pw"><input id="bk-pw" type="password" name="password" required autocomplete="current-password"><button type="button" class="eye" data-eye aria-label="إظهار كلمة المرور" aria-pressed="false">{{ic('eye')}}</button></div>
+<button class="btn wide">{{ic('shield')}}تنزيل نسخة احتياطية</button></form>
+<details class="acc rs"><summary class="axs"><span>استعادة نسخة احتياطية على هذا الخادم</span>{{ic('chev')}}</summary>
+<form method="post" action="/{{admin}}/restore" enctype="multipart/form-data" data-title="استعادة النسخة؟" data-confirm="تُستبدل كل بيانات هذا الخادم ببيانات النسخة (يُحفظ ما قبلها في مجلد before-restore)، ثم يُعاد تشغيله. يصير رابط لوحة المالك وكلمة مرورها كما في الخادم القديم." data-yes="استعادة" data-kind="danger">
+<label class="l" for="rs-file">ملف النسخة (.ggbak)</label><input id="rs-file" class="fs" type="file" name="file" accept=".ggbak,application/octet-stream" required>
+<label class="l" for="rs-pw">كلمة مرور النسخة (كلمة مرور الخادم القديم)</label>
+<div class="pw"><input id="rs-pw" type="password" name="password" required autocomplete="off"><button type="button" class="eye" data-eye aria-label="إظهار كلمة المرور" aria-pressed="false">{{ic('eye')}}</button></div>
+<label class="ckl"><input type="checkbox" name="confirm" value="1" required> أفهم أن بيانات هذا الخادم تُستبدل</label>
+<button class="btn wide danger">استعادة وإعادة التشغيل</button></form></details></div>
 </section>
 </main>
 
@@ -1564,6 +1816,15 @@ main{padding-bottom:56px}
 <label class="l" for="nu-l">اسم المستخدم <small>(اختياري)</small></label><input id="nu-l" name="label" maxlength="40" placeholder="مثال: أحمد" autocomplete="off" enterkeyhint="done">
 <div class="da"><button type="button" class="btn ghost" data-close>إلغاء</button><button class="btn">إضافة المستخدم</button></div></form></dialog>
 
+<dialog id="mv" class="ask" aria-labelledby="mv-t"><form class="dg" method="post" action="/{{admin}}/move">
+<h3 id="mv-t">ربط التطبيقات بهذا الخادم</h3>
+<p class="mut">تنتقل كل التطبيقات إلى هذا الخادم. تأكّد من عنوانه: هو ما تكتبه في المتصفح لتفتح هذه اللوحة.</p>
+<label class="l" for="mv-host">عنوان هذا الخادم</label><input id="mv-host" name="host" dir="ltr" value="{{this_host}}" data-keep required autocomplete="off" autocapitalize="off" spellcheck="false">
+<label class="l" for="mv-pw">كلمة مرور لوحة التحكّم <small>(نفس كلمة مرور الخادم القديم)</small></label>
+<div class="pw"><input id="mv-pw" type="password" name="password" required autocomplete="current-password"><button type="button" class="eye" data-eye aria-label="إظهار كلمة المرور" aria-pressed="false">{{ic('eye')}}</button></div>
+<label class="ckl"><input type="checkbox" name="confirm" value="1" required> أؤكد نقل كل التطبيقات إلى هذا الخادم</label>
+<div class="da"><button class="btn" type="submit">{{ic('link')}}ربط</button><button class="btn ghost" type="button" data-close>إلغاء</button></div>
+</form></dialog>
 <dialog id="rn" class="ask" aria-labelledby="rn-t"><form class="dg" method="post" action="/{{admin}}/code/rename" data-toast="تم حفظ الاسم"><input type="hidden" name="id"><h3 id="rn-t">تعديل الاسم</h3><p class="mut">الاسم يظهر لك وحدك في هذه اللوحة، والرمز لا يتغيّر.</p>
 <label class="l" for="rn-l">اسم المستخدم</label><input id="rn-l" name="label" maxlength="40" autocomplete="off" enterkeyhint="done">
 <div class="da"><button type="button" class="btn ghost" data-close>إلغاء</button><button class="btn">حفظ الاسم</button></div></form></dialog>
@@ -1660,7 +1921,7 @@ $('#sh-rename').onclick=function(){sheet.close();var d=$('#rn'),i=$('#rn-l');$('
 
 D.addEventListener('click',function(e){var t=e.target,el;
 if((el=t.closest('[data-more]'))){openSheet(el.closest('.u'));return}
-if((el=t.closest('[data-open]'))){var d=$('#'+el.dataset.open),i=$('input:not([type=hidden])',d);d.showModal();if(i){i.value='';i.focus()}return}
+if((el=t.closest('[data-open]'))){var d=$('#'+el.dataset.open),i=$('input:not([type=hidden])',d);d.showModal();if(i){if(!i.hasAttribute('data-keep'))i.value='';i.focus()}return}
 if((el=t.closest('[data-eye]'))){var p=$('input',el.parentNode),show=p.type==='password';p.type=show?'text':'password';el.setAttribute('aria-pressed',String(show));return}
 if((el=t.closest('[data-copy]')))copy(el.dataset.copy,el);
 if((el=t.closest('[data-share]'))&&navigator.share)navigator.share({text:el.dataset.share}).catch(function(){});
@@ -1691,6 +1952,8 @@ def seen_text(row: dict) -> str:
     if not when:
         return "لم يدخل"
     delta = int(time.time()) - int(when)
+    if delta < 60:
+        return "الآن"
     if delta < 3600:
         return f"قبل {delta // 60} د"
     if delta < 86400:
@@ -1717,10 +1980,18 @@ def dashboard():
              "bookmark": sum(r["acts"]["bookmark"] for r in rows)}
     notices = notice_rows(codes)
     messages = support_rows(codes)
+    move = load_move()
+    last_backup = int(SECRETS.get("last_backup") or 0)
     return render_template_string(
         DASHBOARD, admin=ADMIN, app_link=app_link(), codes=rows, stats=stats,
         notices=notices, notice_kinds=NOTICE_KINDS, messages=messages,
         unread=sum(1 for m in messages if not m.get("read")),
+        flash=session.pop("flash", None), move_code=move_code(SECRETS.get("move_public", "")),
+        move_link=move.get("link") or "", move_when=seen_text({"last_seen": int(move.get("at") or 0)}) if move.get("at") else "",
+        move_active=bool(move.get("record")) and int(time.time()) < int(move.get("until") or 0),
+        move_moved_here=(move.get("link") or "").split("#")[0].split("/")[-1] == SECRETS["api_secret"],
+        backup_when=seen_text({"last_seen": last_backup}) if last_backup else "",
+        this_host=request.host, relay=MOVE_RELAY.split("//")[-1],
         engine=keys["engine"], gemini_set=gemini_ready(keys), claude_set=bool(keys["claude_sealed"]),
         gemini_model=keys["gemini_model"], claude_model=keys["claude_model"],
         gemini_default=GEMINI_DEFAULT_MODEL, claude_default=CLAUDE_DEFAULT_MODEL,
@@ -1734,8 +2005,147 @@ def login():
     password = request.form.get("password") or ""
     if hmac.compare_digest(hash_password(password, SECRETS["admin_salt"]), SECRETS["admin_hash"]):
         session["owner"] = True
+        if not SECRETS.get("move_public"):
+            remember_move_public(password)
         return redirect(f"/{ADMIN}")
     return render_template_string(LOGIN_PAGE, admin=ADMIN, error="كلمة المرور غير صحيحة.")
+
+
+def remember_move_public(password: str) -> str:
+    public = ed_public(move_seed(password)).hex()
+    data = read_private_json(SECRETS_PATH) or {}
+    data["move_public"] = public
+    write_private_json(SECRETS_PATH, data)
+    SECRETS["move_public"] = public
+    return public
+
+
+def password_ok(password: str) -> bool:
+    return bool(password) and hmac.compare_digest(hash_password(password, SECRETS["admin_salt"]), SECRETS["admin_hash"])
+
+
+def flash(kind: str, text: str) -> None:
+    session["flash"] = {"kind": kind, "text": text}
+
+
+@app.post(f"/{ADMIN}/move")
+def move_apps_here():
+    """«ربط التطبيقات بهذا الخادم»: a move order signed with the password's key, to this server's app link."""
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    password = request.form.get("password") or ""
+    if not password_ok(password):
+        flash("bad", "كلمة المرور غير صحيحة. لم يتم الربط.")
+        return redirect(f"/{ADMIN}")
+    if request.form.get("confirm") != "1":
+        flash("bad", "أكّد النقل أولًا. لم يتم الربط.")
+        return redirect(f"/{ADMIN}")
+    host = re.sub(r"\s+", "", request.form.get("host") or "")
+    if not re.fullmatch(r"(\[[0-9A-Fa-f:]{2,39}\]|[A-Za-z0-9](?:[A-Za-z0-9.\-]{0,251}[A-Za-z0-9])?)(:\d{1,5})?", host):
+        flash("bad", "عنوان الخادم غير صالح. اكتب الـ IP أو النطاق (ويمكن معه رقم المنفذ).")
+        return redirect(f"/{ADMIN}")
+    if not re.search(r"(^[^\[\]:]+|\])(:\d{1,5})$", host) and LISTEN_PORT != 443:
+        host = f"{host}:{LISTEN_PORT}"
+    seed = move_seed(password)
+    public = ed_public(seed)
+    if SECRETS.get("move_public") != public.hex():
+        remember_move_public(password)
+    link = f"https://{host}/{SECRETS['api_secret']}#{certificate_fingerprint()}"
+    now = int(time.time())
+    record = move_seal(seed, link, now)
+    problem = move_publish(record, public)
+    write_private_json(MOVE_PATH, {"record": record, "public": public.hex(), "link": link, "at": now,
+                                   "until": now + MOVE_REPEAT_DAYS * 86400, "published": 0 if problem else now})
+    if problem:
+        flash("warn", "حُفظ أمر النقل، لكن تعذّر إرساله الآن (" + problem + "). يحاول الخادم إرساله من جديد تلقائيًا كل ١٠ دقائق حتى ينجح.")
+    else:
+        flash("ok", "تم الربط. تنتقل التطبيقات إلى هذا الخادم خلال دقائق متى ما تعذّر عليها الوصول للخادم القديم "
+                    "(وإلا خلال ٣ ساعات). يُعاد إرسال الأمر كل ٦ ساعات لمدة ٩٠ يومًا.")
+    return redirect(f"/{ADMIN}")
+
+
+@app.post(f"/{ADMIN}/backup")
+def backup_download():
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    password = request.form.get("password") or ""
+    if not password_ok(password):
+        flash("bad", "كلمة المرور غير صحيحة. لم تُنزَّل النسخة.")
+        return redirect(f"/{ADMIN}")
+    blob = backup_pack(password)
+    data = read_private_json(SECRETS_PATH) or {}
+    data["last_backup"] = int(time.time())
+    write_private_json(SECRETS_PATH, data)
+    SECRETS["last_backup"] = data["last_backup"]
+    name = "control-backup-" + time.strftime("%Y%m%d-%H%M") + ".ggbak"
+    return send_file(io.BytesIO(blob), mimetype="application/octet-stream", as_attachment=True, download_name=name)
+
+
+RESTORED_PAGE = r"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>تمت الاستعادة</title>
+<style>body{margin:0;min-height:100vh;display:grid;place-items:center;padding:16px;background:#eef2f1;color:#10201f;font:15px/1.7 system-ui,sans-serif}
+.box{background:#fff;border:1px solid #dce4e2;border-radius:18px;padding:22px;max-width:520px}h1{font-size:19px;margin:0 0 8px}
+code{display:block;direction:ltr;text-align:left;background:#f3f6f5;border:1px solid #dce4e2;border-radius:10px;padding:10px;margin:10px 0;overflow-wrap:anywhere;font-size:13px}
+a{color:#0f6b66;font-weight:600}</style></head><body><div class="box">
+<h1>تمت استعادة النسخة الاحتياطية</h1>
+<p>يُعاد تشغيل خادم التحكّم الآن ليعمل ببيانات النسخة (المستخدمون ورموزهم والمفاتيح والشهادة). صار رابط لوحة المالك
+رابطَ الخادم القديم، وكلمة مرورها كلمة مرور النسخة:</p>
+<code>{{ link }}</code>
+<p><a href="{{ link }}">افتح لوحة التحكّم</a> بعد ثوانٍ، ثم من تبويب «الربط» اضغط «ربط التطبيقات بهذا الخادم».</p>
+</div></body></html>"""
+
+
+@app.post(f"/{ADMIN}/restore")
+def backup_restore():
+    """A backup in place of this server's data; the server then starts again with it."""
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    password = request.form.get("password") or ""
+    upload = request.files.get("file")
+    if request.form.get("confirm") != "1":
+        flash("bad", "أكّد الاستعادة أولًا. لم يتغيّر شيء.")
+        return redirect(f"/{ADMIN}")
+    if not upload:
+        flash("bad", "اختر ملف النسخة الاحتياطية.")
+        return redirect(f"/{ADMIN}")
+    try:
+        restored = backup_unpack(upload.read(64 * 1024 * 1024), password)
+    except ValueError as exc:
+        flash("bad", str(exc))
+        return redirect(f"/{ADMIN}")
+    except Exception:
+        flash("bad", "تعذّر فتح النسخة: الملف تالف.")
+        return redirect(f"/{ADMIN}")
+    keep = DATA_DIR / ("before-restore-" + time.strftime("%Y%m%d-%H%M%S"))
+    keep.mkdir(parents=True, exist_ok=True)
+    with LOCK:
+        for name in BACKUP_FILES:
+            current = DATA_DIR / name
+            if current.is_file():
+                shutil.copy2(current, keep / name)
+        for name, content in restored["files"].items():
+            target = DATA_DIR / name
+            temporary = target.with_name(name + ".restore")
+            temporary.write_bytes(content)
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, target)
+    old = json.loads(restored["files"]["secrets.json"].decode("utf-8"))
+    port = "" if LISTEN_PORT == 443 else f":{LISTEN_PORT}"
+    link = f"https://{request.host.split(':')[0] if not request.host.startswith('[') else request.host.split(']')[0] + ']'}{port}/{old.get('admin_path', '')}"
+
+    def again() -> None:
+        time.sleep(1.5)
+        print("استُعيدت نسخة احتياطية: يُعاد تشغيل خادم التحكّم…", flush=True)
+        # (the listening socket is left inheritable by the web server: closed now, so the new start can bind it)
+        for fd in range(3, 4096):
+            try:
+                os.set_inheritable(fd, False)
+            except OSError:
+                pass
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+    threading.Thread(target=again, daemon=True).start()
+    session.clear()
+    return render_template_string(RESTORED_PAGE, link=link)
 
 
 @app.post(f"/{ADMIN}/logout")
@@ -1996,13 +2406,13 @@ def api_activate():
         target["last_seen"] = int(time.time())
         save_codes(codes)
     engine, _, _, _ = active_engine()
-    return api_ok(token=make_token(row["id"], device), engine=engine or "none")
+    return api_ok(token=make_token(row["id"], device), engine=engine or "none", move_key=SECRETS.get("move_public", ""))
 
 
 @app.post(f"/{API}/check")
 def api_check():
     body = request.get_json(silent=True) or {}
-    return api_ok(active=bool(code_from_token(body.get("token"))))
+    return api_ok(active=bool(code_from_token(body.get("token"))), move_key=SECRETS.get("move_public", ""))
 
 
 @app.post(f"/{API}/usage")
@@ -2173,6 +2583,7 @@ def root():
 
 def run() -> None:
     ensure_certificate()
+    threading.Thread(target=republish_moves_in_background, name="move-republish", daemon=True).start()
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(str(CERT_PATH), str(CERT_KEY_PATH))
     print("=" * 70, flush=True)

@@ -12693,8 +12693,219 @@ class _ControlUnreachable(RuntimeError):
     pass
 
 
+# ---- Ed25519 (RFC 8032), pure Python: signs and checks the «ربط» move order (no crypto package needed) ----
+_ED_P = 2 ** 255 - 19
+_ED_L = 2 ** 252 + 27742317777372353535851937790883648493
+_ED_D = -121665 * pow(121666, _ED_P - 2, _ED_P) % _ED_P
+_ED_I = pow(2, (_ED_P - 1) // 4, _ED_P)
+
+
+def _ed_xrecover(y: int) -> int:
+    xx = (y * y - 1) * pow(_ED_D * y * y + 1, _ED_P - 2, _ED_P)
+    x = pow(xx, (_ED_P + 3) // 8, _ED_P)
+    if (x * x - xx) % _ED_P:
+        x = x * _ED_I % _ED_P
+    return _ED_P - x if x & 1 else x
+
+
+_ED_BY = 4 * pow(5, _ED_P - 2, _ED_P) % _ED_P
+_ED_BX = _ed_xrecover(_ED_BY)
+_ED_B = (_ED_BX, _ED_BY, 1, _ED_BX * _ED_BY % _ED_P)
+
+
+def _ed_add(p, q):
+    x1, y1, z1, t1 = p
+    x2, y2, z2, t2 = q
+    a = (y1 - x1) * (y2 - x2) % _ED_P
+    b = (y1 + x1) * (y2 + x2) % _ED_P
+    c = t1 * 2 * _ED_D * t2 % _ED_P
+    d = z1 * 2 * z2 % _ED_P
+    e, f, g, h = b - a, d - c, d + c, b + a
+    return (e * f % _ED_P, g * h % _ED_P, f * g % _ED_P, e * h % _ED_P)
+
+
+def _ed_mul(s: int, p):
+    q = (0, 1, 1, 0)
+    while s > 0:
+        if s & 1:
+            q = _ed_add(q, p)
+        p = _ed_add(p, p)
+        s >>= 1
+    return q
+
+
+def _ed_encode(p) -> bytes:
+    x, y, z, _ = p
+    zi = pow(z, _ED_P - 2, _ED_P)
+    x, y = x * zi % _ED_P, y * zi % _ED_P
+    return (y | ((x & 1) << 255)).to_bytes(32, "little")
+
+
+def _ed_decode(s: bytes):
+    y = int.from_bytes(s, "little")
+    sign, y = y >> 255, y & ((1 << 255) - 1)
+    if y >= _ED_P:
+        raise ValueError("bad point")
+    x = _ed_xrecover(y)
+    if (x & 1) != sign:
+        x = _ED_P - x
+    if (-x * x + y * y - 1 - _ED_D * x * x * y * y) % _ED_P or (x == 0 and sign):
+        raise ValueError("bad point")
+    return (x, y, 1, x * y % _ED_P)
+
+
+def _ed_secret(seed: bytes) -> tuple[int, bytes]:
+    h = hashlib.sha512(seed).digest()
+    a = int.from_bytes(h[:32], "little")
+    a = (a & ((1 << 254) - 8)) | (1 << 254)
+    return a, h[32:]
+
+
+def ed_public(seed: bytes) -> bytes:
+    return _ed_encode(_ed_mul(_ed_secret(seed)[0], _ED_B))
+
+
+def ed_sign(seed: bytes, message: bytes) -> bytes:
+    a, prefix = _ed_secret(seed)
+    public = _ed_encode(_ed_mul(a, _ED_B))
+    r = int.from_bytes(hashlib.sha512(prefix + message).digest(), "little") % _ED_L
+    big_r = _ed_encode(_ed_mul(r, _ED_B))
+    k = int.from_bytes(hashlib.sha512(big_r + public + message).digest(), "little") % _ED_L
+    return big_r + ((r + k * a) % _ED_L).to_bytes(32, "little")
+
+
+def ed_verify(public: bytes, message: bytes, signature: bytes) -> bool:
+    if len(public) != 32 or len(signature) != 64:
+        return False
+    try:
+        point_a, point_r = _ed_decode(public), _ed_decode(signature[:32])
+    except ValueError:
+        return False
+    s = int.from_bytes(signature[32:], "little")
+    if s >= _ED_L:
+        return False
+    k = int.from_bytes(hashlib.sha512(signature[:32] + public + message).digest(), "little") % _ED_L
+    return _ed_encode(_ed_mul(s, _ED_B)) == _ed_encode(_ed_add(point_r, _ed_mul(k, point_a)))
+
+
+# «الربط»: إن تعطّل خادم التحكّم وشغّل المالك لوحته على خادم جديد، يضغط فيها «ربط» بكلمة مرورها فيصل أمر نقل موقَّع
+# إلى وسيط عام (ntfy.sh) مشفّرًا. التطبيق يحفظ المفتاح العام لكلمة المرور (يرسله الخادم مع كل تحقق)، وحين يتعذّر
+# عليه الوصول لخادمه يقرأ الوسيط، ولا يتبع إلا أمرًا موقَّعًا بذلك المفتاح، ثم يجرّب الخادم الجديد قبل الانتقال إليه.
+CONTROL_STATE_PATH = DATA_DIR / "control.json"
+MOVE_RELAY = (os.environ.get("GG_RELAY") or "https://ntfy.sh").rstrip("/")
+_control_state_lock = threading.Lock()
+_control_health = {"ok_at": 0.0, "fail_since": 0.0, "relay_at": 0.0}
+
+
+def _control_state() -> dict:
+    data = read_private_json(CONTROL_STATE_PATH) or {}
+    if not isinstance(data, dict):
+        return {}
+    # A new build with another link in it: that link wins over one the app moved to before.
+    if data.get("link") and data.get("built") != CONTROL_LINK:
+        data = {"move_key": data.get("move_key") or "", "built": CONTROL_LINK}
+    return data
+
+
+def _save_control_state(**fields) -> None:
+    with _control_state_lock:
+        data = _control_state()
+        data.update(fields, built=CONTROL_LINK)
+        write_private_json(CONTROL_STATE_PATH, data)
+
+
 def control_link() -> str:
-    return (os.environ.get("GG_CONTROL_LINK") or CONTROL_LINK or "").strip()
+    return (os.environ.get("GG_CONTROL_LINK") or _control_state().get("link") or CONTROL_LINK or "").strip()
+
+
+def remember_move_key(answer: dict) -> None:
+    """The control server's move key (the public half of its password's key), kept for «الربط»."""
+    key = str((answer or {}).get("move_key") or "").lower()
+    if re.fullmatch(r"[0-9a-f]{64}", key) and key != _control_state().get("move_key"):
+        _save_control_state(move_key=key)
+
+
+def _move_open(public: bytes, text: str) -> tuple[str, int] | None:
+    """(link, time) of a move order signed with this key, or None."""
+    try:
+        if not text.startswith("ggmv1."):
+            return None
+        raw = base64.urlsafe_b64decode(text[6:].strip().encode("ascii"))
+        nonce, body = raw[:16], raw[16:]
+        key = hashlib.sha256(b"gg-move-enc|" + public).digest()
+        stream = bytearray()
+        counter = 0
+        while len(stream) < len(body):
+            stream += hashlib.sha256(key + nonce + counter.to_bytes(4, "big")).digest()
+            counter += 1
+        data = json.loads(bytes(a ^ b for a, b in zip(body, stream)).decode("utf-8"))
+        link, at = str(data.get("link") or ""), int(data.get("at") or 0)
+        if not ed_verify(public, f"gg-move|{link}|{at}".encode("utf-8"), bytes.fromhex(str(data.get("sig") or ""))):
+            return None
+        return (link, at) if _control_parse(link) else None
+    except Exception:
+        return None
+
+
+def follow_control_move() -> str:
+    """Reads the relay for a move order of this app's owner; moves when it is newer and its server answers.
+    Returns the new link, or ""."""
+    state = _control_state()
+    key = state.get("move_key") or ""
+    if not re.fullmatch(r"[0-9a-f]{64}", key):
+        return ""
+    public = bytes.fromhex(key)
+    topic = "gg" + hashlib.sha256(b"gg-relay|" + public).hexdigest()[:30]
+    try:
+        request_ = urllib.request.Request(f"{MOVE_RELAY}/{topic}/json?poll=1&since=all",
+                                          headers={"User-Agent": "tg-groups-app/1.0", "Cache-Control": "no-cache"})
+        with urllib.request.urlopen(request_, timeout=20) as answer:
+            lines = answer.read(1 << 20).decode("utf-8", "replace").splitlines()
+    except Exception:
+        return ""
+    best = None
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict) or event.get("event") != "message":
+            continue
+        found = _move_open(public, str(event.get("message") or ""))
+        if found and (best is None or found[1] > best[1]):
+            best = found
+    if not best or best[1] <= int(state.get("moved_at") or 0) or best[0] == control_link():
+        return ""
+    link, at = best
+    try:
+        # (the new server must answer, with the certificate the order names, before the app moves)
+        _control_request("check", {"token": _current_token()}, seconds=10, link=link)
+    except _ControlUnreachable:
+        return ""
+    except RuntimeError as exc:
+        if "شهادة" in str(exc) or "برنامج آخر" in str(exc):
+            return ""
+    _save_control_state(link=link, moved_at=at)
+    with _unlock_lock:
+        _unlock_cache.update(ok=False, at=0.0)        # (the next look asks the new server)
+    print("انتقل التطبيق إلى خادم التحكّم الجديد (أمر «ربط» موقَّع من صاحب البرنامج).", flush=True)
+    return link
+
+
+def watch_control_moves() -> None:
+    """Every minute: when the control server has not answered for 5 minutes, the relay is read (every 5 minutes);
+    else once every 3 hours (a move made while the old server still works)."""
+    while True:
+        time.sleep(60)
+        try:
+            now = time.monotonic()
+            down = _control_health["fail_since"] and now - _control_health["fail_since"] > 300
+            due = now - _control_health["relay_at"] > (300 if down else 3 * 3600)
+            if control_configured() and due and _control_state().get("move_key"):
+                _control_health["relay_at"] = now
+                follow_control_move()
+        except Exception:
+            pass
 
 
 DEVICE_PATH = DATA_DIR / "device.json"
@@ -12731,9 +12942,23 @@ def control_configured() -> bool:
     return _control_parse(control_link()) is not None
 
 
-def _control_request(action: str, body: dict | None = None, seconds: float = 30) -> dict:
+def _control_request(action: str, body: dict | None = None, seconds: float = 30, link: str = "") -> dict:
     """طلب واحد لخادم التحكّم، مع تثبيت شهادته ببصمة الرابط. يعيد ما يردّه، أو يرفع خطأ بعبارة للمستخدم."""
-    parsed = _control_parse(control_link())
+    try:
+        data = _control_request_once(action, body, seconds, link)
+    except RuntimeError as exc:
+        # Down, or another program (another certificate) on its address: as a server that is gone, for «الربط».
+        gone = isinstance(exc, _ControlUnreachable) or "شهادة" in str(exc) or "برنامج آخر" in str(exc)
+        if gone and not link and not _control_health["fail_since"]:
+            _control_health["fail_since"] = time.monotonic()
+        raise
+    if not link:
+        _control_health.update(ok_at=time.monotonic(), fail_since=0.0)
+    return data
+
+
+def _control_request_once(action: str, body: dict | None, seconds: float, link: str) -> dict:
+    parsed = _control_parse(link or control_link())
     if not parsed:
         raise RuntimeError("خادم التحكّم غير مضبوط في هذه النسخة. راجع صاحب البرنامج.")
     host, port, secret, pin = parsed
@@ -12805,6 +13030,7 @@ def control_activate(code: str) -> str:
     if not token:
         raise RuntimeError("لم يصل رمز الجلسة من الخادم. أعد المحاولة.")
     write_private_json(UNLOCK_PATH, {"token": token, "code": code})
+    remember_move_key(data)
     with _unlock_lock:
         _unlock_cache.update(token=token, code=code, ok=True, at=time.monotonic())
     stats_changed()
@@ -12822,7 +13048,9 @@ def is_unlocked() -> bool:
         if _unlock_cache["ok"] and now - _unlock_cache["at"] < _CONTROL_GRACE:
             return True
     try:
-        active = bool(_control_request("check", {"token": token}, seconds=8).get("active"))
+        answer = _control_request("check", {"token": token}, seconds=8)
+        remember_move_key(answer)
+        active = bool(answer.get("active"))
     except _ControlUnreachable:
         with _unlock_lock:
             _unlock_cache.update(ok=True, at=now)       # إمهال: يبقى مفتوحًا برمز محفوظ ما دام الخادم بعيدًا
@@ -13117,6 +13345,7 @@ def report_stats_in_background() -> None:
 
 
 threading.Thread(target=report_stats_in_background, name="stats-to-control", daemon=True).start()
+threading.Thread(target=watch_control_moves, name="control-moves", daemon=True).start()
 
 
 UNLOCK_PAGE = """<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">

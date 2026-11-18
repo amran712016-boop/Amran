@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import base64
 import io
+import gzip
 import hashlib
 import hmac
 import json
@@ -45,6 +46,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from flask import Flask, jsonify, redirect, render_template_string, request, send_file, session
+from werkzeug.serving import ThreadedWSGIServer
 
 # ----------------------------------------------------------------------------- where everything lives
 DATA_DIR = Path(os.environ.get("CONTROL_DATA") or (Path(__file__).resolve().parent / "control-data"))
@@ -57,6 +59,7 @@ ACTS_PATH = DATA_DIR / "acts.json"
 SUPPORT_PATH = DATA_DIR / "support.json"
 MOVE_PATH = DATA_DIR / "move.json"
 FAILURES_PATH = DATA_DIR / "failures.json"
+FAILURES_DIR = DATA_DIR / "failures"
 SUPPORT_DIR = DATA_DIR / "support"
 CERT_PATH = DATA_DIR / "server.crt"
 CERT_KEY_PATH = DATA_DIR / "server.key"
@@ -482,8 +485,8 @@ def reset_all_usage() -> None:
         write_private_json(USAGE_PATH, {})
 
 
-def usage_of(code_id: str) -> dict:
-    row = load_usage().get(code_id) or {"total": 0, "accounts": {}}
+def usage_of(code_id: str, data: dict | None = None) -> dict:
+    row = (data if data is not None else load_usage()).get(code_id) or {"total": 0, "accounts": {}}
     accounts = sorted(
         ({"id": key, "name": value.get("name") or "", "n": int(value.get("n") or 0),
           "cost": round(int(value.get("n") or 0) * COST_PER_COMMENT, 2)}
@@ -579,6 +582,32 @@ SUPPORT_IMAGE_MAX = 8 * 1024 * 1024
 SUPPORT_VIDEO_MAX = 25 * 1024 * 1024
 SUPPORT_PENDING_HOURS = 3             # a file never named by a message goes after this
 SUPPORT_PER_HOUR = 10                 # messages a code may send in an hour
+SUPPORT_SHOWN = 100                   # the newest shown on the panel (the page stays light)
+
+
+def light_support(item: dict) -> dict:
+    """The message as the list keeps it: its log goes to its folder (log.txt), loaded when it is opened."""
+    meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+    log = meta.pop("log", "") if meta else ""
+    if log:
+        folder = SUPPORT_DIR / str(item["id"])
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "log.txt").write_text(str(log), encoding="utf-8")
+        meta["has_log"] = True
+    return item
+
+
+def migrate_heavy_records() -> None:
+    """Records kept whole by the earlier version: their heavy parts move out of the lists, once."""
+    with LOCK:
+        failures = load_failures()
+        if any(any(key in item for key in FAILURE_HEAVY) for item in failures["items"]):
+            failures["items"] = [light_failure(item) for item in failures["items"]]
+            save_failures(failures)
+        support = load_support()
+        if any(isinstance(item.get("meta"), dict) and "log" in item["meta"] for item in support["items"]):
+            support["items"] = [light_support(item) for item in support["items"]]
+            save_support(support)
 
 
 def sniff_media(data: bytes) -> tuple[str, str]:
@@ -640,7 +669,7 @@ def support_rows(codes: list) -> list:
     names = {row.get("id"): row for row in codes}
     rows = []
     now = int(time.time())
-    for item in load_support()["items"]:
+    for item in load_support()["items"][:SUPPORT_SHOWN]:
         code = names.get(item.get("code_id")) or {}
         delta = now - int(item.get("at") or 0)
         ago = ("الآن" if delta < 60 else f"قبل {delta // 60} د" if delta < 3600
@@ -657,6 +686,8 @@ def support_rows(codes: list) -> list:
 # Every failure in a user's app (a task that stopped on an error, or ended with actions that failed, or an error in
 # the script) arrives here by itself, with that account's log, for the owner to see what went wrong.
 FAILURES_MAX = 500
+FAILURES_SHOWN = 100                   # the newest shown on the panel (the page stays light)
+FAILURE_HEAVY = ("failed", "log", "clicks", "trace")    # kept in failures/<id>.json, loaded when opened
 FAILURES_PER_HOUR = 30                # reports a code may send in an hour
 
 
@@ -670,11 +701,36 @@ def save_failures(data: dict) -> None:
     write_private_json(FAILURES_PATH, {"version": 1, "seq": int(data.get("seq") or 0), "items": data.get("items") or []})
 
 
+def failure_detail_path(failure_id) -> Path:
+    return FAILURES_DIR / f"{int(failure_id)}.json"
+
+
+def drop_failure_details(items: list) -> None:
+    for item in items:
+        try:
+            failure_detail_path(item.get("id") or 0).unlink()
+        except (OSError, ValueError, TypeError):
+            pass
+
+
+def light_failure(item: dict) -> dict:
+    """The item as the list keeps it: its heavy parts go to their own file."""
+    heavy = {key: item.pop(key) for key in FAILURE_HEAVY if key in item}
+    failed = heavy.get("failed") or []
+    item.setdefault("failed_head", list(failed[:3]))
+    item.setdefault("failed_count", len(failed))
+    item.setdefault("has_details", any(heavy.get(key) for key in FAILURE_HEAVY))
+    if any(heavy.get(key) for key in FAILURE_HEAVY):
+        FAILURES_DIR.mkdir(parents=True, exist_ok=True)
+        write_private_json(failure_detail_path(item["id"]), heavy)
+    return item
+
+
 def failure_rows(codes: list) -> list:
     names = {row.get("id"): row for row in codes}
     now = int(time.time())
     rows = []
-    for item in load_failures()["items"]:
+    for item in load_failures()["items"][:FAILURES_SHOWN]:
         code = names.get(item.get("code_id")) or {}
         delta = now - int(item.get("at") or 0)
         ago = ("الآن" if delta < 60 else f"قبل {delta // 60} د" if delta < 3600
@@ -1273,7 +1329,7 @@ LOGIN_PAGE = r"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="u
 <meta name="theme-color" content="#0c3d3a"><meta name="robots" content="noindex,nofollow">
 <title>تسجيل الدخول</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Readex+Pro:wght@300..700&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Readex+Pro:wght@300..700&display=swap" media="print" onload="this.media='all'">
 <script>try{document.documentElement.dataset.theme=localStorage.getItem('th')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light')}catch(e){}</script>
 <style>
 :root{--bg:#0c3d3a;--card:#fff;--soft:#f3f6f5;--line:#dce4e2;--ink:#10201f;--mut:#566664;--pri:#0f6b66;--prih:#0b5651;--prik:#fff;--ring:rgba(15,107,102,.22);--bad:#b42318;--badsoft:#fdeae7;color-scheme:light}
@@ -1326,7 +1382,7 @@ DASHBOARD = r"""{% macro ic(n) %}<svg class="i" viewBox="0 0 24 24" aria-hidden=
 <meta name="theme-color" content="#ffffff"><meta name="robots" content="noindex,nofollow"><meta name="format-detection" content="telephone=no">
 <title>لوحة التحكّم</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Readex+Pro:wght@300..700&family=JetBrains+Mono:wght@500;700&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Readex+Pro:wght@300..700&family=JetBrains+Mono:wght@500;700&display=swap" media="print" onload="this.media='all'">
 <script>try{document.documentElement.dataset.theme=localStorage.getItem('th')||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light')}catch(e){}</script>
 <style>
 /* ---- tokens: teal means "working", red means "stopped", everything else stays neutral ---- */
@@ -1517,6 +1573,19 @@ input::placeholder{color:var(--mut);opacity:.8}
 .nh{display:flex;align-items:center;gap:8px;font-size:13px}.nh form{margin-inline-start:auto}.nh .ib{width:36px;height:36px}
 .nb{border-radius:99px;padding:1px 10px;font-size:12.5px;font-weight:600;background:var(--prisoft);color:var(--pri)}
 .nb.k-warn{background:var(--warnsoft);color:var(--warn)}.nb.k-urgent{background:var(--badsoft);color:var(--bad)}
+.ldbar{position:fixed;top:0;inset-inline:0;z-index:200;height:3px;display:none;background:linear-gradient(90deg,transparent,var(--pri),transparent) no-repeat;background-size:45% 100%;animation:ldbar 1s linear infinite}
+html.loading .ldbar{display:block}
+.ldpill{position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:201;display:none;align-items:center;gap:9px;padding:9px 16px;border-radius:99px;background:var(--ink);color:var(--card);font-size:14px;font-weight:600;box-shadow:var(--pop);white-space:nowrap}
+html.loading .ldpill{display:flex}
+.ldpill::before{content:"";width:16px;height:16px;flex:none;border-radius:50%;border:2px solid currentColor;border-top-color:transparent;animation:spin .7s linear infinite}
+@keyframes ldbar{0%{background-position:-60% 0}100%{background-position:160% 0}}
+.btn.busy,.ib.busy,.hb.busy{opacity:1;position:relative;color:transparent!important;pointer-events:none}
+.btn.busy .i,.ib.busy .i,.hb.busy .i{visibility:hidden}
+.btn.busy::after,.ib.busy::after,.hb.busy::after{content:"";position:absolute;top:50%;left:50%;width:16px;height:16px;margin:-8px 0 0 -8px;border-radius:50%;border:2px solid rgba(255,255,255,.45);border-top-color:#fff;animation:spin .7s linear infinite}
+.btn.ghost.busy::after,.ib.busy::after{border-color:var(--line);border-top-color:var(--pri)}
+@keyframes spin{to{transform:rotate(360deg)}}
+.lz{margin-top:8px}.lz .wait{color:var(--mut);font-size:13px}.lz h4{margin:10px 0 6px;font-size:13px;color:var(--mut);font-weight:600}
+.fl .more{background:none;color:var(--mut);padding-inline:2px}.shown{text-align:center;margin-top:12px;font-size:13px}
 .fa-all{display:flex;gap:6px;flex-wrap:wrap}.fa-all form{margin:0}.fa-all .btn{margin:0}
 .ft{font-size:14.5px;font-weight:600;line-height:1.6}.fk{display:inline-block;border-radius:99px;padding:0 9px;font-size:12px;font-weight:600;margin-inline-end:4px}
 .fk.k-urgent{background:var(--badsoft);color:var(--bad)}.fk.k-warn{background:var(--warnsoft);color:var(--warn)}
@@ -1659,6 +1728,7 @@ main{padding-bottom:56px}
 <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></symbol>
 </defs></svg>
 
+<div class="ldbar" aria-hidden="true"></div><div class="ldpill" role="status" aria-live="polite">جارٍ التنفيذ…</div>
 <header class="top"><div class="wrap topin">
 <div class="brand"><div class="logo" aria-hidden="true">ق</div><div><b>لوحة التحكّم</b><small>رموز الدخول والمفاتيح</small></div></div>
 <nav class="nav" aria-label="أقسام اللوحة">
@@ -1793,16 +1863,17 @@ main{padding-bottom:56px}
 <div class="mh"><div class="av" style="--h:{{hue}}" aria-hidden="true">{{ (m.who or '؟')[:1] }}</div>
 <div class="nm"><h3>{{m.who}}{% if not m.read %} <span class="nw">جديدة</span>{% endif %}</h3><p>{% if m.code %}<bdi>{{m.code}}</bdi> · {% endif %}{{m.ago}} · <span dir="ltr">{{m.when}}</span></p></div></div>
 {% if m.text %}<p class="mt">{{m.text}}</p>{% endif %}
-{% if m.files %}<div class="mf">{% for f in m.files %}{% set url = '/' ~ admin ~ '/support/' ~ m.id ~ '/' ~ loop.index0 %}{% if (f.type or '').startswith('image/') %}<a class="mi" href="{{url}}" target="_blank" rel="noopener" aria-label="فتح الصورة {{loop.index}}"><img src="{{url}}" alt="صورة {{loop.index}} من المستخدم" loading="lazy"></a>{% else %}<video class="mv" src="{{url}}" controls preload="metadata" playsinline aria-label="فيديو {{loop.index}} من المستخدم"></video>{% endif %}{% endfor %}</div>{% endif %}
-{% if m.meta and (m.meta.version or m.meta.device or m.meta.log) %}<details class="acc mm"><summary class="axs"><span>معلومات الجهاز والسجل</span>{{ic('chev')}}</summary>
+{% if m.files %}<div class="mf">{% for f in m.files %}{% set url = '/' ~ admin ~ '/support/' ~ m.id ~ '/' ~ loop.index0 %}{% if (f.type or '').startswith('image/') %}<a class="mi" href="{{url}}" target="_blank" rel="noopener" aria-label="فتح الصورة {{loop.index}}"><img src="{{url}}" alt="صورة {{loop.index}} من المستخدم" loading="lazy"></a>{% else %}<video class="mv" src="{{url}}" controls preload="none" playsinline aria-label="فيديو {{loop.index}} من المستخدم"></video>{% endif %}{% endfor %}</div>{% endif %}
+{% if m.meta and (m.meta.version or m.meta.device or m.meta.has_log or m.meta.log) %}<details class="acc mm{{ ' lazy' if m.meta.has_log else '' }}"{% if m.meta.has_log %} data-src="/{{admin}}/support/{{m.id}}/log"{% endif %}><summary class="axs"><span>معلومات الجهاز والسجل</span>{{ic('chev')}}</summary>
 <dl class="md">{% if m.meta.version %}<div><dt>الإصدار</dt><dd dir="ltr">{{m.meta.version}}</dd></div>{% endif %}{% if m.meta.device %}<div><dt>الجهاز</dt><dd dir="ltr">{{m.meta.device}}</dd></div>{% endif %}{% if m.meta.accounts %}<div><dt>حسابات X</dt><dd dir="ltr">{{m.meta.accounts}}</dd></div>{% endif %}</dl>
-{% if m.meta.log %}<pre class="lg">{{m.meta.log}}</pre>{% endif %}</details>{% endif %}
+{% if m.meta.has_log %}<div class="lz"></div>{% elif m.meta.log %}<pre class="lg">{{m.meta.log}}</pre>{% endif %}</details>{% endif %}
 {% for r in m.replies %}<div class="mr"><b>ردّك</b> <span class="mut" dir="ltr">{{r.when}}</span><p>{{r.text}}</p></div>{% endfor %}
 <div class="ma">
 {% if m.exists %}<details class="rp"><summary class="btn sm">{{ic('edit')}}ردّ</summary><form method="post" action="/{{admin}}/support/reply" data-toast="تم إرسال الرد"><input type="hidden" name="id" value="{{m.id}}"><textarea class="ta" name="text" rows="3" maxlength="1000" required placeholder="اكتب ردّك… يصل إلى تطبيقه في قائمة التنبيهات"></textarea><button class="btn wide" style="margin-top:10px">إرسال الرد</button></form></details>{% endif %}
 <form method="post" action="/{{admin}}/support/read"><input type="hidden" name="id" value="{{m.id}}"><button class="btn ghost sm">{{ 'تعليم كغير مقروءة' if m.read else 'تعليم كمقروءة' }}</button></form>
 <form method="post" action="/{{admin}}/support/delete" data-title="حذف الرسالة؟" data-confirm="تُحذف الرسالة ومرفقاتها نهائيًا." data-yes="حذف" data-kind="danger" data-toast="تم حذف الرسالة"><input type="hidden" name="id" value="{{m.id}}"><button class="ib" aria-label="حذف الرسالة">{{ic('trash')}}</button></form>
 </div></article>{% endfor %}</div>
+{% if messages_total > messages|length %}<p class="mut shown">تُعرض أحدث {{messages|length}} من {{messages_total}}. احذف القديمة لتظهر.</p>{% endif %}
 {% else %}<div class="empty" style="margin-top:16px"><h3>لا توجد رسائل بعد</h3><p>تظهر هنا رسائل المستخدمين من زر «مساعدة» في التطبيق.</p></div>{% endif %}
 </section>
 
@@ -1817,14 +1888,15 @@ main{padding-bottom:56px}
 {% if f.task %}<p class="mut fs2">المهمة: {{f.task}}</p>{% endif %}
 {% if f.message %}<p class="mt fm">{{f.message}}</p>{% endif %}
 {% if f.summary %}<div class="fsum">{% if f.summary.requested is defined %}<span>المطلوب <b>{{f.summary.requested}}</b></span>{% endif %}{% if f.summary.done is defined %}<span>المنفَّذ <b>{{f.summary.done}}</b></span>{% endif %}{% if f.summary.failed is defined %}<span class="bad">الفاشل <b>{{f.summary.failed}}</b></span>{% endif %}</div>{% endif %}
-{% if f.failed %}<details class="acc mm"><summary class="axs"><span>الإجراءات الفاشلة ({{f.failed|length}})</span>{{ic('chev')}}</summary><ul class="fl">{% for line in f.failed %}<li dir="auto">{{line}}</li>{% endfor %}</ul></details>{% endif %}
-{% if f.log or f.trace %}<details class="acc mm"><summary class="axs"><span>السجل</span>{{ic('chev')}}</summary>{% if f.trace %}<pre class="lg">{{f.trace}}</pre>{% endif %}{% if f.log %}<pre class="lg">{{f.log}}</pre>{% endif %}</details>{% endif %}
-{% if f.clicks %}<details class="acc mm"><summary class="axs"><span>سجل النقر</span>{{ic('chev')}}</summary><pre class="lg">{{f.clicks}}</pre></details>{% endif %}
+{% if f.failed_head %}<ul class="fl">{% for line in f.failed_head %}<li dir="auto">{{line}}</li>{% endfor %}{% if f.failed_count > f.failed_head|length %}<li class="more">و{{ f.failed_count - f.failed_head|length }} أخرى في «التفاصيل والسجل»</li>{% endif %}</ul>{% endif %}
+{% if f.has_details %}<details class="acc mm lazy" data-src="/{{admin}}/failures/{{f.id}}"><summary class="axs"><span>التفاصيل والسجل</span>{{ic('chev')}}</summary><div class="lz"></div></details>{% endif %}
+
 {% if f.device %}<p class="mut fs2" dir="ltr">{{f.device}}</p>{% endif %}
-<div class="ma"><button type="button" class="btn ghost sm" data-copy="{{ f.title }}&#10;{{ f.message }}&#10;{{ f.failed|join('&#10;') }}&#10;&#10;{{ f.trace }}&#10;{{ f.log }}">{{ic('copy')}}نسخ</button>
+<div class="ma"><button type="button" class="btn ghost sm" data-fcopy="/{{admin}}/failures/{{f.id}}">{{ic('copy')}}نسخ</button>
 <form method="post" action="/{{admin}}/failures/read"><input type="hidden" name="id" value="{{f.id}}"><button class="btn ghost sm">{{ 'تعليم كغير مقروء' if f.read else 'تعليم كمقروء' }}</button></form>
 <form method="post" action="/{{admin}}/failures/delete" data-toast="حُذف العطل"><input type="hidden" name="id" value="{{f.id}}"><button class="ib" aria-label="حذف العطل">{{ic('trash')}}</button></form></div>
 </article>{% endfor %}</div>
+{% if failures_total > failures|length %}<p class="mut shown">تُعرض أحدث {{failures|length}} من {{failures_total}}. احذف القديمة لتظهر.</p>{% endif %}
 {% else %}<div class="empty" style="margin-top:16px"><h3>لا توجد أعطال</h3><p>يظهر هنا كل فشل في تطبيقات المستخدمين، تلقائيًا ومعه السجل.</p></div>{% endif %}
 </section>
 
@@ -1989,12 +2061,31 @@ if((el=t.closest('[data-share]'))&&navigator.share)navigator.share({text:el.data
 if((el=t.closest('[data-close]'))){el=el.closest('dialog');if(el)el.close()}
 else if(t.tagName==='DIALOG')t.close()});
 
+/* the loading bar: shows from the moment a change is sent until the page comes back */
+function loading(f){R.classList.add('loading');var go=f&&$('button:not([type=button])',f);if(go&&!$('.sw',f))go.classList.add('busy')}
+addEventListener('pageshow',function(){R.classList.remove('loading');$$('.busy').forEach(function(b){b.classList.remove('busy')})});
+
+/* details that load when opened (a report's log, a message's log): the page itself stays light */
+function lazy(d,then){var box=$('.lz',d);if(d.dataset.done){if(then)then(d._data);return}
+if(box&&!box.firstChild){var w=D.createElement('p');w.className='wait';w.textContent='جارٍ التحميل…';box.appendChild(w)}
+fetch(d.dataset.src,{credentials:'same-origin',cache:'no-store'}).then(function(r){if(r.status===401){location.reload();throw 0}return r.json()}).then(function(j){
+d.dataset.done='1';d._data=j;if(box){box.textContent='';
+function part(title,text){if(!text)return;var h=D.createElement('h4');h.textContent=title;var p=D.createElement('pre');p.className='lg';p.textContent=text;box.appendChild(h);box.appendChild(p)}
+if(j.failed&&j.failed.length){var h=D.createElement('h4');h.textContent='الإجراءات الفاشلة ('+j.failed.length+')';var u=D.createElement('ul');u.className='fl';
+j.failed.forEach(function(x){var li=D.createElement('li');li.dir='auto';li.textContent=x;u.appendChild(li)});box.appendChild(h);box.appendChild(u)}
+part('الخطأ',j.trace);part('السجل',j.log);part('سجل النقر',j.clicks);if(!box.firstChild)box.textContent='لا يوجد سجل.'}
+if(then)then(j)}).catch(function(x){if(x!==0&&box)box.textContent='تعذّر التحميل. أغلقه وافتحه للمحاولة مرة أخرى.'})}
+D.addEventListener('toggle',function(e){var d=e.target;if(d.open&&d.dataset&&d.dataset.src&&!d.dataset.done)lazy(d)},true);
+D.addEventListener('click',function(e){var b=e.target.closest('[data-fcopy]');if(!b)return;
+var d=b.closest('article').querySelector('details[data-src]');if(!d)return;b.classList.add('busy');
+lazy(d,function(j){b.classList.remove('busy');copy([j.title,j.message,(j.failed||[]).join('\n'),j.trace,j.log].filter(Boolean).join('\n\n'))})});
+
 /* every change is a form post; risky ones ask first */
 var cf=$('#cf'),pending=null;
 function keep(f){if(f.dataset.toast)leave('toast',f.dataset.toast);
 if(f.hasAttribute('data-fresh'))leave('new',rows.length);
 else{leave('y',window.scrollY);if(q)leave('q',q.value)}}
-$('#cfok').onclick=function(){var f=pending;pending=null;cf.close();if(f){keep(f);f.submit()}};
+$('#cfok').onclick=function(){var f=pending;pending=null;cf.close();if(f){keep(f);loading(f);f.submit()}};
 D.addEventListener('submit',function(e){var f=e.target;
 if(f.dataset.confirm){e.preventDefault();var o=f.closest('dialog'),b=$('#cfok');if(o)o.close();pending=f;
 $('#cft').textContent=f.dataset.title||'تأكيد الإجراء';$('#cfm').textContent=f.dataset.confirm;
@@ -2002,7 +2093,8 @@ b.textContent=f.dataset.yes||'تأكيد';b.classList.toggle('danger',f.dataset.
 keep(f);
 var sw=$('.sw',f),go=$('button:not([type=button])',f);
 if(sw){sw.classList.toggle('on');sw.setAttribute('aria-checked',String(sw.classList.contains('on')))}
-if(go&&!sw)go.classList.add('busy')});
+if(go&&!sw)go.classList.add('busy');
+R.classList.add('loading')});
 })();
 </script>
 </body></html>
@@ -2022,6 +2114,25 @@ def seen_text(row: dict) -> str:
     return f"قبل {delta // 86400} يوم"
 
 
+@app.after_request
+def compress_pages(response):
+    """The panel's pages and data go compressed to a browser that asks so (about a tenth of their size): the
+    phone loads them faster. The apps' requests, the files and the pictures go as they are."""
+    if (response.direct_passthrough or response.status_code != 200 or response.headers.get("Content-Encoding")
+            or response.mimetype not in ("text/html", "application/json")
+            or "gzip" not in (request.headers.get("Accept-Encoding") or "")):
+        return response
+    body = response.get_data()
+    if len(body) < 2048:
+        return response
+    packed = gzip.compress(body, 5)
+    response.set_data(packed)
+    response.headers["Content-Encoding"] = "gzip"
+    response.headers["Content-Length"] = str(len(packed))
+    response.headers.add("Vary", "Accept-Encoding")
+    return response
+
+
 @app.get(f"/{ADMIN}")
 def dashboard():
     if not logged_in():
@@ -2030,7 +2141,8 @@ def dashboard():
     with LOCK:
         codes = load_codes()
     acts_data = load_acts()
-    rows = [dict(c, last_seen_text=seen_text(c), usage=usage_of(c["id"]), acts=acts_of(c["id"], acts_data)) for c in codes]
+    usage_data = load_usage()
+    rows = [dict(c, last_seen_text=seen_text(c), usage=usage_of(c["id"], usage_data), acts=acts_of(c["id"], acts_data)) for c in codes]
     for r in rows:
         r["acts_text"] = ("الآن" if time.time() - r["acts"]["at"] < 60 else seen_text({"last_seen": r["acts"]["at"]})) if r["acts"]["at"] else ""
     stats = {"users": len(rows), "active": sum(1 for r in rows if r.get("active")),
@@ -2044,11 +2156,13 @@ def dashboard():
     move = load_move()
     last_backup = int(SECRETS.get("last_backup") or 0)
     failures = failure_rows(codes)
+    all_failures = load_failures()["items"]
+    all_messages = load_support()["items"]
     return render_template_string(
         DASHBOARD, admin=ADMIN, app_link=app_link(), codes=rows, stats=stats,
         notices=notices, notice_kinds=NOTICE_KINDS, messages=messages,
-        unread=sum(1 for m in messages if not m.get("read")),
-        failures=failures, failures_new=sum(1 for f in failures if not f.get("read")),
+        unread=sum(1 for m in all_messages if not m.get("read")), messages_total=len(all_messages),
+        failures=failures, failures_new=sum(1 for f in all_failures if not f.get("read")), failures_total=len(all_failures),
         flash=session.pop("flash", None), move_code=move_code(SECRETS.get("move_public", "")),
         move_link=move.get("link") or "", move_when=seen_text({"last_seen": int(move.get("at") or 0)}) if move.get("at") else "",
         move_active=bool(move.get("record")) and int(time.time()) < int(move.get("until") or 0),
@@ -2379,6 +2493,18 @@ def support_file(message_id: int, index: int):
     return response
 
 
+@app.get(f"/{ADMIN}/support/<int:message_id>/log")
+def support_log(message_id: int):
+    """A message's log (the last lines of the app's log when it was sent), loaded when it is opened."""
+    if not logged_in():
+        return jsonify(ok=False), 401
+    try:
+        log = (SUPPORT_DIR / str(message_id) / "log.txt").read_text(encoding="utf-8")
+    except OSError:
+        log = ""
+    return jsonify(ok=True, log=log)
+
+
 @app.post(f"/{ADMIN}/support/read")
 def support_read():
     if not logged_in():
@@ -2464,9 +2590,22 @@ def failures_delete():
         return redirect(f"/{ADMIN}")
     with LOCK:
         data = load_failures()
+        gone = [item for item in data["items"] if failure_id == 0 or item.get("id") == failure_id]
         data["items"] = [item for item in data["items"] if failure_id != 0 and item.get("id") != failure_id]
         save_failures(data)
+    drop_failure_details(gone)
     return redirect(f"/{ADMIN}")
+
+
+@app.get(f"/{ADMIN}/failures/<int:failure_id>")
+def failure_details(failure_id: int):
+    """A report's heavy parts (all its failed actions, the log, the clicks), loaded when it is opened."""
+    if not logged_in():
+        return jsonify(ok=False), 401
+    data = read_private_json(failure_detail_path(failure_id)) or {}
+    item = next((row for row in load_failures()["items"] if row.get("id") == failure_id), {})
+    return jsonify(ok=True, title=item.get("title") or "", message=item.get("message") or "",
+                   **{key: data.get(key) or ([] if key == "failed" else "") for key in FAILURE_HEAVY})
 
 
 # ----------------------------------------------------------------------------- the app API (link protocol)
@@ -2610,8 +2749,9 @@ def api_support():
                 pass
             stored.append({"stored": name, "type": info.get("type"), "name": info.get("name") or "",
                            "size": int(info.get("size") or 0)})
-        data["items"].insert(0, {"id": message_id, "code_id": row["id"], "label": row.get("label") or "", "text": text,
-                                 "files": stored, "meta": meta, "at": now, "read": False, "replies": []})
+        data["items"].insert(0, light_support({"id": message_id, "code_id": row["id"], "label": row.get("label") or "",
+                                               "text": text, "files": stored, "meta": meta, "at": now, "read": False,
+                                               "replies": []}))
         dropped = data["items"][SUPPORT_MAX:]
         del data["items"][SUPPORT_MAX:]
         save_support(data)
@@ -2640,14 +2780,16 @@ def api_failure():
         if recent >= FAILURES_PER_HOUR:
             return api_ok(kept=False)          # (too many this hour: dropped, the app does not send it again)
         data["seq"] += 1
-        data["items"].insert(0, {
+        data["items"].insert(0, light_failure({
             "id": data["seq"], "code_id": row["id"], "label": row.get("label") or "", "at": now, "read": False,
             "kind": text("kind", 20), "title": text("title", 200), "message": text("message", 1000), "task": text("task", 120),
             "account": text("account", 40), "summary": summary, "failed": failed, "log": text("log", 20000),
             "clicks": text("clicks", 8000), "trace": text("trace", 6000), "version": text("version", 40),
-            "device": text("device", 300)})
+            "device": text("device", 300)}))
+        dropped = data["items"][FAILURES_MAX:]
         del data["items"][FAILURES_MAX:]
         save_failures(data)
+    drop_failure_details(dropped)
     return api_ok(kept=True)
 
 
@@ -2707,8 +2849,46 @@ def root():
     return "control server", 200
 
 
+class TLSServer(ThreadedWSGIServer):
+    """The web server. Each connection does its TLS handshake in its own thread, with a time limit: one that never
+    finishes it (a page refresh cut short, a scanner on the internet) used to stop the whole server — Flask's own
+    server does the handshake in the one thread that accepts every connection, with no time limit."""
+    HANDSHAKE_SECONDS = 15
+    IDLE_SECONDS = 60                  # a kept-alive connection that sends nothing for this long is closed
+    MAX_CONNECTIONS = 200              # beyond this, a new connection is closed at once (a flood, not the owner)
+
+    def __init__(self, host: str, port: int, wsgi_app, tls: ssl.SSLContext):
+        super().__init__(host, port, wsgi_app)          # (a plain socket: no handshake while accepting)
+        self.tls = tls
+        self.ssl_context = tls                           # (so the requests are seen as https)
+
+    def process_request(self, request, client_address):
+        if threading.active_count() > self.MAX_CONNECTIONS:
+            self.shutdown_request(request)
+            return
+        super().process_request(request, client_address)
+
+    def finish_request(self, request, client_address):
+        try:
+            request.settimeout(self.HANDSHAKE_SECONDS)
+            connection = self.tls.wrap_socket(request, server_side=True)
+        except (OSError, ValueError):
+            return                                       # (no handshake in time, or not TLS: dropped)
+        try:
+            connection.settimeout(self.IDLE_SECONDS)
+            super().finish_request(connection, client_address)
+        except (OSError, ValueError):
+            pass
+        finally:
+            try:
+                connection.close()
+            except OSError:
+                pass
+
+
 def run() -> None:
     ensure_certificate()
+    migrate_heavy_records()
     threading.Thread(target=republish_moves_in_background, name="move-republish", daemon=True).start()
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(str(CERT_PATH), str(CERT_KEY_PATH))
@@ -2722,7 +2902,7 @@ def run() -> None:
         write_private_json(SECRETS_PATH, data)
     print("رابط التطبيق:", app_link(), flush=True)
     print("=" * 70, flush=True)
-    app.run(host=LISTEN_HOST, port=LISTEN_PORT, ssl_context=context, threaded=True)
+    TLSServer(LISTEN_HOST, LISTEN_PORT, app, context).serve_forever()
 
 
 if __name__ == "__main__":

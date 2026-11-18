@@ -41,6 +41,34 @@ python control_server.py
 
 ملاحظات: المفتاح يُصنع من كلمة المرور، فاجعلها قوية (١٢ حرفًا فأكثر). التطبيقات تتعلّم المفتاح من الخادم وهو يعمل، فبعد تحديث الخادم سجّل الدخول للوحة مرة واحدة على الأقل، ويجب أن يكون التطبيق قد اتصل بالخادم بعد ذلك. مرفقات «الرسائل» (الصور والفيديو) لا تدخل في النسخة الاحتياطية.
 
+## التشغيل الدائم (يعود وحده إن توقف أو أُعيد تشغيل الخادم)
+
+إذا شغّلته بـ `python3 control_server.py` من نافذة SSH فإنه يتوقف حين تُغلق النافذة. شغّله خدمةً في النظام بدل ذلك
+(مرة واحدة، على خادم Linux، وغيّر المسار إلى مكان الملف عندك):
+
+```bash
+sudo tee /etc/systemd/system/control.service >/dev/null <<'UNIT'
+[Unit]
+Description=Groups control server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/root/control
+ExecStart=/usr/bin/python3 /root/control/control_server.py
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+sudo systemctl daemon-reload && sudo systemctl enable --now control
+```
+
+- رؤية ما يطبعه (الروابط وكلمة المرور أول مرة): `journalctl -u control -f`
+- إعادة التشغيل بعد تبديل الملف: `sudo systemctl restart control`
+
 ## الإعدادات (كلها اختيارية، متغيّرات بيئة)
 
 | المتغيّر | الغرض | الافتراضي |

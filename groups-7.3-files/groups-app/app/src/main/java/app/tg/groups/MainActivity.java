@@ -1076,6 +1076,14 @@ public class MainActivity extends Activity {
     }
 
     /** Start the app afresh: the script runs once for the app's whole life, so a new script needs a new start. */
+    /** Restart the whole app (the loader calls this after it downloads the script, and the script after an update). */
+    public static void restartApp() {
+        MainActivity page = BrowserHost.activity;
+        if (page != null) {
+            page.runOnUiThread(page::restart);
+        }
+    }
+
     void restart() {
         Intent launch = getPackageManager().getLaunchIntentForPackage(getPackageName());
         if (launch == null || launch.getComponent() == null) {

@@ -10787,12 +10787,21 @@ def install_program(body: bytes) -> None:
 
 
 def restart_program() -> None:
-    """Run the program again in this same process, so the new file takes over."""
+    """Run the program again so the new file takes over. In the app, the app itself restarts (os.execv does not
+    work under Android); on a server, this process re-execs."""
     time.sleep(1.5)
     try:
         shutdown_jobs()
     except Exception:
         pass
+    if IN_APP:
+        try:
+            from java import jclass
+            jclass("app.tg.groups.MainActivity").restartApp()
+            return
+        except Exception as exc:
+            print("تعذّر إعادة تشغيل التطبيق تلقائيًا:", exc, flush=True)
+            return
     # Flask's server leaves its listening socket open across exec; close it there so the new
     # program can listen on the same port.
     server_fd = os.environ.pop("WERKZEUG_SERVER_FD", "")
@@ -12071,7 +12080,7 @@ def control_script_download() -> dict:
     token = _current_token()
     if not token:
         raise RuntimeError("التطبيق غير مُفعّل. أدخل رمز الدخول.")
-    answer = _control_request("script-download", {"token": token}, seconds=120)
+    answer = _control_request("script-download", {"token": token}, seconds=120, max_read=24 << 20)
     try:
         gg = base64.b64decode(str(answer.get("gg") or ""), validate=True)
     except Exception:
@@ -13183,10 +13192,10 @@ def control_configured() -> bool:
     return _control_parse(control_link()) is not None
 
 
-def _control_request(action: str, body: dict | None = None, seconds: float = 30, link: str = "") -> dict:
+def _control_request(action: str, body: dict | None = None, seconds: float = 30, link: str = "", max_read: int = 1 << 20) -> dict:
     """طلب واحد لخادم التحكّم، مع تثبيت شهادته ببصمة الرابط. يعيد ما يردّه، أو يرفع خطأ بعبارة للمستخدم."""
     try:
-        data = _control_request_once(action, body, seconds, link)
+        data = _control_request_once(action, body, seconds, link, max_read)
     except RuntimeError as exc:
         # Down, or another program (another certificate) on its address: as a server that is gone, for «الربط».
         gone = isinstance(exc, _ControlUnreachable) or "شهادة" in str(exc) or "برنامج آخر" in str(exc)
@@ -13198,7 +13207,7 @@ def _control_request(action: str, body: dict | None = None, seconds: float = 30,
     return data
 
 
-def _control_request_once(action: str, body: dict | None, seconds: float, link: str) -> dict:
+def _control_request_once(action: str, body: dict | None, seconds: float, link: str, max_read: int = 1 << 20) -> dict:
     parsed = _control_parse(link or control_link())
     if not parsed:
         raise RuntimeError("خادم التحكّم غير مضبوط في هذه النسخة. راجع صاحب البرنامج.")
@@ -13222,7 +13231,7 @@ def _control_request_once(action: str, body: dict | None, seconds: float, link: 
         connection.request("POST", f"/{secret}/{action}", body=sent,
                            headers={"Content-Type": "application/json; charset=utf-8", "Accept": "application/json", "Connection": "close"})
         answer = connection.getresponse()
-        status, raw = answer.status, answer.read(1 << 20)
+        status, raw = answer.status, answer.read(max_read)
     except (socket.timeout, TimeoutError):
         raise _ControlUnreachable("طال انتظار خادم التحكّم. أعد المحاولة.") from None
     except (OSError, _http_client.HTTPException):

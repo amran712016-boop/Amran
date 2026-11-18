@@ -3,10 +3,20 @@ plugins {
     id 'com.chaquo.python'
 }
 
-// The script the app runs: the repository's own files, packed into the app as they are when it is built.
+// Only the loader (boot.py) is packed in the app, as gg.py; the real script and content.py are downloaded from
+// the control server on first run. The server link is taken from script_original.py so it is kept in one place.
 def scriptAssets = tasks.register('scriptAssets', Copy) {
-    from(rootProject.file('../script_original.py')) { rename { 'gg.py' } }
-    from(rootProject.file('../content.py'))
+    def source = rootProject.file('../script_original.py')
+    def link = ''
+    if (source.exists()) {
+        def m = (source.text =~ /(?m)^CONTROL_LINK = "([^"\s]+)"/)
+        if (m.find()) { link = m.group(1) }
+    }
+    inputs.property('controlLink', link)
+    from(rootProject.file('../boot.py')) {
+        rename { 'gg.py' }
+        filter { String line -> line.replace('__CONTROL_LINK__', link) }
+    }
     into(layout.buildDirectory.dir('script-assets/gg'))
 }
 
@@ -18,8 +28,8 @@ android {
         applicationId 'app.tg.groups.session'
         minSdk 26
         targetSdk 35
-        versionCode 69
-        versionName '7.5'
+        versionCode 70
+        versionName '7.6'
         ndk {
             // Phones of the last years (64-bit ARM). Python 3.12 for Android has no 32-bit build.
             // (-PggAbis=arm64-v8a,x86_64 adds the emulator's, for trying the app on a computer.)

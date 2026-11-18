@@ -89,11 +89,11 @@ final class Engine {
         if (!home.isDirectory() && !home.mkdirs()) {
             throw new IOException("cannot make " + home);
         }
+        // Only the loader (gg.py = boot) ships in the app; the real script (engine.py) and content.py are
+        // downloaded from the control server on first run, and kept across app updates.
         byte[] script = read(app.getAssets().open("gg/gg.py"));
-        byte[] content = read(app.getAssets().open("gg/content.py"));
         MessageDigest digest = MessageDigest.getInstance("SHA-256");
         digest.update(script);
-        digest.update(content);
         StringBuilder mark = new StringBuilder();
         for (byte b : digest.digest()) {
             mark.append(Character.forDigit((b >> 4) & 0xF, 16)).append(Character.forDigit(b & 0xF, 16));
@@ -101,10 +101,8 @@ final class Engine {
         File marker = new File(home, ".bundled");
         String had = marker.isFile() ? new String(read(new FileInputStream(marker)), StandardCharsets.UTF_8).trim() : "";
         File scriptFile = new File(home, "gg.py");
-        File contentFile = new File(home, "content.py");
-        if (!mark.toString().equals(had) || !scriptFile.isFile() || !contentFile.isFile()) {
+        if (!mark.toString().equals(had) || !scriptFile.isFile()) {
             write(scriptFile, script);
-            write(contentFile, content);
             write(marker, mark.toString().getBytes(StandardCharsets.UTF_8));
         }
     }

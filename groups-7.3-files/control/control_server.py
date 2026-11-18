@@ -56,6 +56,7 @@ NOTICES_PATH = DATA_DIR / "notices.json"
 ACTS_PATH = DATA_DIR / "acts.json"
 SUPPORT_PATH = DATA_DIR / "support.json"
 MOVE_PATH = DATA_DIR / "move.json"
+FAILURES_PATH = DATA_DIR / "failures.json"
 SUPPORT_DIR = DATA_DIR / "support"
 CERT_PATH = DATA_DIR / "server.crt"
 CERT_KEY_PATH = DATA_DIR / "server.key"
@@ -649,6 +650,37 @@ def support_rows(codes: list) -> list:
         rows.append(dict(item, replies=replies, who=code.get("label") or item.get("label") or "مستخدم محذوف",
                          code=code.get("code") or "", exists=bool(code), ago=ago,
                          when=time.strftime("%Y-%m-%d %H:%M", time.localtime(int(item.get("at") or 0)))))
+    return rows
+
+
+# ----------------------------------------------------------------------------- failures the apps report («الأعطال»)
+# Every failure in a user's app (a task that stopped on an error, or ended with actions that failed, or an error in
+# the script) arrives here by itself, with that account's log, for the owner to see what went wrong.
+FAILURES_MAX = 500
+FAILURES_PER_HOUR = 30                # reports a code may send in an hour
+
+
+def load_failures() -> dict:
+    data = read_private_json(FAILURES_PATH) or {}
+    items = data.get("items")
+    return {"seq": int(data.get("seq") or 0), "items": items if isinstance(items, list) else []}
+
+
+def save_failures(data: dict) -> None:
+    write_private_json(FAILURES_PATH, {"version": 1, "seq": int(data.get("seq") or 0), "items": data.get("items") or []})
+
+
+def failure_rows(codes: list) -> list:
+    names = {row.get("id"): row for row in codes}
+    now = int(time.time())
+    rows = []
+    for item in load_failures()["items"]:
+        code = names.get(item.get("code_id")) or {}
+        delta = now - int(item.get("at") or 0)
+        ago = ("الآن" if delta < 60 else f"قبل {delta // 60} د" if delta < 3600
+               else f"قبل {delta // 3600} س" if delta < 86400 else f"قبل {delta // 86400} يوم")
+        rows.append(dict(item, who=code.get("label") or item.get("label") or "مستخدم محذوف", code=code.get("code") or "",
+                         ago=ago, when=time.strftime("%Y-%m-%d %H:%M", time.localtime(int(item.get("at") or 0)))))
     return rows
 
 
@@ -1485,6 +1517,12 @@ input::placeholder{color:var(--mut);opacity:.8}
 .nh{display:flex;align-items:center;gap:8px;font-size:13px}.nh form{margin-inline-start:auto}.nh .ib{width:36px;height:36px}
 .nb{border-radius:99px;padding:1px 10px;font-size:12.5px;font-weight:600;background:var(--prisoft);color:var(--pri)}
 .nb.k-warn{background:var(--warnsoft);color:var(--warn)}.nb.k-urgent{background:var(--badsoft);color:var(--bad)}
+.fa-all{display:flex;gap:6px;flex-wrap:wrap}.fa-all form{margin:0}.fa-all .btn{margin:0}
+.ft{font-size:14.5px;font-weight:600;line-height:1.6}.fk{display:inline-block;border-radius:99px;padding:0 9px;font-size:12px;font-weight:600;margin-inline-end:4px}
+.fk.k-urgent{background:var(--badsoft);color:var(--bad)}.fk.k-warn{background:var(--warnsoft);color:var(--warn)}
+.fs2{font-size:12.5px}.fm{font-size:14px}
+.fsum{display:flex;flex-wrap:wrap;gap:6px}.fsum span{border:1px solid var(--line);border-radius:9px;padding:3px 10px;font-size:12.5px;color:var(--mut)}.fsum b{color:var(--ink)}.fsum .bad,.fsum .bad b{color:var(--bad)}
+.fl{list-style:none;margin:8px 0 0;padding:0;display:grid;gap:4px;font-size:12.5px}.fl li{padding:6px 10px;border-radius:8px;background:var(--soft);overflow-wrap:anywhere}
 .fl-ok{background:var(--prisoft);color:var(--pri)}.fl-bad{background:var(--badsoft);color:var(--bad)}
 .mvd{display:grid;gap:8px;margin:12px 0 4px;font-size:14px}.mvd div{display:flex;gap:12px;align-items:baseline}.mvd dt{color:var(--mut);min-width:72px;flex:none}.mvd dd{margin:0}
 .mc{font:700 16px/1 var(--mono);letter-spacing:1px;background:var(--soft);border:1px solid var(--line);border-radius:8px;padding:4px 8px;direction:ltr;display:inline-block}
@@ -1508,7 +1546,7 @@ input[type=file].fs{height:auto;padding:10px 12px}
 .mv{grid-column:1/-1;width:100%;max-height:420px;border-radius:12px;background:#000}
 .mm summary{min-height:36px;margin:0}
 .md{display:grid;gap:6px;margin:8px 0;font-size:13px}.md div{display:flex;gap:10px}.md dt{color:var(--mut);min-width:64px}.md dd{margin:0;overflow-wrap:anywhere}
-.lg{margin:0;max-height:260px;overflow:auto;padding:10px 12px;border-radius:10px;background:var(--soft);border:1px solid var(--line);font:12px/1.6 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere;direction:rtl;text-align:start}
+.lg{margin:0;max-height:260px;overflow:auto;padding:10px 12px;border-radius:10px;background:var(--soft);border:1px solid var(--line);font:12px/1.6 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere;direction:rtl;text-align:start;unicode-bidi:plaintext}
 .mr{border-radius:12px;background:var(--prisoft);padding:9px 12px;font-size:14px}.mr p{white-space:pre-wrap;overflow-wrap:anywhere;margin-top:2px}
 .ma{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start}.ma .btn{margin:0}.ma .ib{width:38px;height:38px}
 .ma form{margin:0}.rp{flex-basis:100%}.rp summary{list-style:none;cursor:pointer;display:inline-flex}.rp summary::-webkit-details-marker{display:none}
@@ -1628,6 +1666,7 @@ main{padding-bottom:56px}
 <button type="button" data-t="keys">{{ic('key')}}<span>المفاتيح</span>{% if nokey %}<i class="dot" title="لا يوجد مفتاح للكاتب الحالي"></i>{% endif %}</button>
 <button type="button" data-t="notices">{{ic('bell')}}<span>التنبيهات</span></button>
 <button type="button" data-t="support">{{ic('msg')}}<span>الرسائل</span>{% if unread %}<i class="cnt" title="{{unread}} رسالة جديدة">{{unread}}</i>{% endif %}</button>
+<button type="button" data-t="failures">{{ic('alert')}}<span>الأعطال</span>{% if failures_new %}<i class="cnt" title="{{failures_new}} عطل جديد">{{failures_new}}</i>{% endif %}</button>
 <button type="button" data-t="link">{{ic('link')}}<span>الربط</span>{% if not backup_when %}<i class="dot" title="لم تُنزَّل نسخة احتياطية بعد"></i>{% endif %}</button>
 </nav>
 <div class="acts"><button class="ib th" id="th" type="button" aria-label="تبديل المظهر"><span class="m">{{ic('moon')}}</span><span class="s">{{ic('sun')}}</span></button>
@@ -1767,6 +1806,28 @@ main{padding-bottom:56px}
 {% else %}<div class="empty" style="margin-top:16px"><h3>لا توجد رسائل بعد</h3><p>تظهر هنا رسائل المستخدمين من زر «مساعدة» في التطبيق.</p></div>{% endif %}
 </section>
 
+<section class="panel" id="p-failures">
+<div class="card pad"><div class="sh"><h2>الأعطال</h2>{% if failures %}<div class="fa-all">{% if failures_new %}<form method="post" action="/{{admin}}/failures/read" data-toast="تم تعليم الكل كمقروء"><input type="hidden" name="id" value="0"><button class="btn ghost sm">تعليم الكل كمقروء</button></form>{% endif %}<form method="post" action="/{{admin}}/failures/delete" data-title="حذف كل الأعطال؟" data-confirm="تُحذف كل تقارير الأعطال نهائيًا." data-yes="حذف الكل" data-kind="danger" data-toast="حُذفت كل الأعطال"><input type="hidden" name="id" value="0"><button class="btn ghost sm">حذف الكل</button></form></div>{% endif %}</div>
+<p class="mut">يصل هنا تلقائيًا كل فشل في تطبيق أي مستخدم: مهمة توقفت بخطأ، أو اكتملت وفيها إجراءات فاشلة، أو خطأ في السكربت؛ ومعه سجل ذلك الحساب. لا يرى المستخدم شيئًا من ذلك.</p></div>
+{% if failures %}<div class="ml">{% for f in failures %}{% set hue = ((f.code_id or '00')[:2]|int(0,16)) * 360 // 256 %}
+<article class="msg fa{{ '' if f.read else ' new' }}" id="f{{f.id}}">
+<div class="mh"><div class="av" style="--h:{{hue}}" aria-hidden="true">{{ (f.who or '؟')[:1] }}</div>
+<div class="nm"><h3>{{f.who}}{% if f.account %} · <bdi dir="ltr">@{{f.account}}</bdi>{% endif %}{% if not f.read %} <span class="nw">جديد</span>{% endif %}</h3><p>{{f.ago}} · <span dir="ltr">{{f.when}}</span>{% if f.version %} · الإصدار {{f.version}}{% endif %}</p></div></div>
+<p class="ft"><span class="fk k-{{ 'urgent' if f.kind != 'actions' else 'warn' }}">{{ {'task': 'فشلت مهمة', 'actions': 'إجراءات فاشلة', 'error': 'خطأ في السكربت'}.get(f.kind, 'عطل') }}</span> {{f.title}}</p>
+{% if f.task %}<p class="mut fs2">المهمة: {{f.task}}</p>{% endif %}
+{% if f.message %}<p class="mt fm">{{f.message}}</p>{% endif %}
+{% if f.summary %}<div class="fsum">{% if f.summary.requested is defined %}<span>المطلوب <b>{{f.summary.requested}}</b></span>{% endif %}{% if f.summary.done is defined %}<span>المنفَّذ <b>{{f.summary.done}}</b></span>{% endif %}{% if f.summary.failed is defined %}<span class="bad">الفاشل <b>{{f.summary.failed}}</b></span>{% endif %}</div>{% endif %}
+{% if f.failed %}<details class="acc mm"><summary class="axs"><span>الإجراءات الفاشلة ({{f.failed|length}})</span>{{ic('chev')}}</summary><ul class="fl">{% for line in f.failed %}<li dir="auto">{{line}}</li>{% endfor %}</ul></details>{% endif %}
+{% if f.log or f.trace %}<details class="acc mm"><summary class="axs"><span>السجل</span>{{ic('chev')}}</summary>{% if f.trace %}<pre class="lg">{{f.trace}}</pre>{% endif %}{% if f.log %}<pre class="lg">{{f.log}}</pre>{% endif %}</details>{% endif %}
+{% if f.clicks %}<details class="acc mm"><summary class="axs"><span>سجل النقر</span>{{ic('chev')}}</summary><pre class="lg">{{f.clicks}}</pre></details>{% endif %}
+{% if f.device %}<p class="mut fs2" dir="ltr">{{f.device}}</p>{% endif %}
+<div class="ma"><button type="button" class="btn ghost sm" data-copy="{{ f.title }}&#10;{{ f.message }}&#10;{{ f.failed|join('&#10;') }}&#10;&#10;{{ f.trace }}&#10;{{ f.log }}">{{ic('copy')}}نسخ</button>
+<form method="post" action="/{{admin}}/failures/read"><input type="hidden" name="id" value="{{f.id}}"><button class="btn ghost sm">{{ 'تعليم كغير مقروء' if f.read else 'تعليم كمقروء' }}</button></form>
+<form method="post" action="/{{admin}}/failures/delete" data-toast="حُذف العطل"><input type="hidden" name="id" value="{{f.id}}"><button class="ib" aria-label="حذف العطل">{{ic('trash')}}</button></form></div>
+</article>{% endfor %}</div>
+{% else %}<div class="empty" style="margin-top:16px"><h3>لا توجد أعطال</h3><p>يظهر هنا كل فشل في تطبيقات المستخدمين، تلقائيًا ومعه السجل.</p></div>{% endif %}
+</section>
+
 <section class="panel" id="p-link">
 {% if flash %}<div class="note fl-{{flash.kind}}" role="status">{{ic('alert' if flash.kind != 'ok' else 'check')}}<p>{{flash.text}}</p></div>{% endif %}
 <div class="card pad"><h2>رابط التطبيق</h2><p class="mut">انسخه كاملًا وضعه في التطبيق عند إعداد الخادم.</p>
@@ -1852,7 +1913,7 @@ function take(k){var v=sget(k);if(v==null)return null;sset(k);var at=v.indexOf('
 function toast(m){var t=D.createElement('div');t.className='toast';t.textContent=m;$('.toasts').appendChild(t);setTimeout(function(){t.classList.add('out');setTimeout(function(){t.remove()},300)},2400)}
 
 /* sections */
-var TABS=['users','keys','notices','support','link'];
+var TABS=['users','keys','notices','support','failures','link'];
 function tab(n,byUser){if(TABS.indexOf(n)<0)n='users';
 $$('.panel').forEach(function(p){p.classList.toggle('on',p.id==='p-'+n)});
 $$('.nav button').forEach(function(b){if(b.dataset.t===n)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current')});
@@ -1982,10 +2043,12 @@ def dashboard():
     messages = support_rows(codes)
     move = load_move()
     last_backup = int(SECRETS.get("last_backup") or 0)
+    failures = failure_rows(codes)
     return render_template_string(
         DASHBOARD, admin=ADMIN, app_link=app_link(), codes=rows, stats=stats,
         notices=notices, notice_kinds=NOTICE_KINDS, messages=messages,
         unread=sum(1 for m in messages if not m.get("read")),
+        failures=failures, failures_new=sum(1 for f in failures if not f.get("read")),
         flash=session.pop("flash", None), move_code=move_code(SECRETS.get("move_public", "")),
         move_link=move.get("link") or "", move_when=seen_text({"last_seen": int(move.get("at") or 0)}) if move.get("at") else "",
         move_active=bool(move.get("record")) and int(time.time()) < int(move.get("until") or 0),
@@ -2374,6 +2437,38 @@ def support_reply():
     return redirect(f"/{ADMIN}")
 
 
+@app.post(f"/{ADMIN}/failures/read")
+def failures_read():
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    try:
+        failure_id = int(request.form.get("id") or 0)
+    except ValueError:
+        return redirect(f"/{ADMIN}")
+    with LOCK:
+        data = load_failures()
+        for item in data["items"]:
+            if failure_id == 0 or item.get("id") == failure_id:
+                item["read"] = True if failure_id == 0 else not item.get("read")
+        save_failures(data)
+    return redirect(f"/{ADMIN}")
+
+
+@app.post(f"/{ADMIN}/failures/delete")
+def failures_delete():
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    try:
+        failure_id = int(request.form.get("id") or 0)
+    except ValueError:
+        return redirect(f"/{ADMIN}")
+    with LOCK:
+        data = load_failures()
+        data["items"] = [item for item in data["items"] if failure_id != 0 and item.get("id") != failure_id]
+        save_failures(data)
+    return redirect(f"/{ADMIN}")
+
+
 # ----------------------------------------------------------------------------- the app API (link protocol)
 def api_ok(**data):
     return jsonify(ok=True, **data)
@@ -2523,6 +2618,37 @@ def api_support():
     for item in dropped:
         shutil.rmtree(SUPPORT_DIR / str(item.get("id")), ignore_errors=True)
     return api_ok(id=message_id)
+
+
+@app.post(f"/{API}/failure")
+def api_failure():
+    """A failure in this app (sent by itself, without asking the user): what failed, and that account's log."""
+    body = request.get_json(silent=True) or {}
+    row = code_from_token(body.get("token"))
+    if not row:
+        return api_err("انتهت صلاحية الدخول أو أوقِف الرمز أو نُقل لجهاز آخر. أعد إدخال الرمز.", 200)
+    report = body.get("report") if isinstance(body.get("report"), dict) else {}
+    text = lambda key, limit: str(report.get(key) or "")[:limit]
+    failed = [str(line)[:300] for line in (report.get("failed") or []) if isinstance(line, (str, int, float))][:50]
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    summary = {key: int(summary[key]) for key in ("requested", "done", "failed")
+               if key in summary and str(summary[key]).isdigit()}
+    now = int(time.time())
+    with LOCK:
+        data = load_failures()
+        recent = sum(1 for item in data["items"] if item.get("code_id") == row["id"] and now - int(item.get("at") or 0) < 3600)
+        if recent >= FAILURES_PER_HOUR:
+            return api_ok(kept=False)          # (too many this hour: dropped, the app does not send it again)
+        data["seq"] += 1
+        data["items"].insert(0, {
+            "id": data["seq"], "code_id": row["id"], "label": row.get("label") or "", "at": now, "read": False,
+            "kind": text("kind", 20), "title": text("title", 200), "message": text("message", 1000), "task": text("task", 120),
+            "account": text("account", 40), "summary": summary, "failed": failed, "log": text("log", 20000),
+            "clicks": text("clicks", 8000), "trace": text("trace", 6000), "version": text("version", 40),
+            "device": text("device", 300)})
+        del data["items"][FAILURES_MAX:]
+        save_failures(data)
+    return api_ok(kept=True)
 
 
 @app.post(f"/{API}/notices")

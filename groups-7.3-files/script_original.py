@@ -11107,6 +11107,7 @@ def publish_job(job_id: str, **fields) -> None:
             jobs_unsaved = True
     if finished:
         notify_task_done(finished[0], finished[1])
+        failure_check(job_id)
 
 
 def begin_job(owner: str, client_id: str, requested: int, phase: str, message: str, kind: str, username: str) -> tuple[str, str]:
@@ -13479,6 +13480,164 @@ def report_stats_in_background() -> None:
 
 threading.Thread(target=report_stats_in_background, name="stats-to-control", daemon=True).start()
 threading.Thread(target=watch_control_moves, name="control-moves", daemon=True).start()
+
+
+# «الأعطال»: كل فشل (مهمة توقفت بخطأ، أو اكتملت وفيها إجراءات فاشلة، أو خطأ في السكربت) يُرسل وحده إلى لوحة
+# التحكّم مع سجل ذلك الحساب، بلا أي تنبيه للمستخدم. تُحذف من السجل قبل الإرسال الرموز والمفاتيح وكلمات المرور.
+# التقارير تنتظر في الجهاز إن تعذّر الوصول للخادم، وتُرسل بعده.
+FAILURE_OUTBOX = DATA_DIR / "failure-outbox.json"
+_FAILURE_PER_HOUR = 20
+_FAILURE_OUTBOX_MAX = 30
+_failure_lock = threading.Lock()
+_failure_wake = threading.Event()
+_failure_recent: deque = deque()             # (when, what): the last hour's reports, for the limit and repeats
+_SCRUB = (
+    (re.compile(r"(?i)\b(auth_token|ct0|twid|kdt|token|api[_-]?key|password|passwd|pin|secret|cookie)(\s*[=:]\s*)[^\s,;&\"']+"),
+     r"\1\2[مخفي]"),
+    (re.compile(r"\bAIza[0-9A-Za-z_\-]{20,}"), "[مفتاح]"),
+    (re.compile(r"\bsk-[A-Za-z0-9_\-]{16,}"), "[مفتاح]"),
+    (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]+"), "Bearer [مخفي]"),
+    (re.compile(r"\b[0-9a-fA-F]{32,}\b"), "[مخفي]"),                 # (an X sign-in token is 40 of these)
+    (re.compile(r"[A-Za-z0-9_\-+/]{60,}={0,2}"), "[مخفي]"),          # (long codes: tokens, keys)
+)
+
+
+def scrub(text: str) -> str:
+    text = str(text or "")
+    for pattern, replacement in _SCRUB:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def _account_log(key: str, lines: int = 200) -> str:
+    try:
+        import ggapp
+        own = "\n".join(ggapp._lines_of(key, lines)) if key else ""
+        general = "\n".join(ggapp._lines_of("", 60))
+        return ((own + "\n\n--- السجل العام ---\n" + general) if own else general)[-20000:]
+    except Exception:
+        return ""
+
+
+def _click_log(key: str) -> str:
+    try:
+        path = account_dir(key) / "click-log.txt" if key else CLICK_LOG_PATH
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            return handle.read()[-8000:]
+    except OSError:
+        return ""
+
+
+def _failure_base() -> dict:
+    device = ""
+    if IN_APP:
+        try:
+            import ggapp
+            device = str(ggapp.device_line())
+        except Exception:
+            pass
+    return {"version": shown_version(), "device": device}
+
+
+def queue_failure(report: dict) -> None:
+    """Keeps the report for sending (at most 20 an hour; one already sent in the last 10 minutes is not sent again)."""
+    if not control_configured():
+        return
+    now = time.time()
+    what = (report.get("title") or "") + "|" + (report.get("message") or "")[:200] + "|" + (report.get("account") or "")
+    with _failure_lock:
+        while _failure_recent and now - _failure_recent[0][0] > 3600:
+            _failure_recent.popleft()
+        if len(_failure_recent) >= _FAILURE_PER_HOUR or any(w == what and now - t < 600 for t, w in _failure_recent):
+            return
+        _failure_recent.append((now, what))
+        for key in ("title", "message", "task", "log", "clicks", "trace", "device"):
+            if report.get(key):
+                report[key] = scrub(report[key])
+        report["failed"] = [scrub(line) for line in report.get("failed") or []]
+        outbox = read_private_json(FAILURE_OUTBOX) or {}
+        items = outbox.get("items") if isinstance(outbox.get("items"), list) else []
+        items.append(report)
+        write_private_json(FAILURE_OUTBOX, {"items": items[-_FAILURE_OUTBOX_MAX:]})
+    _failure_wake.set()
+
+
+def failure_check(job_id: str) -> None:
+    """A task just finished: if it failed, or some of its actions did, its report is made (a moment later, so the
+    last lines it printed are in the log)."""
+    def later() -> None:
+        time.sleep(3)
+        with jobs_lock:
+            job = jobs.get(job_id)
+            if not job or job.get("failure_reported") or (job.get("kind") or "") != "execute":
+                return
+            job["failure_reported"] = True
+            success, message = bool(job.get("success")), str(job.get("message") or "")
+            results = [dict(row) for row in job.get("results") or [] if isinstance(row, dict)]
+            key, task = str(job.get("account") or ""), str(job.get("username") or "")
+            requested = int(job.get("requested") or 0)
+        if message.strip() == "تم إيقاف التنفيذ.":
+            return                                     # (stopped by the user: not a failure)
+        failed = [f"{row.get('url') or ''} · {action}: {note}" for row in results
+                  for action, note in (row.get("actions") or {}).items() if action_failed(note)]
+        if success and not failed:
+            return
+        summary = {"requested": requested, "done": len(results)}
+        if failed:
+            summary["failed"] = len(failed)
+        report = dict(_failure_base(), kind="task" if not success else "actions",
+                      title="فشلت المهمة" if not success else f"اكتملت المهمة وفيها {len(failed)} إجراء فاشل",
+                      message=message, task=task, account=account_names.get(key, ""), summary=summary,
+                      failed=failed[:50], log=_account_log(key), clicks=_click_log(key))
+        queue_failure(report)
+    threading.Thread(target=later, name="failure-check", daemon=True).start()
+
+
+def report_script_error(sender, exception=None, **_extra) -> None:
+    """An error the script did not expect, while answering the page."""
+    try:
+        if exception is None or isinstance(exception, (JobStopped,)):
+            return
+        key = current_account()
+        trace = "".join(traceback.format_exception(type(exception), exception, exception.__traceback__))[-6000:]
+        queue_failure(dict(_failure_base(), kind="error", title=f"خطأ في السكربت: {type(exception).__name__}",
+                           message=str(exception)[:500], account=account_names.get(key, ""), trace=trace,
+                           log=_account_log(key)))
+    except Exception:
+        pass
+
+
+try:
+    from flask import got_request_exception as _got_request_exception
+    _got_request_exception.connect(report_script_error, app)
+except Exception:
+    pass
+
+
+def send_failures_in_background() -> None:
+    while True:
+        _failure_wake.wait(300)
+        _failure_wake.clear()
+        token = _current_token()
+        if not control_configured() or not token:
+            continue
+        while True:
+            with _failure_lock:
+                items = (read_private_json(FAILURE_OUTBOX) or {}).get("items") or []
+            if not items:
+                break
+            try:
+                _control_request("failure", {"token": token, "report": items[0]}, seconds=30)
+            except _ControlUnreachable:
+                break                                   # (sent later)
+            except RuntimeError:
+                pass                                    # (refused, e.g. an older server: dropped, not sent again)
+            with _failure_lock:
+                left = (read_private_json(FAILURE_OUTBOX) or {}).get("items") or []
+                write_private_json(FAILURE_OUTBOX, {"items": left[1:]})
+
+
+threading.Thread(target=send_failures_in_background, name="failures-to-control", daemon=True).start()
 
 
 UNLOCK_PAGE = """<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">

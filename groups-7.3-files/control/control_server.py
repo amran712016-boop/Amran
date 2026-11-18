@@ -756,6 +756,27 @@ def script_version(text: str) -> str:
     return match.group(1) if match else ""
 
 
+VERSION_FORM = re.compile(r"^[0-9]{1,4}(\.[0-9]{1,4}){0,3}$")
+
+
+def version_tuple(version: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in re.findall(r"\d+", version or "")) or (0,)
+
+
+def next_version(version: str) -> str:
+    """1.0 → 1.1, 1.9 → 1.10, 2 → 3. With nothing published, 1.1 (the apps' built-in script is 1.0)."""
+    parts = [int(part) for part in re.findall(r"\d+", version or "")] or [1, 0]
+    parts[-1] += 1
+    return ".".join(str(part) for part in parts)
+
+
+def stamp_version(raw: bytes, version: str) -> bytes:
+    """The script with its APP_VERSION line set to version (the number the owner chose in the panel)."""
+    text = raw.decode("utf-8")
+    text = re.sub(r'^APP_VERSION = "[^"\n]*"', f'APP_VERSION = "{version}"', text, flags=re.M)
+    return text.encode("utf-8")
+
+
 def check_script(raw: bytes, name: str, want_version: bool) -> tuple[str, str]:
     """(error, version) for an uploaded file; error is "" when it is a usable script/content file."""
     if not raw:
@@ -771,7 +792,7 @@ def check_script(raw: bytes, name: str, want_version: bool) -> tuple[str, str]:
     if want_version:
         version = script_version(text)
         if not version:
-            return f"ملف {name} بلا سطر APP_VERSION = \"...\" — أضِف رقم الإصدار وارفعه من جديد.", ""
+            return f"هذا لا يبدو ملف السكربت الصحيح ({name}): لا يوجد فيه سطر APP_VERSION.", ""
         if "flask" not in text.lower():
             return f"هذا لا يبدو ملف السكربت الصحيح ({name}).", ""
         return "", version
@@ -1994,7 +2015,7 @@ main{padding-bottom:56px}
 <section class="panel" id="p-script">
 {% if flash %}<div class="note fl-{{flash.kind}}" role="status">{{ic('alert' if flash.kind != 'ok' else 'check')}}<p>{{flash.text}}</p></div>{% endif %}
 <div class="card pad"><h2>سكربت التطبيق</h2>
-<p class="mut">هذا هو برنامج التطبيق. حدّثه من هنا: ارفع الملف المعدّل ثم اضغط «نشر التحديث»، فيظهر للمستخدمين زر «تحديث» داخل التطبيق — دون بناء تطبيق جديد. انتبه: ارفع رقم إصدار أعلى (السطر <code>APP_VERSION</code>) في الملف وإلا لن يظهر التحديث.</p>
+<p class="mut">هذا هو برنامج التطبيق. حدّثه من هنا: ارفع الملف المعدّل ثم اضغط «نشر التحديث»، فيظهر للمستخدمين زر «تحديث» داخل التطبيق — دون بناء تطبيق جديد. رقم الإصدار تحدده هنا، ولا حاجة لتعديله داخل الملف.</p>
 <dl class="mvd">
 <div><dt>المنشور الآن</dt><dd>{% if script_live.version %}الإصدار <b>{{script_live.version}}</b> · نُشر {{script_live_when}}{% if script_live.has_content %} · مع content.py{% endif %}{% else %}<span class="mut">لا يوجد سكربت منشور بعد. التطبيقات تعمل بالسكربت المدمج فيها.</span>{% endif %}</dd></div>
 {% if script_staged.version %}<div><dt>المرفوع</dt><dd>الإصدار <b>{{script_staged.version}}</b>{% if script_can_publish %} · <span class="b on">جاهز للنشر</span>{% else %} · <span class="mut">منشور</span>{% endif %}</dd></div>{% endif %}
@@ -2004,6 +2025,8 @@ main{padding-bottom:56px}
 <input id="sc-gg" class="fs" type="file" name="gg" accept=".py,text/x-python,text/plain" required>
 <label class="l" for="sc-content">ملف content.py <small>(اختياري، إن تغيّر)</small></label>
 <input id="sc-content" class="fs" type="file" name="content" accept=".py,text/x-python,text/plain">
+<label class="l" for="sc-ver">رقم الإصدار <small>(مقترح تلقائيًا، يجب أن يكون أعلى من {{script_live.version or "1.0"}})</small></label>
+<input id="sc-ver" name="version" dir="ltr" value="{{script_next}}" inputmode="decimal" pattern="[0-9٠-٩]+([.٫][0-9٠-٩]+){0,3}" autocomplete="off" autocapitalize="off" spellcheck="false" required>
 <button class="btn wide ghost" style="margin-top:12px">{{ic('code')}}رفع السكربت</button></form>
 {% if script_can_publish %}<form method="post" action="/{{admin}}/script/publish" data-title="نشر التحديث؟" data-confirm="سيصل الإصدار {{script_staged.version}} إلى كل المستخدمين، فيظهر لهم زر «تحديث» في التطبيق. تأكد أنك جرّبت الملف." data-yes="نشر" data-toast="تم نشر التحديث">
 <button class="btn wide" style="margin-top:10px">{{ic('check')}}نشر التحديث (الإصدار {{script_staged.version}})</button></form>{% endif %}
@@ -2298,7 +2321,7 @@ def dashboard():
         backup_when=seen_text({"last_seen": last_backup}) if last_backup else "",
         owner_link=owner_app_link(request.host), in_owner_app=OWNER_APP_MARK in (request.headers.get("User-Agent") or ""),
         this_host=request.host, relay=MOVE_RELAY.split("//")[-1],
-        script_live=script_live, script_staged=script_staged,
+        script_live=script_live, script_staged=script_staged, script_next=next_version(script_live.get("version") or ""),
         script_live_when=seen_text({"last_seen": int(script_live.get("published_at") or 0)}) if script_live.get("published_at") else "",
         script_can_publish=bool(script_staged.get("version")) and (
             script_staged.get("sha256") != script_live.get("sha256")
@@ -2788,10 +2811,22 @@ def script_upload():
     if len(gg_raw) > SCRIPT_GG_MAX:
         flash("bad", "ملف السكربت أكبر من المسموح (٨ ميجابايت).")
         return redirect(f"/{ADMIN}")
-    problem, version = check_script(gg_raw, "السكربت", want_version=True)
+    problem, _ = check_script(gg_raw, "السكربت", want_version=True)
     if problem:
         flash("bad", problem)
         return redirect(f"/{ADMIN}")
+    live_version = str(load_script_meta(SCRIPT_META).get("version") or "")
+    version = (request.form.get("version") or "").strip().translate(str.maketrans("٠١٢٣٤٥٦٧٨٩٫", "0123456789."))
+    if not version:
+        version = next_version(live_version)
+    if not VERSION_FORM.match(version):
+        flash("bad", "رقم الإصدار غير صحيح. اكتبه أرقامًا ونقاطًا فقط، مثل 1.1")
+        return redirect(f"/{ADMIN}")
+    if live_version and version_tuple(version) <= version_tuple(live_version):
+        flash("bad", f"رقم الإصدار يجب أن يكون أعلى من المنشور الآن ({live_version})، وإلا لن يظهر التحديث للمستخدمين. "
+                     f"مثلًا: {next_version(live_version)}")
+        return redirect(f"/{ADMIN}")
+    gg_raw = stamp_version(gg_raw, version)
     content_raw = b""
     if content and content.filename:
         content_raw = content.read(SCRIPT_CONTENT_MAX + 1)

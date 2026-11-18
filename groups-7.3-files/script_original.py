@@ -10755,7 +10755,11 @@ def new_program_problem(body: bytes, latest: dict) -> str:
 
 
 def program_starts(body: bytes) -> bool:
-    """Load the new program once in a separate Python, in a scratch folder, to see that it starts."""
+    """Load the new program once in a separate Python, in a scratch folder, to see that it starts. In the app there
+    is no separate Python on Android to try it in: there the download is checked (hash, compiles, version) and the
+    app's loader goes back to the kept version by itself if the new one does not start."""
+    if IN_APP:
+        return True
     trial = BACKUPS_DIR / "trial"
     shutil.rmtree(trial, ignore_errors=True)
     try:

@@ -261,11 +261,54 @@ def _setup(access):
     return jsonify(ok=True)
 
 
+BACKUPS_DIR = DATA_DIR / "backups"
+
+
+def roll_back() -> bool:
+    """Put back the version an update replaced (the update keeps it in data/backups as engine-<version>.py, with
+    its content-<version>.py). The backup is used up, so a version that also fails does not loop."""
+    try:
+        kept = sorted(BACKUPS_DIR.glob("engine-*.py"), key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        return False
+    for backup in kept:
+        try:
+            body = backup.read_bytes()
+            compile(body.decode("utf-8"), "engine.py", "exec")
+        except Exception:
+            continue
+        version = backup.stem[len("engine-"):]
+        content = BACKUPS_DIR / f"content-{version}.py"
+        try:
+            if content.is_file():
+                tmp = CONTENT_FILE.with_name("content.py.new")
+                tmp.write_bytes(content.read_bytes())
+                tmp.replace(CONTENT_FILE)
+            tmp = ENGINE_FILE.with_name("engine.py.new")
+            tmp.write_bytes(body)
+            tmp.replace(ENGINE_FILE)
+            backup.unlink()
+        except OSError:
+            return False
+        print(f"boot: الإصدار الجديد لم يعمل — رجعت إلى الإصدار {version}.", flush=True)
+        return True
+    return False
+
+
 def run_engine() -> None:
-    """Hand off to the real script in this same process (it serves the app from here on)."""
+    """Hand off to the real script in this same process (it serves the app from here on). If it fails to start
+    (an update that does not work on this phone), go back to the version before it and restart."""
     os.chdir(str(FOLDER))
     sys.argv = [str(ENGINE_FILE)]
-    runpy.run_path(str(ENGINE_FILE), run_name="__main__")
+    try:
+        runpy.run_path(str(ENGINE_FILE), run_name="__main__")
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        if roll_back():
+            restart_app()
+            return
+        raise
 
 
 def main() -> None:

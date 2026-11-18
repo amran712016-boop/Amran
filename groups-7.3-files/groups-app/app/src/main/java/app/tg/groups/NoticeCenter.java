@@ -66,8 +66,8 @@ public final class NoticeCenter {
 
     Button bell() {
         bell = page.tab("🔔");
-        bell.setMinWidth(page.dp(52));
-        bell.setMinimumWidth(page.dp(52));
+        bell.setMinWidth(page.dp(46));
+        bell.setMinimumWidth(page.dp(46));
         bell.setContentDescription("التنبيهات");
         bell.setOnClickListener(v -> openList());
         paintBell();
@@ -81,12 +81,12 @@ public final class NoticeCenter {
         if (unread > 0) {
             String count = unread > 99 ? "99+" : String.valueOf(unread);
             bell.setText("🔔 " + count);
-            bell.setBackground(page.shape(BADGE, 0, 10));
+            bell.setBackground(page.shape(BADGE, 0, 9));
             bell.setTextColor(MainActivity.ON_PINE);
             bell.setTypeface(Typeface.DEFAULT_BOLD);
         } else {
             bell.setText("🔔");
-            bell.setBackground(page.shape(MainActivity.SHEET, MainActivity.LINE, 10));
+            bell.setBackground(page.shape(MainActivity.SHEET, MainActivity.LINE, 9));
             bell.setTextColor(MainActivity.INK);
             bell.setTypeface(Typeface.DEFAULT);
         }

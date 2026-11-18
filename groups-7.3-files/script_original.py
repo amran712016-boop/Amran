@@ -991,6 +991,113 @@ EMBEDDED_PAGE = r'''<!doctype html>
     .guide-steps li { border: 1px solid var(--line); background: var(--tile); }
     .version-line { margin-top: 18px; }
 
+    /* ───── 7.4: compact and calm — smaller type, 32px controls, tighter cards: the phone shows more at once ───── */
+    :root { --r-card: 12px; --r-ctl: 8px; --h-ctl: 32px; }
+    body { font-size: 13.5px; line-height: 1.5; }
+    .page { width: min(520px, 100%); padding: calc(8px + env(safe-area-inset-top)) 10px calc(14px + env(safe-area-inset-bottom)); }
+    /* the head: the brand on one line, its links as a row of small chips */
+    .mast { gap: 8px; padding: 10px 12px; border-radius: var(--r-card); }
+    .brand { gap: 10px; }
+    .mark { width: 30px; height: 30px; border-radius: 8px; }
+    .mark::before { inset-inline-start: 9px; top: 9px; bottom: 9px; width: 12px; border-radius: 2px; }
+    .eyebrow { font-size: 10.5px; }
+    h1 { font-size: 15px; }
+    .mast-links { display: flex; flex-wrap: wrap; gap: 6px; }
+    .mast-links > * { flex: 1 1 auto; }
+    .mast-links .btn, .usage-pill { min-height: 30px; height: 30px; padding: 0 10px; border-radius: var(--r-ctl); font-size: 12px; font-weight: 600; }
+    .usage-pill { gap: 6px; padding-inline: 10px 4px; }
+    .usage-cost { height: 22px; padding: 0 7px; border-radius: 6px; font-size: 11px; }
+    .counts { gap: 6px; }
+    .counts li { gap: 1px; padding: 6px 2px; border-radius: 9px; font-size: 10.5px; }
+    .counts b { font-size: 16px; }
+    /* the sheets and their sections */
+    .sheet { margin-top: 8px; border-radius: var(--r-card); }
+    .sheet-inner { padding: 10px 12px 12px; }
+    .block + .block { margin-top: 10px; padding-top: 10px; }
+    .sheet h2, .block-head h2 { gap: 6px; margin-bottom: 7px; font-size: 13px; }
+    .sheet h2::before, .block-head h2::before { width: 3px; height: 13px; }
+    .field-label, label.field-label { font-size: 11px; }
+    .hint { font-size: 11.5px; }
+    /* the controls: all 32 high */
+    input[type="password"], input[type="text"], input[type="number"] { min-height: var(--h-ctl); height: var(--h-ctl); padding: 0 10px; font-size: 13.5px; }
+    .btn { min-height: var(--h-ctl); height: var(--h-ctl); padding: 0 12px; font-size: 12px; font-weight: 600; }
+    .btn-wide { min-height: 38px; height: 38px; margin-top: 10px; border-radius: 9px; font-size: 14px; font-weight: 700; }
+    .token-row, #session-block .token-row, .groups-row { gap: 6px; }
+    .session-account { margin-top: 6px; font-size: 12.5px; }
+    .wait-groups { height: var(--h-ctl); padding: 0 8px; font-size: 12px; }
+    .wait-groups input[type="checkbox"], .options input[type="checkbox"] { width: 15px; height: 15px; }
+    input.wait-sec { min-height: 24px; height: 24px; padding: 0 2px; font-size: 12.5px; border-radius: 6px; }
+    .wait-groups input.wait-sec { flex: 0 0 42px; width: 42px; min-width: 42px; }
+    .options { gap: 6px 12px; margin: 8px 0; padding: 8px 10px; border-radius: 10px; font-size: 11.5px; }
+    .stop-row { margin-top: 6px; }
+    #group-box { margin-top: 6px; margin-bottom: 6px; padding: 6px 8px 8px; border-radius: 10px; }
+    #group-list .pick { min-height: 26px; height: 26px; padding: 0 10px; font-size: 11.5px; }
+    .pick { min-height: 34px; padding: 4px 10px; font-size: 12.5px; }
+    .drop { min-height: 34px; font-size: 11.5px; }
+    #tweet-links { min-height: 96px; font-size: 13px; }
+    .links-foot { font-size: 11.5px; }
+    .links-foot .btn, #show-gemini, #show-claude, .gemini-edit { min-height: 28px; height: 28px; padding: 0 10px; font-size: 11.5px; }
+    .acct-chip, .acct-add { min-height: 36px; padding-block: 6px; border-radius: 10px; font-size: 12.5px; }
+    /* «الإجراءات» */
+    .choices { gap: 6px; }
+    .choice { min-height: 36px; padding: 4px 10px; gap: 8px; border-radius: 9px; }
+    .choice:has(input:checked) { box-shadow: none; }
+    .pick.is-on { box-shadow: none; }
+    .choice input { width: 16px; height: 16px; }
+    .choice-title { font-size: 12.5px; }
+    .voices .choice { min-height: 28px; padding: 0 8px; }
+    .voice-label, .engine-note, .claude-now, .gemini-owner { font-size: 11.5px; }
+    /* the notices and the update bar */
+    .notice { margin-top: 8px; padding: 8px 11px; border-radius: 10px; font-size: 12.5px; }
+    .update-bar { margin-top: 8px; padding: 5px 10px; padding-inline-end: 5px; border-radius: 10px; font-size: 12.5px; }
+    .update-bar .btn { min-height: 28px; height: 28px; }
+    /* the tasks */
+    .task-card { margin-top: 8px; padding: 10px; border-radius: 10px; }
+    .task-card h3 { font-size: 12.5px; }
+    .task-card p { font-size: 11.5px; }
+    .task-card .task-phase { margin-top: 4px; padding: 0 6px; border-radius: 5px; font-size: 10.5px; }
+    .task-card .task-count { font-size: 16px; }
+    .task-card .meter { margin-top: 8px; }
+    .meter { height: 5px; }
+    .task-actions .btn { min-height: 28px; height: 28px; margin-top: 8px; padding: 0 10px; font-size: 11.5px; }
+    .task-retry, .task-retry-failed { background: var(--pine); border-color: var(--pine-deep); color: var(--on-pine); }
+    .progress-top h2 { font-size: 13px; }
+    .progress-top p, .progress-note { font-size: 11.5px; }
+    .figure { font-size: 22px; }
+    /* the results */
+    .stats { gap: 6px; margin-top: 8px; }
+    .stat { padding: 7px 4px; border-radius: 9px; }
+    .stat b { font-size: 17px; }
+    .stat span { font-size: 10.5px; }
+    .post-list { margin-top: 8px; }
+    .post-list li { padding: 8px 0; }
+    .post-list a { font-size: 12px; }
+    .idx { font-size: 11px; }
+    .pills { margin-top: 6px; }
+    .pill { min-height: 20px; padding: 1px 7px; font-size: 10.5px; }
+    .excerpt { font-size: 12.5px; }
+    /* the sheets that open over the page */
+    .pc-backdrop { padding: 12px; }
+    .usage-sheet { padding: 12px 12px 10px; border-radius: 14px; }
+    .usage-head b { font-size: 14.5px; }
+    .usage-x { width: 28px; height: 28px; font-size: 20px; }
+    .usage-note { margin: 4px 0 8px; font-size: 11.5px; }
+    .usage-table { font-size: 12.5px; }
+    .usage-table th, .usage-table td { padding: 6px 4px; }
+    .usage-foot { gap: 6px; margin-top: 10px; }
+    .help-label { margin-bottom: 4px; font-size: 12px; }
+    .help-text { min-height: 96px; padding: 8px 10px; border-radius: 9px; font-size: 13.5px; line-height: 1.6; }
+    .help-attach { margin-top: 8px; }
+    .help-list li { padding: 4px; border-radius: 9px; }
+    .help-list .thumb { width: 38px; height: 38px; border-radius: 7px; }
+    .help-status { padding: 7px 10px; font-size: 12px; }
+    .guide-steps { gap: 6px; }
+    .guide-steps li { gap: 8px; padding: 8px; border-radius: 9px; }
+    .guide-steps b { flex-basis: 22px; height: 22px; font-size: 12px; }
+    .guide-steps strong { font-size: 12.5px; }
+    .guide-steps span { font-size: 11.5px; }
+    .version-line { margin-top: 12px; font-size: 11px; }
+
     @media (min-width: 760px) {
       body { font-size: 15px; }
       .page {

@@ -308,14 +308,14 @@ public class MainActivity extends Activity {
 
         bar = new LinearLayout(this);
         bar.setGravity(Gravity.CENTER_VERTICAL);
-        bar.setPadding(dp(12), dp(6), dp(8), dp(6));
+        bar.setPadding(dp(8), dp(4), dp(8), dp(4));
         menuAccounts = tab("☰");
-        menuAccounts.setMinWidth(dp(44));
-        menuAccounts.setMinimumWidth(dp(44));
+        menuAccounts.setMinWidth(dp(40));
+        menuAccounts.setMinimumWidth(dp(40));
         menuAccounts.setContentDescription("الحسابات");
         menuAccounts.setOnClickListener(v -> toggleDrawer());
         bar.addView(menuAccounts, gap(dp(8)));
-        TextView title = text("BOT GROB", 18, INK, true);
+        TextView title = text("BOT GROB", 16, INK, true);
         title.setSingleLine(true);
         title.setEllipsize(TextUtils.TruncateAt.END);
         title.setGravity(Gravity.CENTER_VERTICAL);
@@ -333,8 +333,8 @@ public class MainActivity extends Activity {
         notices = new NoticeCenter(this);
         bar.addView(notices.bell(), gap(dp(6)));
         Button more = tab("⋮");
-        more.setMinWidth(dp(40));
-        more.setMinimumWidth(dp(40));
+        more.setMinWidth(dp(36));
+        more.setMinimumWidth(dp(36));
         more.setOnClickListener(this::showMenu);
         bar.addView(more, gap(0));
         root.addView(bar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -360,19 +360,21 @@ public class MainActivity extends Activity {
 
         // «؟»: just under ⋮ (the bar's end: the left in Arabic), over the page; it opens the page's «مساعدة».
         helpButton = tab("؟");
-        helpButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
+        helpButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
         helpButton.setTypeface(Typeface.DEFAULT_BOLD);
         helpButton.setTextColor(PINE);
-        helpButton.setBackground(shape(SHEET, LINE, 20));
+        helpButton.setBackground(shape(SHEET, LINE, 17));
         helpButton.setPadding(0, 0, 0, 0);
-        helpButton.setMinWidth(dp(40));
-        helpButton.setMinimumWidth(dp(40));
+        helpButton.setMinWidth(dp(34));
+        helpButton.setMinimumWidth(dp(34));
+        helpButton.setMinHeight(dp(34));
+        helpButton.setMinimumHeight(dp(34));
         helpButton.setElevation(dp(3));
         helpButton.setContentDescription("مساعدة");
         helpButton.setOnClickListener(v -> callPage("window.__groupsHelp&&window.__groupsHelp.open()"));
-        FrameLayout.LayoutParams helpAt = new FrameLayout.LayoutParams(dp(40), dp(40), Gravity.TOP | Gravity.END);
+        FrameLayout.LayoutParams helpAt = new FrameLayout.LayoutParams(dp(34), dp(34), Gravity.TOP | Gravity.END);
         helpAt.topMargin = dp(6);
-        helpAt.setMarginEnd(dp(8));
+        helpAt.setMarginEnd(dp(9));
         helpButton.setVisibility(View.GONE);
         content.addView(helpButton, helpAt);
 
@@ -637,6 +639,7 @@ public class MainActivity extends Activity {
         settings.setDatabaseEnabled(true);
         settings.setSupportMultipleWindows(false);
         settings.setMediaPlaybackRequiresUserGesture(true);
+        settings.setTextZoom(Math.min(100, settings.getTextZoom()));
         view.setBackgroundColor(PAPER);
         view.setWebChromeClient(new WebChromeClient() {         // (the page's own «هل أنت متأكد؟» questions show)
             @Override
@@ -1167,19 +1170,19 @@ public class MainActivity extends Activity {
         button.setSingleLine(true);
         button.setEllipsize(TextUtils.TruncateAt.END);
         button.setTextColor(INK);
-        button.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
-        button.setBackground(shape(SHEET, LINE, 10));
+        button.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        button.setBackground(shape(SHEET, LINE, 9));
         button.setStateListAnimator(null);
-        button.setMinHeight(dp(38));
-        button.setMinimumHeight(dp(38));
-        button.setMinWidth(dp(64));
-        button.setMinimumWidth(dp(64));
-        button.setPadding(dp(12), 0, dp(12), 0);
+        button.setMinHeight(dp(34));
+        button.setMinimumHeight(dp(34));
+        button.setMinWidth(dp(56));
+        button.setMinimumWidth(dp(56));
+        button.setPadding(dp(10), 0, dp(10), 0);
         return button;
     }
 
     void paintTab(Button button, boolean chosen) {
-        button.setBackground(shape(chosen ? PINE : SHEET, chosen ? 0 : LINE, 10));
+        button.setBackground(shape(chosen ? PINE : SHEET, chosen ? 0 : LINE, 9));
         button.setTextColor(chosen ? ON_PINE : INK);
         button.setTypeface(chosen ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
     }

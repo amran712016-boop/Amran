@@ -42,6 +42,8 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Button;
 import android.widget.FrameLayout;
+import android.widget.ImageButton;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.PopupMenu;
 import android.widget.ScrollView;
@@ -111,7 +113,7 @@ public class MainActivity extends Activity {
     String reportCopy = "";
     NoticeCenter notices;                 // التنبيهات داخل التطبيق (الجرس والقائمة المنبثقة)
     static final int PICK_FILES = 41;     // «مساعدة» في الصفحة: اختيار صور أو فيديو من الجوال
-    Button helpButton;                    // «؟» تحت ⋮: يفتح «مساعدة» في الصفحة (حين تقول الصفحة إنها متاحة)
+    ImageButton helpButton;               // «الدعم» (سمّاعة) تحت ⋮: يفتح «مساعدة» في الصفحة (حين تقول الصفحة إنها متاحة)
     boolean helpReady;
     ValueCallback<Uri[]> fileCallback;
 
@@ -358,19 +360,14 @@ public class MainActivity extends Activity {
         panel = buildPanel();
         content.addView(panel, fill());
 
-        // «؟»: just under ⋮ (the bar's end: the left in Arabic), over the page; it opens the page's «مساعدة».
-        helpButton = tab("؟");
-        helpButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
-        helpButton.setTypeface(Typeface.DEFAULT_BOLD);
-        helpButton.setTextColor(PINE);
+        // «الدعم»: a headset, just under ⋮ (the bar's end: the left in Arabic), over the page; it opens «مساعدة».
+        helpButton = new ImageButton(this);
+        helpButton.setImageResource(R.drawable.ic_support);
+        helpButton.setScaleType(ImageView.ScaleType.FIT_CENTER);
         helpButton.setBackground(shape(SHEET, LINE, 17));
-        helpButton.setPadding(0, 0, 0, 0);
-        helpButton.setMinWidth(dp(34));
-        helpButton.setMinimumWidth(dp(34));
-        helpButton.setMinHeight(dp(34));
-        helpButton.setMinimumHeight(dp(34));
+        helpButton.setPadding(dp(7), dp(7), dp(7), dp(7));
         helpButton.setElevation(dp(3));
-        helpButton.setContentDescription("مساعدة");
+        helpButton.setContentDescription("الدعم والمساعدة");
         helpButton.setOnClickListener(v -> callPage("window.__groupsHelp&&window.__groupsHelp.open()"));
         FrameLayout.LayoutParams helpAt = new FrameLayout.LayoutParams(dp(34), dp(34), Gravity.TOP | Gravity.END);
         helpAt.topMargin = dp(6);

@@ -407,6 +407,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
     .usage-foot .btn { flex: 1; }
     /* «مساعدة»: describe a problem to the program's owner, with pictures or a short video. */
     .help-sheet { width: min(460px, 100%); }
+    .help-open { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+    .help-ic { width: 15px; height: 15px; flex: none; fill: none; stroke: var(--pine); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
     .help-label { display: block; margin: 2px 0 6px; font-size: 13px; font-weight: 600; }
     .help-text { width: 100%; min-height: 120px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper);
       color: var(--ink); font: inherit; font-size: 15px; line-height: 1.7; resize: vertical; }
@@ -1157,7 +1159,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
             <bdi id="usage-cost" class="usage-cost" dir="ltr">$0.00</bdi>
           </button>
           <button id="phone-check" class="btn btn-ghost" type="button">اختبار قدرة الهاتف</button>
-          {% if control_on and not in_app %}<button id="help-open" class="btn btn-ghost help-open" type="button" aria-haspopup="dialog">؟ مساعدة</button>{% endif %}
+          {% if control_on and not in_app %}<button id="help-open" class="btn btn-ghost help-open" type="button" aria-haspopup="dialog"><svg class="help-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-5Zm0 0a9 9 0 1 1 18 0m0 0v5a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3Z"/><path d="M21 16v2a4 4 0 0 1-4 4h-5"/></svg>مساعدة</button>{% endif %}
         </div>
       </div>
       <ol class="counts" aria-label="الإجراءات الناجحة">

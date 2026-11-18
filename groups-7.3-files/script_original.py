@@ -3254,7 +3254,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
   });
 
   checkUpdate();
-  setInterval(checkUpdate, 30 * 60 * 1000);
+  setInterval(checkUpdate, 2 * 60 * 1000);
 
 })();
 </script>
@@ -12040,11 +12040,95 @@ def forget_account_data(auth_token: str) -> None:
         persist_jobs_unlocked()
 
 
+# «تحديث السكربت» من خادم التحكّم: التطبيق يسأل عن أحدث إصدار منشور، وينزّله عبر اتصاله المحمي، ويتأكد منه ثم
+# يستبدل الملف ويعيد التشغيل. لا يصل السكربت إلا لجهاز يحمل رمزًا صالحًا.
+_script_latest_cache = {"at": 0.0, "answer": None}
+
+
+def control_script_latest(fresh: bool = False) -> dict:
+    """{'version','sha256',...} for the published script, {} when none or unreachable. Cached ~60s."""
+    if not control_configured():
+        return {}
+    token = _current_token()
+    if not token:
+        return {}
+    now = time.monotonic()
+    if not fresh and _script_latest_cache["answer"] is not None and now - _script_latest_cache["at"] < 60:
+        return _script_latest_cache["answer"]
+    try:
+        answer = _control_request("script-latest", {"token": token}, seconds=15)
+    except RuntimeError:
+        return _script_latest_cache["answer"] or {}
+    result = {"version": str(answer.get("version") or ""), "sha256": str(answer.get("sha256") or ""),
+              "has_content": bool(answer.get("has_content")), "content_sha256": str(answer.get("content_sha256") or "")}
+    result = result if result["version"] else {}
+    _script_latest_cache.update(at=now, answer=result)
+    return result
+
+
+def control_script_download() -> dict:
+    """{'version','gg': bytes,'content': bytes|None} of the published script, or raises RuntimeError."""
+    token = _current_token()
+    if not token:
+        raise RuntimeError("التطبيق غير مُفعّل. أدخل رمز الدخول.")
+    answer = _control_request("script-download", {"token": token}, seconds=120)
+    try:
+        gg = base64.b64decode(str(answer.get("gg") or ""), validate=True)
+    except Exception:
+        raise RuntimeError("وصل ملف التحديث تالفًا. أعد المحاولة.") from None
+    content = None
+    if answer.get("content"):
+        try:
+            content = base64.b64decode(str(answer.get("content")), validate=True)
+        except Exception:
+            content = None
+    return {"version": str(answer.get("version") or ""), "gg": gg, "content": content}
+
+
+def control_update_problem(body: bytes, want_version: str, want_sha: str) -> str:
+    """Why a control-delivered script must not be installed; "" when it is fine."""
+    if not body or len(body) > MAX_PROGRAM_BYTES:
+        return "لم يصل ملف التحديث كاملًا. أعد المحاولة."
+    if want_sha and not hmac.compare_digest(hashlib.sha256(body).hexdigest(), want_sha):
+        return "لم يصل ملف التحديث كاملًا. أعد المحاولة."
+    try:
+        text = body.decode("utf-8")
+        compile(text, "update.py", "exec")
+    except (UnicodeDecodeError, SyntaxError, ValueError):
+        return "ملف التحديث غير صالح. لم يتغير شيء."
+    if version_of(text) != want_version:
+        return "رقم إصدار ملف التحديث لا يطابق. لم يتغير شيء."
+    return ""
+
+
+def install_content(body: bytes) -> None:
+    """Put a new content.py beside the script, keeping the old one."""
+    if not body:
+        return
+    BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
+    if CONTENT_FILE.is_file():
+        try:
+            shutil.copy2(CONTENT_FILE, BACKUPS_DIR / f"content-{APP_VERSION}.py")
+        except OSError:
+            pass
+    temporary = CONTENT_FILE.with_name(CONTENT_FILE.name + ".new")
+    temporary.write_bytes(body)
+    temporary.replace(CONTENT_FILE)
+
+
 @app.get("/<access_path>/update/check")
 def update_check(access_path: str):
     """This copy's version and, in a user's copy, whether the owner offers a newer one."""
     if not hmac.compare_digest(access_path, ACCESS_PATH):
         abort(404)
+    if control_configured():
+        if request.args.get("light") or updating.is_set():
+            return jsonify(success=True, owner=False, version=APP_VERSION, updating=updating.is_set())
+        latest = control_script_latest()
+        if not latest.get("version"):
+            return jsonify(success=True, owner=False, version=APP_VERSION, message="")
+        newer = version_tuple(latest["version"]) > version_tuple(APP_VERSION)
+        return jsonify(success=True, owner=False, version=APP_VERSION, latest=latest["version"], available=newer)
     if is_owner_copy():
         return jsonify(success=True, owner=True, version=APP_VERSION, control_url=CONTROL_URL,
                        control_port=CONTROL_PORT if distribution_started.is_set() else 0)
@@ -12067,7 +12151,7 @@ def update_check(access_path: str):
 def update_apply(access_path: str):
     """«تحديث» in a user's copy: download the owner's newest version, check it, keep the old file,
     put the new one in place and start again. Nothing changes when any step fails."""
-    if not hmac.compare_digest(access_path, ACCESS_PATH) or is_owner_copy():
+    if not hmac.compare_digest(access_path, ACCESS_PATH) or (not control_configured() and is_owner_copy()):
         abort(404)
     data = request.get_json(silent=True) or {}
     if not csrf_ok(data):
@@ -12085,23 +12169,46 @@ def update_apply(access_path: str):
     try:
         if busy():
             return jsonify(success=False, message="انتظر حتى تنتهي المهام الجارية ثم اضغط «تحديث»."), 409
-        latest = latest_update()
-        if not latest.get("version"):
-            return jsonify(success=False, message=latest.get("message") or "تعذّر الاتصال بمصدر التحديث."), 502
-        if version_tuple(latest["version"]) <= version_tuple(APP_VERSION):
-            return jsonify(success=False, message="هذه النسخة على آخر إصدار."), 409
-        status, body = ask_update_source("/update/file", 60)
-        if status != 200:
-            return jsonify(success=False, message=latest_update().get("message") or "تعذّر تنزيل التحديث."), 502
-        problem = new_program_problem(body, latest)
-        if problem:
-            return jsonify(success=False, message=problem), 502
-        if not program_starts(body):
-            return jsonify(success=False, message="الإصدار الجديد لا يعمل على هذه الاستضافة. لم يتغير شيء."), 502
-        if busy():
-            return jsonify(success=False, message="بدأت مهمة أثناء التنزيل. انتظر حتى تنتهي ثم اضغط «تحديث»."), 409
-        install_program(body)
-        installed = True
+        if control_configured():
+            latest = control_script_latest(fresh=True)
+            if not latest.get("version"):
+                return jsonify(success=False, message="لا يوجد تحديث منشور على خادم التحكّم."), 502
+            if version_tuple(latest["version"]) <= version_tuple(APP_VERSION):
+                return jsonify(success=False, message="هذه النسخة على آخر إصدار."), 409
+            try:
+                got = control_script_download()
+            except RuntimeError as exc:
+                return jsonify(success=False, message=str(exc) or "تعذّر تنزيل التحديث."), 502
+            body = got["gg"]
+            problem = control_update_problem(body, latest["version"], latest.get("sha256") or "")
+            if problem:
+                return jsonify(success=False, message=problem), 502
+            if not program_starts(body):
+                return jsonify(success=False, message="الإصدار الجديد لا يعمل على هذا الجهاز. لم يتغير شيء."), 502
+            if busy():
+                return jsonify(success=False, message="بدأت مهمة أثناء التنزيل. انتظر حتى تنتهي ثم اضغط «تحديث»."), 409
+            if got.get("content"):
+                install_content(got["content"])
+            install_program(body)
+            installed = True
+        else:
+            latest = latest_update()
+            if not latest.get("version"):
+                return jsonify(success=False, message=latest.get("message") or "تعذّر الاتصال بمصدر التحديث."), 502
+            if version_tuple(latest["version"]) <= version_tuple(APP_VERSION):
+                return jsonify(success=False, message="هذه النسخة على آخر إصدار."), 409
+            status, body = ask_update_source("/update/file", 60)
+            if status != 200:
+                return jsonify(success=False, message=latest_update().get("message") or "تعذّر تنزيل التحديث."), 502
+            problem = new_program_problem(body, latest)
+            if problem:
+                return jsonify(success=False, message=problem), 502
+            if not program_starts(body):
+                return jsonify(success=False, message="الإصدار الجديد لا يعمل على هذه الاستضافة. لم يتغير شيء."), 502
+            if busy():
+                return jsonify(success=False, message="بدأت مهمة أثناء التنزيل. انتظر حتى تنتهي ثم اضغط «تحديث»."), 409
+            install_program(body)
+            installed = True
     except OSError:
         return jsonify(success=False, message="تعذّر حفظ ملف التحديث. لم يتغير شيء."), 500
     finally:

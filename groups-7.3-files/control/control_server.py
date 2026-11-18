@@ -60,6 +60,7 @@ SUPPORT_PATH = DATA_DIR / "support.json"
 MOVE_PATH = DATA_DIR / "move.json"
 FAILURES_PATH = DATA_DIR / "failures.json"
 FAILURES_DIR = DATA_DIR / "failures"
+SCRIPT_DIR = DATA_DIR / "script"
 SUPPORT_DIR = DATA_DIR / "support"
 CERT_PATH = DATA_DIR / "server.crt"
 CERT_KEY_PATH = DATA_DIR / "server.key"
@@ -738,6 +739,55 @@ def failure_rows(codes: list) -> list:
         rows.append(dict(item, who=code.get("label") or item.get("label") or "مستخدم محذوف", code=code.get("code") or "",
                          ago=ago, when=time.strftime("%Y-%m-%d %H:%M", time.localtime(int(item.get("at") or 0)))))
     return rows
+
+
+# ----------------------------------------------------------------------------- the script the apps run («السكربت»)
+# The owner uploads gg.py (and optionally content.py), then publishes it. Each user's app asks this server for the
+# latest version and downloads it over its own pinned, token-checked connection — so the algorithm is updated
+# without a new APK, and is served only to a device with a valid code.
+SCRIPT_GG_MAX = 8 * 1024 * 1024
+SCRIPT_CONTENT_MAX = 4 * 1024 * 1024
+SCRIPT_META = "script.json"
+STAGED_META = "staged.json"
+
+
+def script_version(text: str) -> str:
+    match = re.search(r'^APP_VERSION = "([0-9][0-9.]*)"', text, re.M)
+    return match.group(1) if match else ""
+
+
+def check_script(raw: bytes, name: str, want_version: bool) -> tuple[str, str]:
+    """(error, version) for an uploaded file; error is "" when it is a usable script/content file."""
+    if not raw:
+        return f"ملف {name} فارغ.", ""
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return f"ملف {name} ليس نصًا سليمًا (UTF-8).", ""
+    try:
+        compile(text, name, "exec")
+    except SyntaxError as exc:
+        return f"ملف {name} فيه خطأ برمجي: {exc.msg} (سطر {exc.lineno}).", ""
+    if want_version:
+        version = script_version(text)
+        if not version:
+            return f"ملف {name} بلا سطر APP_VERSION = \"...\" — أضِف رقم الإصدار وارفعه من جديد.", ""
+        if "flask" not in text.lower():
+            return f"هذا لا يبدو ملف السكربت الصحيح ({name}).", ""
+        return "", version
+    return "", ""
+
+
+def load_script_meta(name: str) -> dict:
+    data = read_private_json(SCRIPT_DIR / name) or {}
+    return data if isinstance(data, dict) else {}
+
+
+def script_file_sha(filename: str) -> str:
+    try:
+        return hashlib.sha256((SCRIPT_DIR / filename).read_bytes()).hexdigest()
+    except OSError:
+        return ""
 
 
 # ----------------------------------------------------------------------------- notices to the apps
@@ -1637,7 +1687,7 @@ html.loading .ldpill{display:flex}
 .bk{display:flex;gap:8px;align-items:center;font-size:14px;margin:10px 0 0;color:var(--pri)}.bk.none{color:var(--warn)}.bk .i{width:18px;height:18px;flex:none}
 .ckl{display:flex;gap:10px;align-items:center;margin:14px 0 0;font-size:14px;cursor:pointer}.ckl input{width:20px;height:20px;accent-color:var(--pri);flex:none}
 .rs{margin-top:14px}.rs summary{min-height:40px}
-input[type=file].fs{height:auto;padding:10px 12px}
+input[type=file].fs{height:auto;padding:10px 12px;width:100%;margin-bottom:4px}
 .nav .cnt{position:absolute;top:6px;inset-inline-start:calc(50% + 6px);min-width:18px;height:18px;padding:0 5px;border-radius:99px;background:var(--bad);color:var(--badk);font-style:normal;font-size:11px;font-weight:700;line-height:18px;text-align:center;box-shadow:0 0 0 2px var(--card)}
 .sh{display:flex;align-items:center;gap:10px;justify-content:space-between}.sh .btn{margin:0}
 .btn.sm{min-height:38px;height:38px;padding:0 13px;font-size:13.5px}
@@ -1753,6 +1803,7 @@ main{padding-bottom:56px}
 <symbol id="i-chev" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
 <symbol id="i-users" viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
 <symbol id="i-key" viewBox="0 0 24 24"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m11.4 11.6 9.6-9.6M17 6l3 3M14 9l2 2"/></symbol>
+<symbol id="i-code" viewBox="0 0 24 24"><path d="M16 18l6-6-6-6M8 6l-6 6 6 6"/></symbol>
 <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></symbol>
 <symbol id="i-share" viewBox="0 0 24 24"><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8M16 6l-4-4-4 4M12 2v13"/></symbol>
 <symbol id="i-edit" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z"/></symbol>
@@ -1776,6 +1827,7 @@ main{padding-bottom:56px}
 <button type="button" data-t="notices">{{ic('bell')}}<span>التنبيهات</span></button>
 <button type="button" data-t="support">{{ic('msg')}}<span>الرسائل</span>{% if unread %}<i class="cnt" title="{{unread}} رسالة جديدة">{{unread}}</i>{% endif %}</button>
 <button type="button" data-t="failures">{{ic('alert')}}<span>الأعطال</span>{% if failures_new %}<i class="cnt" title="{{failures_new}} عطل جديد">{{failures_new}}</i>{% endif %}</button>
+<button type="button" data-t="script">{{ic('code')}}<span>السكربت</span>{% if script_can_publish %}<i class="dot" title="تحديث جاهز للنشر"></i>{% endif %}</button>
 <button type="button" data-t="link">{{ic('link')}}<span>الربط</span>{% if not backup_when %}<i class="dot" title="لم تُنزَّل نسخة احتياطية بعد"></i>{% endif %}</button>
 </nav>
 <div class="acts"><button class="ib th" id="th" type="button" aria-label="تبديل المظهر"><span class="m">{{ic('moon')}}</span><span class="s">{{ic('sun')}}</span></button>
@@ -1939,6 +1991,26 @@ main{padding-bottom:56px}
 {% else %}<div class="empty" style="margin-top:16px"><h3>لا توجد أعطال</h3><p>يظهر هنا كل فشل في تطبيقات المستخدمين، تلقائيًا ومعه السجل.</p></div>{% endif %}
 </section>
 
+<section class="panel" id="p-script">
+{% if flash %}<div class="note fl-{{flash.kind}}" role="status">{{ic('alert' if flash.kind != 'ok' else 'check')}}<p>{{flash.text}}</p></div>{% endif %}
+<div class="card pad"><h2>سكربت التطبيق</h2>
+<p class="mut">هذا هو برنامج التطبيق. حدّثه من هنا: ارفع الملف المعدّل ثم اضغط «نشر التحديث»، فيظهر للمستخدمين زر «تحديث» داخل التطبيق — دون بناء تطبيق جديد. انتبه: ارفع رقم إصدار أعلى (السطر <code>APP_VERSION</code>) في الملف وإلا لن يظهر التحديث.</p>
+<dl class="mvd">
+<div><dt>المنشور الآن</dt><dd>{% if script_live.version %}الإصدار <b>{{script_live.version}}</b> · نُشر {{script_live_when}}{% if script_live.has_content %} · مع content.py{% endif %}{% else %}<span class="mut">لا يوجد سكربت منشور بعد. التطبيقات تعمل بالسكربت المدمج فيها.</span>{% endif %}</dd></div>
+{% if script_staged.version %}<div><dt>المرفوع</dt><dd>الإصدار <b>{{script_staged.version}}</b>{% if script_can_publish %} · <span class="b on">جاهز للنشر</span>{% else %} · <span class="mut">منشور</span>{% endif %}</dd></div>{% endif %}
+</dl>
+<form method="post" action="/{{admin}}/script/upload" enctype="multipart/form-data" data-keep-busy>
+<label class="l" for="sc-gg">ملف السكربت (script_original.py أو gg.py)</label>
+<input id="sc-gg" class="fs" type="file" name="gg" accept=".py,text/x-python,text/plain" required>
+<label class="l" for="sc-content">ملف content.py <small>(اختياري، إن تغيّر)</small></label>
+<input id="sc-content" class="fs" type="file" name="content" accept=".py,text/x-python,text/plain">
+<button class="btn wide ghost" style="margin-top:12px">{{ic('code')}}رفع السكربت</button></form>
+{% if script_can_publish %}<form method="post" action="/{{admin}}/script/publish" data-title="نشر التحديث؟" data-confirm="سيصل الإصدار {{script_staged.version}} إلى كل المستخدمين، فيظهر لهم زر «تحديث» في التطبيق. تأكد أنك جرّبت الملف." data-yes="نشر" data-toast="تم نشر التحديث">
+<button class="btn wide" style="margin-top:10px">{{ic('check')}}نشر التحديث (الإصدار {{script_staged.version}})</button></form>{% endif %}
+<ul class="notes"><li>{{ic('shield')}}<span>يُنزَّل السكربت عبر اتصال التطبيق المحمي بخادمك، ولا يصل إلا لجهاز يحمل رمزًا صالحًا.</span></li>
+<li>{{ic('alert')}}<span>يُجرّب التطبيق تشغيل الإصدار الجديد قبل اعتماده؛ إن لم يعمل، يبقى على القديم ولا يتعطّل.</span></li></ul></div>
+</section>
+
 <section class="panel" id="p-link">
 {% if flash %}<div class="note fl-{{flash.kind}}" role="status">{{ic('alert' if flash.kind != 'ok' else 'check')}}<p>{{flash.text}}</p></div>{% endif %}
 <div class="card pad"><h2>رابط التطبيق</h2><p class="mut">انسخه كاملًا وضعه في التطبيق عند إعداد الخادم.</p>
@@ -2029,7 +2101,7 @@ function take(k){var v=sget(k);if(v==null)return null;sset(k);var at=v.indexOf('
 function toast(m){var t=D.createElement('div');t.className='toast';t.textContent=m;$('.toasts').appendChild(t);setTimeout(function(){t.classList.add('out');setTimeout(function(){t.remove()},300)},2400)}
 
 /* sections */
-var TABS=['users','keys','notices','support','failures','link'];
+var TABS=['users','keys','notices','support','failures','script','link'];
 function tab(n,byUser){if(TABS.indexOf(n)<0)n='users';
 $$('.panel').forEach(function(p){p.classList.toggle('on',p.id==='p-'+n)});
 $$('.nav button').forEach(function(b){if(b.dataset.t===n)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current')});
@@ -2209,6 +2281,8 @@ def dashboard():
     messages = support_rows(codes)
     move = load_move()
     last_backup = int(SECRETS.get("last_backup") or 0)
+    script_live = load_script_meta(SCRIPT_META)
+    script_staged = load_script_meta(STAGED_META)
     failures = failure_rows(codes)
     all_failures = load_failures()["items"]
     all_messages = load_support()["items"]
@@ -2224,6 +2298,11 @@ def dashboard():
         backup_when=seen_text({"last_seen": last_backup}) if last_backup else "",
         owner_link=owner_app_link(request.host), in_owner_app=OWNER_APP_MARK in (request.headers.get("User-Agent") or ""),
         this_host=request.host, relay=MOVE_RELAY.split("//")[-1],
+        script_live=script_live, script_staged=script_staged,
+        script_live_when=seen_text({"last_seen": int(script_live.get("published_at") or 0)}) if script_live.get("published_at") else "",
+        script_can_publish=bool(script_staged.get("version")) and (
+            script_staged.get("sha256") != script_live.get("sha256")
+            or script_staged.get("content_sha256") != script_live.get("content_sha256")),
         engine=keys["engine"], gemini_set=gemini_ready(keys), claude_set=bool(keys["claude_sealed"]),
         gemini_model=keys["gemini_model"], claude_model=keys["claude_model"],
         gemini_default=GEMINI_DEFAULT_MODEL, claude_default=CLAUDE_DEFAULT_MODEL,
@@ -2695,6 +2774,76 @@ def failure_details(failure_id: int):
                    **{key: data.get(key) or ([] if key == "failed" else "") for key in FAILURE_HEAVY})
 
 
+@app.post(f"/{ADMIN}/script/upload")
+def script_upload():
+    """Stage an uploaded script (and content), checked, ready for «نشر التحديث»."""
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    gg = request.files.get("gg")
+    content = request.files.get("content")
+    if not gg or not gg.filename:
+        flash("bad", "اختر ملف السكربت (gg.py / script_original.py).")
+        return redirect(f"/{ADMIN}")
+    gg_raw = gg.read(SCRIPT_GG_MAX + 1)
+    if len(gg_raw) > SCRIPT_GG_MAX:
+        flash("bad", "ملف السكربت أكبر من المسموح (٨ ميجابايت).")
+        return redirect(f"/{ADMIN}")
+    problem, version = check_script(gg_raw, "السكربت", want_version=True)
+    if problem:
+        flash("bad", problem)
+        return redirect(f"/{ADMIN}")
+    content_raw = b""
+    if content and content.filename:
+        content_raw = content.read(SCRIPT_CONTENT_MAX + 1)
+        if len(content_raw) > SCRIPT_CONTENT_MAX:
+            flash("bad", "ملف content.py أكبر من المسموح (٤ ميجابايت).")
+            return redirect(f"/{ADMIN}")
+        problem, _ = check_script(content_raw, "content.py", want_version=False)
+        if problem:
+            flash("bad", problem)
+            return redirect(f"/{ADMIN}")
+    with LOCK:
+        SCRIPT_DIR.mkdir(parents=True, exist_ok=True)
+        (SCRIPT_DIR / "staged-gg.py").write_bytes(gg_raw)
+        meta = {"version": version, "sha256": hashlib.sha256(gg_raw).hexdigest(),
+                "size": len(gg_raw), "at": int(time.time()), "has_content": bool(content_raw)}
+        if content_raw:
+            (SCRIPT_DIR / "staged-content.py").write_bytes(content_raw)
+            meta["content_sha256"] = hashlib.sha256(content_raw).hexdigest()
+        else:
+            try:
+                (SCRIPT_DIR / "staged-content.py").unlink()
+            except OSError:
+                pass
+        write_private_json(SCRIPT_DIR / STAGED_META, meta)
+    flash("ok", f"رُفع السكربت (الإصدار {version}) وجاهز للنشر. اضغط «نشر التحديث» ليصل إلى المستخدمين.")
+    return redirect(f"/{ADMIN}")
+
+
+@app.post(f"/{ADMIN}/script/publish")
+def script_publish():
+    """Make the staged script the one the apps download."""
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    with LOCK:
+        staged = load_script_meta(STAGED_META)
+        if not staged.get("version") or not (SCRIPT_DIR / "staged-gg.py").is_file():
+            flash("bad", "لا يوجد سكربت مرفوع لنشره. ارفع الملف أولًا.")
+            return redirect(f"/{ADMIN}")
+        shutil.copy2(SCRIPT_DIR / "staged-gg.py", SCRIPT_DIR / "gg.py")
+        if staged.get("has_content") and (SCRIPT_DIR / "staged-content.py").is_file():
+            shutil.copy2(SCRIPT_DIR / "staged-content.py", SCRIPT_DIR / "content.py")
+        else:
+            try:
+                (SCRIPT_DIR / "content.py").unlink()
+            except OSError:
+                pass
+        staged["published_at"] = int(time.time())
+        write_private_json(SCRIPT_DIR / SCRIPT_META, staged)
+    flash("ok", f"نُشر الإصدار {staged['version']}. يظهر للمستخدمين زر «تحديث» خلال دقيقة تقريبًا، أو عند فتح الصفحة.")
+    return redirect(f"/{ADMIN}")
+
+
 # ----------------------------------------------------------------------------- the app API (link protocol)
 def api_ok(**data):
     return jsonify(ok=True, **data)
@@ -2878,6 +3027,37 @@ def api_failure():
         save_failures(data)
     drop_failure_details(dropped)
     return api_ok(kept=True)
+
+
+@app.post(f"/{API}/script-latest")
+def api_script_latest():
+    """The app asks for the published script's version, to know whether to offer «تحديث»."""
+    body = request.get_json(silent=True) or {}
+    if not code_from_token(body.get("token")):
+        return api_err("انتهت صلاحية الدخول أو أوقِف الرمز أو نُقل لجهاز آخر. أعد إدخال الرمز.", 200)
+    meta = load_script_meta(SCRIPT_META)
+    if not meta.get("version") or not (SCRIPT_DIR / "gg.py").is_file():
+        return api_ok(version="")
+    return api_ok(version=str(meta.get("version") or ""), sha256=script_file_sha("gg.py"),
+                  has_content=bool(meta.get("has_content")), content_sha256=script_file_sha("content.py"))
+
+
+@app.post(f"/{API}/script-download")
+def api_script_download():
+    """The app downloads the published script (gg.py, and content.py when there is one), base64."""
+    body = request.get_json(silent=True) or {}
+    if not code_from_token(body.get("token")):
+        return api_err("انتهت صلاحية الدخول أو أوقِف الرمز أو نُقل لجهاز آخر. أعد إدخال الرمز.", 200)
+    meta = load_script_meta(SCRIPT_META)
+    gg_path = SCRIPT_DIR / "gg.py"
+    if not meta.get("version") or not gg_path.is_file():
+        return api_err("لا يوجد سكربت منشور.")
+    answer = {"version": str(meta.get("version") or ""),
+              "gg": base64.b64encode(gg_path.read_bytes()).decode("ascii")}
+    content_path = SCRIPT_DIR / "content.py"
+    if meta.get("has_content") and content_path.is_file():
+        answer["content"] = base64.b64encode(content_path.read_bytes()).decode("ascii")
+    return api_ok(**answer)
 
 
 @app.post(f"/{API}/notices")

@@ -51,7 +51,7 @@ public class OwnerApp extends Application {
     }
 
     static final class BuildInfo {
-        static final String VERSION = "1.1";
+        static final String VERSION = "1.2";
 
         private BuildInfo() {
         }

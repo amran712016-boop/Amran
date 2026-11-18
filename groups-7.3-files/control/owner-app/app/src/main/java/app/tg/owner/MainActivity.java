@@ -64,6 +64,7 @@ public class MainActivity extends Activity {
 
     FrameLayout root;
     WebView web;
+    PullRefresh pull;                       // «اسحب للتحديث» around the page
     LinearLayout problem;
     TextView problemText;
     Pin.Link link;
@@ -249,7 +250,16 @@ public class MainActivity extends Activity {
         if (web == null) {
             web = buildWeb();
         }
-        root.addView(web, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        pull = new PullRefresh(this, web);
+        pull.setListener(() -> {
+            String now = web.getUrl();
+            if (now == null || link == null || !link.owns(now)) {
+                web.loadUrl(link.panel());
+            } else {
+                web.reload();
+            }
+        });
+        root.addView(pull, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         root.addView(buildProblem(), new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         web.loadUrl(link.panel() + (tab != null ? "#" + tab : ""));
     }
@@ -297,12 +307,18 @@ public class MainActivity extends Activity {
             @Override
             public void onReceivedError(WebView v, WebResourceRequest request, WebResourceError error) {
                 if (request.isForMainFrame()) {
+                    if (pull != null) {
+                        pull.finish();
+                    }
                     showProblem("تعذّر الوصول إلى خادم التحكّم. تأكد من الإنترنت ومن أن الخادم يعمل، ثم أعد المحاولة.");
                 }
             }
 
             @Override
             public void onPageFinished(WebView v, String url) {
+                if (pull != null) {
+                    pull.finish();
+                }
                 CookieManager.getInstance().flush();
             }
         });

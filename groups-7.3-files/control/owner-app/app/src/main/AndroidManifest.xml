@@ -2,6 +2,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- (Android 14+: a background job that needs the network must be allowed to see the network's state) -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- (the check every 15 minutes comes back by itself after the phone restarts) -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />

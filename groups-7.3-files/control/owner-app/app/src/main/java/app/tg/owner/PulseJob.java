@@ -40,11 +40,20 @@ public class PulseJob extends JobService {
         if (jobs == null || jobs.getPendingJob(JOB) != null) {
             return;
         }
-        jobs.schedule(new JobInfo.Builder(JOB, new ComponentName(context, PulseJob.class))
-            .setPeriodic(15 * 60 * 1000L)
-            .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
-            .setPersisted(true)
-            .build());
+        try {
+            jobs.schedule(new JobInfo.Builder(JOB, new ComponentName(context, PulseJob.class))
+                .setPeriodic(15 * 60 * 1000L)
+                .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
+                .setPersisted(true)
+                .build());
+        } catch (RuntimeException refused) {
+            // (a phone that refuses the network condition: the check runs anyway, and without a network it
+            // simply fails and is tried again 15 minutes later)
+            jobs.schedule(new JobInfo.Builder(JOB, new ComponentName(context, PulseJob.class))
+                .setPeriodic(15 * 60 * 1000L)
+                .setPersisted(true)
+                .build());
+        }
     }
 
     @Override

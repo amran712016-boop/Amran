@@ -1,0 +1,8 @@
+// «تطبيق المالك»: the control panel (control_server.py) in an Android app of the owner's own, with a notification
+// for each new failure or user's message. No libraries: Android's own WebView, JobScheduler and notifications.
+// Built like the groups app, with Gradle 8.14 and the Android SDK (platform 35):
+//   ANDROID_HOME=<sdk> gradle :app:assembleDebug        (an APK ready to install: app/build/outputs/apk/debug/)
+// A release signed with your own key: COMMENTS_KEYSTORE and COMMENTS_KEYSTORE_PASSWORD, then :app:assembleRelease.
+plugins {
+    id 'com.android.application' version '8.13.2' apply false
+}

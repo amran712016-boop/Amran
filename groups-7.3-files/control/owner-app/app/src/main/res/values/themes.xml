@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The control panel's colors (control_server.py's page). -->
+    <color name="teal">#0F6B66</color>
+    <color name="bg">#EEF2F1</color>
+    <color name="card">#FFFFFF</color>
+    <style name="Owner" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:colorPrimary">@color/teal</item>
+        <item name="android:colorAccent">@color/teal</item>
+        <item name="android:colorPrimaryDark">@color/card</item>
+        <item name="android:windowBackground">@color/bg</item>
+        <item name="android:statusBarColor">@color/card</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+</resources>

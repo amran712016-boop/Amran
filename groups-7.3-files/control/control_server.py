@@ -1320,8 +1320,47 @@ API = SECRETS["api_secret"]
 ADMIN = SECRETS["admin_path"]
 
 
+# «تطبيق المالك» (control/owner-app): the panel in an Android app of the owner's own. It says so in its User-Agent;
+# when the owner signs in there, it keeps a login for 90 days (a cookie signed with the server's secret and the
+# password's hash: a new password ends it). A browser's login stays as it was, for its session only.
+OWNER_APP_MARK = "GroupsOwnerApp/"
+OWNER_COOKIE = "gg_owner"
+OWNER_DAYS = 90
+
+
+def _owner_sig(expires: int) -> str:
+    return hmac.new(SECRETS["token_secret"].encode("utf-8"), f"owner|{expires}|{SECRETS['admin_hash']}".encode("utf-8"),
+                    hashlib.sha256).hexdigest()
+
+
+def owner_token() -> str:
+    expires = int(time.time()) + OWNER_DAYS * 86400
+    return f"{expires}.{_owner_sig(expires)}"
+
+
+def owner_token_ok(value: str) -> bool:
+    try:
+        expires_text, sig = str(value or "").split(".", 1)
+        expires = int(expires_text)
+    except ValueError:
+        return False
+    return expires > time.time() and hmac.compare_digest(sig, _owner_sig(expires))
+
+
 def logged_in() -> bool:
-    return bool(session.get("owner"))
+    if session.get("owner"):
+        return True
+    if owner_token_ok(request.cookies.get(OWNER_COOKIE) or ""):
+        session["owner"] = True
+        return True
+    return False
+
+
+def owner_app_link(host: str = "") -> str:
+    """What the owner pastes in «تطبيق المالك»: the panel's address, with the certificate's fingerprint after #."""
+    if not host:
+        host = public_host() + ("" if LISTEN_PORT == 443 else f":{LISTEN_PORT}")
+    return f"https://{host}/{ADMIN}#{certificate_fingerprint()}"
 
 
 LOGIN_PAGE = r"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
@@ -1907,6 +1946,11 @@ main{padding-bottom:56px}
 <div class="da"><button type="button" class="btn" data-copy="{{app_link}}">{{ic('copy')}}نسخ الرابط</button><button type="button" class="btn ghost" data-share="{{app_link}}">{{ic('share')}}مشاركة</button></div>
 <ul class="notes"><li>{{ic('shield')}}<span>يحمل الرابط بصمة شهادة الخادم، فلا يقبل التطبيق أي خادم آخر.</span></li><li>{{ic('lock')}}<span>الرابط سرّي: شاركه فقط مع من تعطيه رمز دخول.</span></li></ul></div>
 
+{% if not in_owner_app %}<div class="card pad"><h2>تطبيق المالك</h2><p class="mut">افتح لوحة التحكّم من تطبيق أندرويد خاص بك، ويصلك إشعار عند كل عطل أو رسالة جديدة من المستخدمين. الصق هذا الرابط فيه أول مرة.</p>
+<code class="lk">{{owner_link}}</code>
+<div class="da"><button type="button" class="btn" data-copy="{{owner_link}}">{{ic('copy')}}نسخ رابط تطبيق المالك</button></div>
+<ul class="notes"><li>{{ic('lock')}}<span>هذا الرابط يفتح لوحتك (مع كلمة المرور): لا تعطه أحدًا. يحمل بصمة شهادة الخادم، فلا يقبل التطبيق خادمًا غيره.</span></li></ul></div>{% endif %}
+
 <div class="card pad"><h2>نقل التطبيقات إلى هذا الخادم</h2>
 <p class="mut">إذا تعطّل خادمك القديم وشغّلت لوحة التحكّم هنا: اضغط «ربط» وأدخل <b>كلمة مرور لوحة التحكّم نفسها التي كانت على الخادم القديم</b>. يصل للتطبيقات أمر موقَّع بها بأن الخادم انتقل إلى هنا، فتتصل بهذا الخادم خلال دقائق.</p>
 <dl class="mvd">
@@ -1991,7 +2035,8 @@ $$('.panel').forEach(function(p){p.classList.toggle('on',p.id==='p-'+n)});
 $$('.nav button').forEach(function(b){if(b.dataset.t===n)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current')});
 lset('tab',n);if(byUser)window.scrollTo(0,0)}
 $$('[data-t]').forEach(function(b){b.addEventListener('click',function(){tab(b.dataset.t,true)})});
-tab(lget('tab'));
+tab((location.hash||'').slice(1)||lget('tab'));
+addEventListener('hashchange',function(){tab((location.hash||'').slice(1),true)});
 
 /* light / dark */
 var tc=$('meta[name=theme-color]');
@@ -2079,6 +2124,15 @@ D.addEventListener('toggle',function(e){var d=e.target;if(d.open&&d.dataset&&d.d
 D.addEventListener('click',function(e){var b=e.target.closest('[data-fcopy]');if(!b)return;
 var d=b.closest('article').querySelector('details[data-src]');if(!d)return;b.classList.add('busy');
 lazy(d,function(j){b.classList.remove('busy');copy([j.title,j.message,(j.failed||[]).join('\n'),j.trace,j.log].filter(Boolean).join('\n\n'))})});
+
+/* in «تطبيق المالك»: the backup comes as a file the app saves in «التنزيلات» */
+if(window.OwnerApp)D.addEventListener('submit',function(e){var f=e.target;if(!/\/backup$/.test(f.getAttribute('action')||''))return;
+e.preventDefault();e.stopImmediatePropagation();loading(f);
+fetch(f.action,{method:'POST',body:new FormData(f),credentials:'same-origin'}).then(function(r){var cd=r.headers.get('Content-Disposition')||'';
+if(cd.indexOf('attachment')<0){location.reload();throw 0}var m=cd.match(/filename="?([^";]+)/);return r.blob().then(function(b){return [m?m[1]:'control-backup.ggbak',b]})})
+.then(function(x){var rd=new FileReader();rd.onload=function(){var ok=OwnerApp.saveFile(x[0],String(rd.result).split(',')[1]);
+R.classList.remove('loading');$$('.busy').forEach(function(b){b.classList.remove('busy')});f.reset();toast(ok?'حُفظت النسخة في «التنزيلات»':'تعذّر حفظ النسخة')};rd.readAsDataURL(x[1])})
+.catch(function(x){if(x!==0){R.classList.remove('loading');toast('تعذّر تنزيل النسخة')}})},true);
 
 /* every change is a form post; risky ones ask first */
 var cf=$('#cf'),pending=null;
@@ -2168,6 +2222,7 @@ def dashboard():
         move_active=bool(move.get("record")) and int(time.time()) < int(move.get("until") or 0),
         move_moved_here=(move.get("link") or "").split("#")[0].split("/")[-1] == SECRETS["api_secret"],
         backup_when=seen_text({"last_seen": last_backup}) if last_backup else "",
+        owner_link=owner_app_link(request.host), in_owner_app=OWNER_APP_MARK in (request.headers.get("User-Agent") or ""),
         this_host=request.host, relay=MOVE_RELAY.split("//")[-1],
         engine=keys["engine"], gemini_set=gemini_ready(keys), claude_set=bool(keys["claude_sealed"]),
         gemini_model=keys["gemini_model"], claude_model=keys["claude_model"],
@@ -2184,7 +2239,11 @@ def login():
         session["owner"] = True
         if not SECRETS.get("move_public"):
             remember_move_public(password)
-        return redirect(f"/{ADMIN}")
+        response = redirect(f"/{ADMIN}")
+        if OWNER_APP_MARK in (request.headers.get("User-Agent") or ""):
+            response.set_cookie(OWNER_COOKIE, owner_token(), max_age=OWNER_DAYS * 86400, secure=True, httponly=True,
+                                samesite="Strict", path=f"/{ADMIN}")
+        return response
     return render_template_string(LOGIN_PAGE, admin=ADMIN, error="كلمة المرور غير صحيحة.")
 
 
@@ -2328,7 +2387,35 @@ def backup_restore():
 @app.post(f"/{ADMIN}/logout")
 def logout():
     session.clear()
-    return redirect(f"/{ADMIN}")
+    response = redirect(f"/{ADMIN}")
+    response.delete_cookie(OWNER_COOKIE, path=f"/{ADMIN}")
+    return response
+
+
+@app.get(f"/{ADMIN}/pulse")
+def owner_pulse():
+    """For «تطبيق المالك» (every 15 minutes): the failures and the users' messages newer than the ones it knows."""
+    if not logged_in():
+        return jsonify(ok=False), 401
+    try:
+        after_f = int(request.args.get("f") or 0)
+        after_m = int(request.args.get("m") or 0)
+    except ValueError:
+        after_f = after_m = 0
+    names = {row.get("id"): (row.get("label") or row.get("code") or "") for row in load_codes()}
+    failures = load_failures()["items"]
+    messages = load_support()["items"]
+    new_f = [item for item in failures if int(item.get("id") or 0) > after_f]
+    new_m = [item for item in messages if int(item.get("id") or 0) > after_m]
+    return jsonify(
+        ok=True,
+        f_last=max((int(item.get("id") or 0) for item in failures), default=0),
+        m_last=max((int(item.get("id") or 0) for item in messages), default=0),
+        failures_new=len(new_f), messages_new=len(new_m),
+        failures=[{"id": item.get("id"), "who": names.get(item.get("code_id")) or item.get("label") or "مستخدم",
+                   "title": str(item.get("title") or "")[:140]} for item in new_f[:5]],
+        messages=[{"id": item.get("id"), "who": names.get(item.get("code_id")) or item.get("label") or "مستخدم",
+                   "text": str(item.get("text") or "")[:140]} for item in new_m[:5]])
 
 
 @app.post(f"/{ADMIN}/code/new")
@@ -2895,6 +2982,7 @@ def run() -> None:
     print("=" * 70, flush=True)
     print("خادم التحكّم يعمل.", flush=True)
     print("لوحة المالك:", admin_link(), flush=True)
+    print("رابط تطبيق المالك:", owner_app_link(), flush=True)
     if SECRETS.get("admin_plain_once"):
         print("كلمة مرور المالك (تظهر مرة واحدة، احفظها):", SECRETS["admin_plain_once"], flush=True)
         data = read_private_json(SECRETS_PATH) or {}

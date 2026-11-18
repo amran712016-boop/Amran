@@ -111,6 +111,8 @@ public class MainActivity extends Activity {
     String reportCopy = "";
     NoticeCenter notices;                 // التنبيهات داخل التطبيق (الجرس والقائمة المنبثقة)
     static final int PICK_FILES = 41;     // «مساعدة» في الصفحة: اختيار صور أو فيديو من الجوال
+    Button helpButton;                    // «؟» تحت ⋮: يفتح «مساعدة» في الصفحة (حين تقول الصفحة إنها متاحة)
+    boolean helpReady;
     ValueCallback<Uri[]> fileCallback;
 
     @Override
@@ -356,6 +358,24 @@ public class MainActivity extends Activity {
         panel = buildPanel();
         content.addView(panel, fill());
 
+        // «؟»: just under ⋮ (the bar's end: the left in Arabic), over the page; it opens the page's «مساعدة».
+        helpButton = tab("؟");
+        helpButton.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
+        helpButton.setTypeface(Typeface.DEFAULT_BOLD);
+        helpButton.setTextColor(PINE);
+        helpButton.setBackground(shape(SHEET, LINE, 20));
+        helpButton.setPadding(0, 0, 0, 0);
+        helpButton.setMinWidth(dp(40));
+        helpButton.setMinimumWidth(dp(40));
+        helpButton.setElevation(dp(3));
+        helpButton.setContentDescription("مساعدة");
+        helpButton.setOnClickListener(v -> callPage("window.__groupsHelp&&window.__groupsHelp.open()"));
+        FrameLayout.LayoutParams helpAt = new FrameLayout.LayoutParams(dp(40), dp(40), Gravity.TOP | Gravity.END);
+        helpAt.topMargin = dp(6);
+        helpAt.setMarginEnd(dp(8));
+        helpButton.setVisibility(View.GONE);
+        content.addView(helpButton, helpAt);
+
         status = text("يشغّل السكربت…", 16, MUTED, false);
         status.setGravity(Gravity.CENTER);
         status.setPadding(dp(24), dp(24), dp(24), dp(24));
@@ -575,6 +595,15 @@ public class MainActivity extends Activity {
             main.post(() -> onAccountsChanged(json, active, max, anyRunning));
         }
 
+        /** The page has «مساعدة» (the app is linked to a control server): the «؟» button shows. */
+        @JavascriptInterface
+        public void helpReady(boolean ready) {
+            main.post(() -> {
+                helpReady = ready;
+                paintHelp();
+            });
+        }
+
         /** The page sends an alert or instruction to the in-app notifications list. kind is "ok"/"bad"/"info". */
         @JavascriptInterface
         public void notify(String kind, String text) {
@@ -629,6 +658,8 @@ public class MainActivity extends Activity {
             @Override
             public void onPageStarted(WebView web, String url, android.graphics.Bitmap icon) {
                 panelFailed = false;
+                helpReady = false;                  // (the page says again, once loaded, if it has «مساعدة»)
+                paintHelp();
             }
 
             @Override
@@ -747,6 +778,13 @@ public class MainActivity extends Activity {
         return box;
     }
 
+    /** «؟» shows on «اللوحة» only (on «المتصفح» it would cover the site), once the page has «مساعدة». */
+    void paintHelp() {
+        if (helpButton != null) {
+            helpButton.setVisibility(helpReady && !onBrowserTab && !small ? View.VISIBLE : View.GONE);
+        }
+    }
+
     void showTab(boolean browser) {
         onBrowserTab = browser;
         // The panel is in front of the browsers on its tab, and out of the way on theirs.
@@ -755,6 +793,7 @@ public class MainActivity extends Activity {
         paintBrowserTab();
         paintTab(tabPanel, !browser);
         paintTab(tabBrowser, browser);
+        paintHelp();
     }
 
     /** «المتصفح» shows the browser of the account the panel shows only: when that account has none open, a note
@@ -1059,6 +1098,7 @@ public class MainActivity extends Activity {
             panel.setVisibility(View.INVISIBLE);
             status.setVisibility(View.GONE);
             emptyNote.setVisibility(BrowserHost.count() == 0 ? View.VISIBLE : View.GONE);
+            paintHelp();
         } else {
             showTab(onBrowserTab);
         }

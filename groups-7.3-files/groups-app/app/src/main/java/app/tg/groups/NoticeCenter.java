@@ -21,8 +21,8 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * التنبيهات داخل التطبيق: قائمة منبثقة تجمع كل تنبيه أو تعليمات تُرسلها «اللوحة» (صفحة السكربت) عبر جسر
- * {@code GroupsNative.notify}. تظهر في كل تبويبات التطبيق — حتى على «المتصفح» — وتُحفظ لتُقرأ لاحقًا.
+ * التنبيهات داخل التطبيق: قائمة منبثقة تجمع ما يرسله صاحب البرنامج من لوحة التحكّم (تنبيه، تحديث، ردّ على
+ * رسالة) عبر جسر {@code GroupsNative.notify}. وحدها تُعدّ في الجرس: حركات الصفحة (اختيار قروب…) لا تصل هنا. تظهر في كل تبويبات التطبيق — حتى على «المتصفح» — وتُحفظ لتُقرأ لاحقًا.
  * يحمل الجرس في الشريط العلوي عدّاد غير المقروء، وتفتح القائمة بالضغط عليه.
  */
 public final class NoticeCenter {
@@ -105,6 +105,9 @@ public final class NoticeCenter {
         }
         String tag = normalizeKind(kind);
         boolean admin = tag.startsWith("admin-");
+        if (!admin) {
+            return;                             // (only what the owner sends from the control panel)
+        }
         // لا تكرّر نفس الرسالة المتتالية (بعض تنبيهات الصفحة تتكرر أثناء الانتظار). رسائل الإدارة لا تتكرر أصلًا.
         if (!admin && !items.isEmpty()) {
             Item top = items.get(0);
@@ -202,7 +205,7 @@ public final class NoticeCenter {
         head.addView(close, page.gap(0));
         slide.addView(head);
 
-        TextView sub = page.text("رسائل الإدارة من لوحة التحكّم، وتنبيهات المهام، تظهر هنا.", 13, MainActivity.MUTED, false);
+        TextView sub = page.text("ما يرسله صاحب البرنامج من لوحة التحكّم: التنبيهات والتحديثات والردود على رسائلك.", 13, MainActivity.MUTED, false);
         sub.setPadding(0, page.dp(4), 0, page.dp(12));
         slide.addView(sub);
 
@@ -361,7 +364,10 @@ public final class NoticeCenter {
                 if (t.isEmpty()) {
                     continue;
                 }
-                items.add(new Item(t, normalizeKind(o.optString("k", "info")), o.optLong("w", 0)));
+                String k = normalizeKind(o.optString("k", "info"));
+                if (k.startsWith("admin-")) {          // (page notices kept by an earlier build: dropped)
+                    items.add(new Item(t, k, o.optLong("w", 0)));
+                }
             }
         } catch (Exception ignored) {
             // قائمة فاسدة: ابدأ فارغًا

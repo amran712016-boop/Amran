@@ -1032,7 +1032,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
             <bdi id="usage-cost" class="usage-cost" dir="ltr">$0.00</bdi>
           </button>
           <button id="phone-check" class="btn btn-ghost" type="button">اختبار قدرة الهاتف</button>
-          {% if control_on %}<button id="help-open" class="btn btn-ghost help-open" type="button" aria-haspopup="dialog">؟ مساعدة</button>{% endif %}
+          {% if control_on and not in_app %}<button id="help-open" class="btn btn-ghost help-open" type="button" aria-haspopup="dialog">؟ مساعدة</button>{% endif %}
         </div>
       </div>
       <ol class="counts" aria-label="الإجراءات الناجحة">
@@ -2081,9 +2081,9 @@ EMBEDDED_PAGE = r'''<!doctype html>
     notice.textContent = message;
     notice.className = "notice " + (success ? "is-ok" : "is-bad");
     notice.hidden = false;
-    pushNative(message, success ? "ok" : "bad");
   }
-  // أرسل كل تنبيه/تعليمات إلى قائمة التنبيهات داخل التطبيق (الجرس في الشريط العلوي)، إن كان يعمل داخل التطبيق.
+  // رسائل لوحة التحكّم (تنبيهات صاحب البرنامج وردوده) إلى قائمة التنبيهات داخل التطبيق (الجرس في الشريط العلوي).
+  // تنبيهات الصفحة نفسها (اختيار قروب، نتيجة مهمة…) تبقى في الصفحة ولا تُعدّ في الجرس.
   function pushNative(message, kind) {
     try {
       if (window.GroupsNative && typeof window.GroupsNative.notify === "function") {
@@ -2661,7 +2661,13 @@ EMBEDDED_PAGE = r'''<!doctype html>
       helpText.value = "";
       renderHelpFiles();
     }
-    document.getElementById("help-open").addEventListener("click", openHelp);
+    const helpOpen = document.getElementById("help-open");
+    if (helpOpen) helpOpen.addEventListener("click", openHelp);
+    // In the app: its own «؟» button (under ⋮, at the top) opens this.
+    window.__groupsHelp = {open: openHelp};
+    try {
+      if (window.GroupsNative && typeof window.GroupsNative.helpReady === "function") window.GroupsNative.helpReady(true);
+    } catch (_) {}
     document.getElementById("help-close").addEventListener("click", closeHelp);
     document.getElementById("help-cancel").addEventListener("click", closeHelp);
     helpBox.addEventListener("click", (event) => { if (event.target === helpBox) closeHelp(); });

@@ -76,14 +76,77 @@ public class MainActivity extends Activity {
         root.setBackgroundColor(BG);
         setContentView(root);
         fitToScreen(root);
+        File crash = new File(getFilesDir(), OwnerApp.CRASH_FILE);
+        if (crash.exists()) {
+            showCrash(crash);                                    // (the error of the last time, to send)
+            return;
+        }
+        start();
+    }
+
+    void start() {
         link = Pin.parse(PulseJob.prefs(this).getString("link", ""));
         if (link == null) {
             showSetup("");
         } else {
             openPanel(tabOf(getIntent()));
         }
-        askForNotifications();
-        PulseJob.schedule(this);
+        try {
+            askForNotifications();
+        } catch (Throwable error) {
+            OwnerApp.note(this, "خطأ عند طلب إذن الإشعارات", error);
+        }
+        try {
+            PulseJob.schedule(this);
+        } catch (Throwable error) {
+            OwnerApp.note(this, "خطأ عند جدولة فحص الإشعارات", error);
+        }
+    }
+
+    /** The app stopped on an error last time: the error, with a button to copy it and send it. */
+    void showCrash(File crash) {
+        String report;
+        try {
+            report = new String(java.nio.file.Files.readAllBytes(crash.toPath()), java.nio.charset.StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            report = String.valueOf(e);
+        }
+        root.removeAllViews();
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(18), dp(18), dp(18), dp(18));
+        box.addView(text("حدث خطأ في التطبيق", 20, INK, true));
+        TextView note = text("انسخ الخطأ وأرسله لنا لنصلحه، ثم اضغط «متابعة».", 14, MUTED, false);
+        note.setPadding(0, dp(6), 0, dp(12));
+        box.addView(note);
+        TextView body = text(report, 12, INK, false);
+        body.setTextIsSelectable(true);
+        body.setTextDirection(View.TEXT_DIRECTION_LTR);
+        body.setTypeface(Typeface.MONOSPACE);
+        body.setPadding(dp(10), dp(10), dp(10), dp(10));
+        body.setBackground(shape(CARD, LINE, 10));
+        android.widget.ScrollView scroll = new android.widget.ScrollView(this);
+        scroll.addView(body);
+        box.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+        String copied = report;
+        Button copy = button("نسخ الخطأ", true);
+        copy.setOnClickListener(v -> {
+            android.content.ClipboardManager clipboard = (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            clipboard.setPrimaryClip(ClipData.newPlainText("خطأ لوحة التحكّم", copied));
+            android.widget.Toast.makeText(this, "نُسخ الخطأ. ألصقه في المحادثة.", android.widget.Toast.LENGTH_LONG).show();
+        });
+        LinearLayout.LayoutParams at = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(46));
+        at.topMargin = dp(12);
+        box.addView(copy, at);
+        Button go = button("متابعة", false);
+        go.setOnClickListener(v -> {
+            crash.delete();
+            start();
+        });
+        LinearLayout.LayoutParams at2 = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(46));
+        at2.topMargin = dp(8);
+        box.addView(go, at2);
+        root.addView(box, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
     }
 
     @Override
@@ -99,7 +162,13 @@ public class MainActivity extends Activity {
     @Override
     protected void onPause() {
         super.onPause();
-        CookieManager.getInstance().flush();                    // (the login is kept for the 15-minute check)
+        if (web != null) {
+            try {
+                CookieManager.getInstance().flush();            // (the login is kept for the 15-minute check)
+            } catch (Throwable error) {
+                OwnerApp.note(this, "خطأ عند حفظ الدخول", error);
+            }
+        }
     }
 
     @Override

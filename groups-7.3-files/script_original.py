@@ -1097,6 +1097,24 @@ EMBEDDED_PAGE = r'''<!doctype html>
     .guide-steps strong { font-size: 12.5px; }
     .guide-steps span { font-size: 11.5px; }
     .version-line { margin-top: 12px; font-size: 11px; }
+    /* one row where one row is enough: the whole form shows on a phone without scrolling */
+    body[data-app="1"] .eyebrow { display: none; }
+    .counts li { flex-direction: row; justify-content: center; align-items: baseline; gap: 5px; padding: 5px 2px; font-size: 11px; }
+    .counts b { font-size: 14px; }
+    #session-block .token-row { display: flex; flex-wrap: wrap; }
+    #session-block .token-row > input { flex: 1 1 84px; min-width: 84px; padding: 0 8px; font-size: 13px; }
+    #session-block .token-row .btn { flex: 0 0 auto; padding: 0 8px; font-size: 11.5px; }
+    .groups-row { display: flex; flex-wrap: wrap; align-items: center; }
+    .groups-row #groups-button { flex: 1 1 auto; }
+    .groups-row .wait-groups, .groups-row .links-button { flex: 0 0 auto; }
+    .wait-groups { grid-column: auto; gap: 5px; }
+    /* «الإجراءات»: four toggles on one line — blue with ✓ when on (the box itself stays, unseen, for the keyboard) */
+    .choices { display: flex; flex-wrap: wrap; gap: 6px; }
+    .choices .choice { position: relative; flex: 1 1 auto; min-height: var(--h-ctl); padding: 0 8px; gap: 0; justify-content: center; }
+    .choices .choice input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+    .choices .choice-title { font-size: 12px; white-space: nowrap; color: var(--muted); }
+    .choices .choice:has(input:checked) .choice-title { color: var(--pine-deep); }
+    .choices .choice:has(input:checked) .choice-title::before { content: "✓ "; font-weight: 700; }
 
     @media (min-width: 760px) {
       body { font-size: 15px; }

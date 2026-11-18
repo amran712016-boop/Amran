@@ -5619,28 +5619,23 @@ def open_reply_composer(page, path: str) -> None:
     raise PlaywrightTimeoutError("tweetTextarea_0 not visible after retries")
 
 
-# A reply is typed into the box the way a person types, not pasted whole: a letter at a time at an uneven pace,
-# slower after a space or a stop, with a longer pause now and then, and a rare slip of a wrong letter that is
-# backspaced at once. About 100 letters take 10 to 15 seconds.
-TYPE_CHAR_MS = (55, 130)
-TYPE_AFTER_SPACE_MS = (120, 260)
-TYPE_AFTER_STOP_MS = (220, 460)
-TYPE_THINK_MS = (450, 950)
-TYPE_THINK_CHANCE = 0.05
-TYPE_SLIP_CHANCE = 0.03
+# A reply is typed into the box a letter at a time at an uneven pace, not pasted whole. The whole comment takes
+# TYPING_TOTAL_MS (between the two, at random), whatever its length. (It was 5 to 10 seconds: the slowest part of a
+# comment.)
+TYPING_TOTAL_MS = (1500, 3000)
 TYPE_STEPS_PER_CALL = 20        # (in the app the typing is done by the page itself, this many letters a call)
 
 
 def typing_plan(text: str) -> list[list]:
     """[letter, milliseconds to wait after it] in order, paced so the whole comment is typed
-    over about 3 to 5 seconds whatever its length (the letters still appear one after another)."""
+    over TYPING_TOTAL_MS whatever its length (the letters still appear one after another)."""
     steps: list[list] = [[ch, 0] for ch in text]
     if not steps:
         return steps
-    total = random.randint(5000, 10000)         # total time to type the whole comment, in ms
+    total = random.randint(*TYPING_TOTAL_MS)    # total time to type the whole comment, in ms
     share = total / len(steps)
     for step in steps:
-        step[1] = max(8, int(share * random.uniform(0.6, 1.4)))
+        step[1] = max(4, int(share * random.uniform(0.6, 1.4)))
     return steps
 
 
@@ -5707,7 +5702,7 @@ def type_like_a_person(page, text: str) -> bool:
             if not (isinstance(typed, dict) and typed.get("ok")):
                 trace_click(f"reply الكتابة حرفًا حرفًا توقفت: {typed}")
                 return False
-        page.wait_for_timeout(400)
+        page.wait_for_timeout(200)
         seen = typed.get("text") if isinstance(typed, dict) else ""
     else:
         for letter, wait in steps:
@@ -5858,12 +5853,12 @@ def publish_reply(page, text: str, path: str) -> tuple[bool, str]:
     if blocked:
         return False, blocked
     open_reply_composer(page, path)
-    page.wait_for_timeout(500)
+    page.wait_for_timeout(250)
     blocked = reply_block_reason(page)
     if blocked:
         return False, blocked
     insert_reply_text(page, text)
-    page.wait_for_timeout(500)
+    page.wait_for_timeout(250)
     click_reply_send(page)
     snippet = text[:24]
     try:
@@ -6071,7 +6066,7 @@ def _execute_comment_actions(page, items: list[dict], task_actions: list[str], a
                     card.scroll_into_view_if_needed(timeout=4000)
                 except Exception:
                     pass
-            page.wait_for_timeout(700)
+            page.wait_for_timeout(300)
             if left:
                 result["actions"].update(apply_actions_on_path(page, target_path, left))
             if replied_before or ("comment" in actions and already_done_recently(account, tweet_status_id(target_path), ["comment"])):
@@ -6087,7 +6082,7 @@ def _execute_comment_actions(page, items: list[dict], task_actions: list[str], a
                     result["actions"]["comment"] = "لم يُرجع النموذج تعليقًا صالحًا"
                 else:
                     result["comment"] = comment
-                    page.wait_for_timeout(800)
+                    page.wait_for_timeout(300)
                     posted, detail = publish_reply(page, comment, target_path)
                     result["actions"]["comment"] = "تم التنفيذ" if posted else (detail or "أُرسل الطلب لكن تعذر تأكيد الحالة")
         except RuntimeError as exc:
@@ -6111,7 +6106,7 @@ def _execute_comment_actions(page, items: list[dict], task_actions: list[str], a
             on_snapshot(list(results))
         if on_progress:
             on_progress(index + 1, total, "act")
-        page.wait_for_timeout(1400)
+        page.wait_for_timeout(600)
     return results
 
 

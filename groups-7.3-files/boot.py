@@ -207,18 +207,44 @@ def engine_ready() -> bool:
 
 # ---------------------------------------------------------------- the setup page (only until the script is in place)
 SETUP_PAGE = """<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>الدخول</title>
-<style>body{font:16px/1.7 "IBM Plex Sans Arabic",system-ui,-apple-system,sans-serif;background:#f3f5fa;color:#101828;margin:0;display:grid;place-items:center;min-height:100vh;padding:16px;box-sizing:border-box}
-.box{background:#fff;padding:28px 24px;border-radius:20px;width:min(92vw,350px);box-shadow:0 0 0 1px rgba(16,24,40,.06),0 18px 44px rgba(16,24,40,.10);text-align:center}
-.box::before{content:"";display:block;width:46px;height:46px;margin:0 auto 12px;border-radius:14px;background:linear-gradient(135deg,#2f5bea,#7c5cff);box-shadow:0 8px 18px rgba(47,91,234,.3)}
-h1{font-size:20px;margin:0 0 4px}p{color:#667085;font-size:14px;margin:0 0 18px}
-input{width:100%;box-sizing:border-box;padding:13px;border-radius:12px;border:1px solid #e4e7ec;background:#f9fafb;color:#101828;text-align:center;font-size:18px;letter-spacing:2px}
-input:focus{outline:none;border-color:#2f5bea;box-shadow:0 0 0 4px rgba(47,91,234,.14);background:#fff}
-button{width:100%;padding:13px;border:0;border-radius:12px;background:linear-gradient(135deg,#2f5bea,#5b6ef5);color:#fff;font-weight:700;font-size:16px;cursor:pointer;margin-top:12px;box-shadow:0 8px 18px rgba(47,91,234,.28)}
-button:disabled{opacity:.6}.msg{min-height:20px;color:#b42318;font-size:14px;margin-top:12px}</style></head>
-<body><form class="box" onsubmit="go(event)"><h1>قروبات</h1><p>أدخل رمز الدخول الذي أعطاك إياه صاحب البرنامج. يُجهَّز التطبيق مرة واحدة ثم يبدأ العمل.</p>
-<input id="code" placeholder="XXXX-XXXX-XXXX" autocomplete="off" autocapitalize="characters" autofocus>
-<button id="btn" type="submit">دخول</button><div class="msg" id="msg"></div></form>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>الدخول</title>
+<style>
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%;-webkit-tap-highlight-color:transparent}
+body{margin:0;min-height:100vh;min-height:100dvh;display:grid;place-items:center;padding:16px;background:#f3f5fa;color:#101828;
+font:15px/1.65 "Plex Arabic",system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans Arabic",Tahoma,sans-serif;-webkit-font-smoothing:antialiased}
+.box{width:min(100%,360px);overflow:hidden;border-radius:22px;background:#fff;border:1px solid #e6e9f0;text-align:center;
+box-shadow:0 24px 48px -20px rgba(16,24,40,.28),0 6px 12px -6px rgba(16,24,40,.08);animation:rise .45s cubic-bezier(.2,.8,.2,1) both}
+.hero{position:relative;isolation:isolate;padding:26px 20px 22px;color:#fff;
+background:radial-gradient(120% 95% at 100% 0%,rgba(92,132,255,.5) 0%,rgba(92,132,255,0) 58%),radial-gradient(85% 90% at 0% 100%,rgba(141,98,255,.42) 0%,rgba(141,98,255,0) 62%),linear-gradient(158deg,#0c1640 0%,#13215e 52%,#1b2675 100%)}
+.hero::before{content:"";position:absolute;inset:0;z-index:-1;background-image:linear-gradient(rgba(255,255,255,.055) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.055) 1px,transparent 1px);background-size:20px 20px;-webkit-mask-image:linear-gradient(200deg,#000 0%,transparent 75%);mask-image:linear-gradient(200deg,#000 0%,transparent 75%)}
+.mark{display:grid;place-items:center;width:52px;height:52px;margin:0 auto 12px;border-radius:16px;background:linear-gradient(135deg,#5b8cff,#7c5cff);box-shadow:0 10px 22px -8px rgba(91,140,255,.8),inset 0 1px 0 rgba(255,255,255,.4)}
+.mark::before{content:"";width:24px;height:24px;background:#fff;-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M13.2 2.2 4.6 13.1a.8.8 0 0 0 .6 1.3h5.9l-1 7.2c-.1.8.9 1.2 1.4.6l8.6-10.9a.8.8 0 0 0-.6-1.3h-5.9l1-7.2c.1-.8-.9-1.2-1.4-.6z'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M13.2 2.2 4.6 13.1a.8.8 0 0 0 .6 1.3h5.9l-1 7.2c-.1.8.9 1.2 1.4.6l8.6-10.9a.8.8 0 0 0-.6-1.3h-5.9l1-7.2c.1-.8-.9-1.2-1.4-.6z'/%3E%3C/svg%3E") center/contain no-repeat}
+h1{margin:0 0 4px;font-size:19px;font-weight:600}
+.hero p{margin:0;color:rgba(255,255,255,.74);font-size:13px}
+.body{padding:20px 20px 2px}
+label{display:block;margin:0 0 8px;font-size:12.5px;font-weight:500;color:#344054;text-align:right}
+input{width:100%;height:50px;padding:0 14px;border-radius:13px;border:1px solid #d5dae3;background:#f7f8fb;color:#101828;text-align:center;direction:ltr;
+font:600 18px/1 ui-monospace,"SFMono-Regular",Menlo,Consolas,"Liberation Mono",monospace;letter-spacing:3px;outline:none;transition:border-color .15s,box-shadow .15s,background .15s}
+input::placeholder{color:#98a2b3}
+input:focus{border-color:#2f5bea;background:#fff;box-shadow:0 0 0 4px rgba(47,91,234,.16)}
+button{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;height:48px;margin-top:12px;border:1px solid rgba(36,71,200,.6);border-radius:13px;
+background:linear-gradient(180deg,#4a74ff,#2f5bea);color:#fff;font:inherit;font-size:15px;font-weight:600;cursor:pointer;
+box-shadow:0 10px 20px -10px rgba(47,91,234,.9),inset 0 1px 0 rgba(255,255,255,.22);transition:transform .12s}
+button:active{transform:scale(.98)}button:disabled{opacity:.75}
+button:disabled::after{content:"";width:15px;height:15px;border-radius:50%;border:2px solid #fff;border-inline-end-color:transparent;animation:spin .7s linear infinite}
+.msg{min-height:22px;margin:12px 0 0;font-size:13px;color:#b42318}
+.foot{display:flex;align-items:center;justify-content:center;gap:6px;margin:0;padding:10px 20px 18px;font-size:11.5px;color:#98a2b3}
+.foot::before{content:"";flex:none;width:13px;height:13px;background:#98a2b3;-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 22s8-3.5 8-10V5l-8-3-8 3v7c0 6.5 8 10 8 10z'/%3E%3Cpath d='m9 12 2 2 4-4'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 22s8-3.5 8-10V5l-8-3-8 3v7c0 6.5 8 10 8 10z'/%3E%3Cpath d='m9 12 2 2 4-4'/%3E%3C/svg%3E") center/contain no-repeat}
+@keyframes rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
+</style></head>
+<body><form class="box" onsubmit="go(event)"><div class="hero"><span class="mark" aria-hidden="true"></span><h1>قروبات</h1><p>أدخل رمز الدخول الذي أعطاك إياه صاحب البرنامج. يُجهَّز التطبيق مرة واحدة ثم يبدأ العمل.</p></div>
+<div class="body"><label for="code">رمز الدخول</label>
+<input id="code" placeholder="XXXX-XXXX-XXXX" autocomplete="off" autocapitalize="characters" spellcheck="false" autofocus>
+<button id="btn" type="submit">دخول</button><div class="msg" id="msg" role="status"></div></div>
+<p class="foot">الرمز خاص بجهازك ويعمل عليه وحده.</p></form>
 <script>
 async function go(e){e.preventDefault();var b=document.getElementById("btn"),m=document.getElementById("msg");
 var code=document.getElementById("code").value.trim();if(!code)return;b.disabled=true;m.style.color="#667085";m.textContent="جارٍ التحقّق والتجهيز… قد يأخذ لحظات.";

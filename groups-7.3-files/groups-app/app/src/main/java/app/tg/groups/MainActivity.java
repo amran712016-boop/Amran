@@ -10,6 +10,7 @@ import android.content.ClipboardManager;
 import android.content.ContentValues;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.content.res.ColorStateList;
 import android.content.res.Configuration;
 import android.graphics.PixelFormat;
 import android.graphics.Typeface;
@@ -32,6 +33,7 @@ import android.view.WindowInsets;
 import android.view.WindowManager;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
+import android.webkit.RenderProcessGoneDetail;
 import android.webkit.URLUtil;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
@@ -46,6 +48,7 @@ import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.PopupMenu;
+import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -116,6 +119,7 @@ public class MainActivity extends Activity {
     ImageButton helpButton;               // «الدعم» (سمّاعة) تحت ⋮: يفتح «مساعدة» في الصفحة (حين تقول الصفحة إنها متاحة)
     boolean helpReady;
     ValueCallback<Uri[]> fileCallback;
+    ProgressBar statusSpin;               // turns while «يشغّل السكربت…» shows: the app is starting, not stuck
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -140,6 +144,7 @@ public class MainActivity extends Activity {
         if (notices != null) {
             notices.onShown();
         }
+        checkPanel();
     }
 
     @Override
@@ -375,11 +380,28 @@ public class MainActivity extends Activity {
         helpButton.setVisibility(View.GONE);
         content.addView(helpButton, helpAt);
 
-        status = text("يشغّل السكربت…", 16, MUTED, false);
+        status = new TextView(this) {
+            @Override
+            public void setVisibility(int visibility) {
+                super.setVisibility(visibility);
+                paintStatusSpin();
+            }
+        };
+        status.setText("يشغّل السكربت…");
+        status.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        status.setTextColor(MUTED);
+        status.setLineSpacing(0, 1.2f);
         status.setGravity(Gravity.CENTER);
         status.setPadding(dp(24), dp(24), dp(24), dp(24));
         status.setBackgroundColor(PAPER);
         content.addView(status, fill());
+        statusSpin = new ProgressBar(this);
+        statusSpin.setIndeterminate(true);
+        statusSpin.setIndeterminateTintList(ColorStateList.valueOf(PINE));
+        FrameLayout.LayoutParams spinAt = new FrameLayout.LayoutParams(dp(34), dp(34), Gravity.CENTER);
+        statusSpin.setTranslationY(-dp(46));
+        content.addView(statusSpin, spinAt);
+        paintStatusSpin();
 
         report = buildReport();
         report.setVisibility(View.GONE);
@@ -671,6 +693,15 @@ public class MainActivity extends Activity {
             }
 
             @Override
+            public boolean onRenderProcessGone(WebView web, RenderProcessGoneDetail detail) {
+                // The page's process stopped (Android took its memory back while the app was away, or it crashed).
+                // Without this Android closes the whole app with it; instead the page is built again and opens where
+                // it was (the program keeps every task and account).
+                main.post(() -> renewPanel(web));
+                return true;
+            }
+
+            @Override
             public void onReceivedError(WebView web, WebResourceRequest request, WebResourceError error) {
                 if (request.isForMainFrame() && alive) {
                     // (the script was not answering yet, or was restarting: asked again in a moment)
@@ -840,6 +871,74 @@ public class MainActivity extends Activity {
 
     // ---------------------------------------------------------------- the script's page
 
+    /** «يشغّل السكربت…» turns while the app starts; not over a message that it could not start. */
+    void paintStatusSpin() {
+        if (statusSpin == null || status == null) {
+            return;
+        }
+        boolean starting = status.getVisibility() == View.VISIBLE && status.getCurrentTextColor() != CLAY
+            && !"failed".equals(Engine.phase);
+        statusSpin.setVisibility(starting ? View.VISIBLE : View.GONE);
+    }
+
+    /** A new page in place of one that cannot go on (its process is gone, or it stopped answering). */
+    void renewPanel(WebView old) {
+        if (!alive || old == null || old != panel) {
+            return;
+        }
+        int at = content.indexOfChild(old);
+        content.removeView(old);
+        try {
+            old.destroy();
+        } catch (Throwable ignore) {
+        }
+        panelLoaded = false;
+        panelFailed = false;
+        panel = buildPanel();
+        content.addView(panel, at < 0 ? 0 : at, fill());
+        if (small) {
+            panel.setVisibility(View.INVISIBLE);
+        } else {
+            showTab(onBrowserTab);
+        }
+        if (Engine.phase.equals("running")) {
+            panel.loadUrl(Engine.url());
+        } else {
+            waitForScript();
+        }
+    }
+
+    /** Back on the screen: the page is asked to refresh itself at once (window.__ggResume), which also says it is
+     * alive. A page that twice gives no answer (stuck after the phone was away) is built again; one still loading is
+     * left alone (a load that fails is asked again by onReceivedError). */
+    void checkPanel() {
+        probePanel(panel, 2);
+    }
+
+    void probePanel(final WebView view, final int tries) {
+        if (view == null || view != panel || !panelLoaded) {
+            return;
+        }
+        final boolean[] answered = {false};
+        try {
+            view.evaluateJavascript(
+                "(function(){try{return window.__ggResume?String(window.__ggResume()):'old'}catch(e){return 'err'}})()",
+                value -> answered[0] = true);
+        } catch (Throwable t) {
+            return;
+        }
+        main.postDelayed(() -> {
+            if (answered[0] || !alive || !started || panel != view || !panelLoaded || view.getProgress() < 100) {
+                return;
+            }
+            if (tries > 1) {
+                probePanel(view, tries - 1);
+            } else {
+                renewPanel(view);
+            }
+        }, 5000);
+    }
+
     void waitForScript() {
         new Thread(() -> {
             long end = System.currentTimeMillis() + 180_000;
@@ -864,6 +963,7 @@ public class MainActivity extends Activity {
             runOnUiThread(() -> {
                 if (alive) {
                     status.setTextColor(CLAY);
+                    paintStatusSpin();
                     status.setText("لم يبدأ السكربت. افتح القائمة ⋮ ثم «السجل» وأرسل ما فيه.\n\n"
                         + (Engine.error.length() > 600 ? Engine.error.substring(Engine.error.length() - 600) : Engine.error));
                 }

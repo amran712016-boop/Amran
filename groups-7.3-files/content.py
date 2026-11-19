@@ -765,35 +765,83 @@ PAGE = r'''<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>إنشاء محتوى</title>
   <style>
-    /* The same look as the panel's page: its colours, its header card, its cards and its buttons. */
-    :root { --paper: #f3f5fa; --sheet: #ffffff; --ink: #101828; --muted: #667085; --line: #e4e7ec; --pine: #2f5bea; --pine-deep: #2447c8;
+    /* The same look as the panel's page: its type, its header, its cards and its buttons. */
+    @font-face { font-family: "Plex Arabic"; font-style: normal; font-weight: 400; font-display: swap; src: url("/fonts/plex-arabic-400.woff2") format("woff2");
+      unicode-range: U+0600-06FF, U+0750-077F, U+0870-088E, U+0890-0891, U+0897-08E1, U+08E3-08FF, U+200C-200E, U+2010-2011, U+204F, U+2E41, U+FB50-FDFF, U+FE70-FE74, U+FE76-FEFC; }
+    @font-face { font-family: "Plex Arabic"; font-style: normal; font-weight: 500; font-display: swap; src: url("/fonts/plex-arabic-500.woff2") format("woff2");
+      unicode-range: U+0600-06FF, U+0750-077F, U+0870-088E, U+0890-0891, U+0897-08E1, U+08E3-08FF, U+200C-200E, U+2010-2011, U+204F, U+2E41, U+FB50-FDFF, U+FE70-FE74, U+FE76-FEFC; }
+    @font-face { font-family: "Plex Arabic"; font-style: normal; font-weight: 600; font-display: swap; src: url("/fonts/plex-arabic-600.woff2") format("woff2");
+      unicode-range: U+0600-06FF, U+0750-077F, U+0870-088E, U+0890-0891, U+0897-08E1, U+08E3-08FF, U+200C-200E, U+2010-2011, U+204F, U+2E41, U+FB50-FDFF, U+FE70-FE74, U+FE76-FEFC; }
+    @font-face { font-family: "Plex Arabic"; font-style: normal; font-weight: 400; font-display: swap; src: url("/fonts/plex-latin-400.woff2") format("woff2");
+      unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+    @font-face { font-family: "Plex Arabic"; font-style: normal; font-weight: 500; font-display: swap; src: url("/fonts/plex-latin-500.woff2") format("woff2");
+      unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+    @font-face { font-family: "Plex Arabic"; font-style: normal; font-weight: 600; font-display: swap; src: url("/fonts/plex-latin-600.woff2") format("woff2");
+      unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD; }
+    :root { --paper: #f3f5fa; --sheet: #ffffff; --ink: #101828; --muted: #667085; --line: #e6e9f0; --pine: #2f5bea; --pine-deep: #2447c8;
       --clay: #b42318; --clay-bg: #fef3f2; --ok-bg: #ecfdf3; --ok-ink: #067647;
-      --shadow: 0 0 0 1px rgba(16, 24, 40, 0.06), 0 1px 2px rgba(16, 24, 40, 0.05), 0 12px 32px rgba(16, 24, 40, 0.06); color-scheme: light; }
+      --shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 6px 16px -6px rgba(16, 24, 40, 0.08); color-scheme: light; }
     * { box-sizing: border-box; }
-    html { -webkit-font-smoothing: antialiased; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+    html { -webkit-font-smoothing: antialiased; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; -webkit-tap-highlight-color: transparent; }
     body { margin: 0; min-height: 100vh; min-height: 100dvh; background: var(--paper); color: var(--ink);
-      font-family: "IBM Plex Sans Arabic", "Segoe UI", Tahoma, sans-serif; font-size: 15px; line-height: 1.55; overflow-x: hidden; }
-    body::before { content: ""; position: fixed; inset: 0 0 auto 0; height: 3px; background: linear-gradient(90deg, var(--pine), #7c5cff); }
+      font-family: "Plex Arabic", system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans Arabic", Tahoma, sans-serif;
+      font-size: 14px; line-height: 1.55; overflow-x: hidden; }
     [hidden] { display: none !important; }
-    :focus-visible { outline: 2px solid rgba(47, 91, 234, 0.4); outline-offset: 2px; }
-    main { width: min(520px, 100%); margin: 0 auto; padding: calc(12px + env(safe-area-inset-top)) 14px calc(18px + env(safe-area-inset-bottom)); }
-    .top { display: flex; align-items: center; gap: 12px; padding: 14px; border-radius: 18px; background: var(--sheet); box-shadow: var(--shadow); }
-    .mark { position: relative; flex: 0 0 auto; width: 38px; height: 38px; border-radius: 12px; background: linear-gradient(135deg, var(--pine), #7c5cff);
-      box-shadow: 0 6px 14px rgba(47, 91, 234, 0.28); }
-    .mark::before { content: ""; position: absolute; inset-inline-start: 11px; top: 11px; bottom: 11px; width: 16px; border-radius: 4px;
-      background: rgba(255, 255, 255, 0.94); }
+    :focus-visible { outline: 2px solid var(--pine); outline-offset: 2px; }
+    main { width: min(560px, 100%); margin: 0 auto; padding: calc(8px + env(safe-area-inset-top)) 12px calc(18px + env(safe-area-inset-bottom)); }
+    .top {
+      position: relative; isolation: isolate; overflow: hidden; display: flex; align-items: center; gap: 10px; padding: 12px;
+      border-radius: 18px; color: #fff;
+      background:
+        radial-gradient(120% 95% at 100% 0%, rgba(92, 132, 255, 0.5) 0%, rgba(92, 132, 255, 0) 58%),
+        radial-gradient(85% 90% at 0% 100%, rgba(141, 98, 255, 0.42) 0%, rgba(141, 98, 255, 0) 62%),
+        linear-gradient(158deg, #0c1640 0%, #13215e 52%, #1b2675 100%);
+      box-shadow: 0 16px 32px -18px rgba(19, 33, 94, 0.75), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+      animation: rise 0.42s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+    }
+    .top::before {
+      content: ""; position: absolute; inset: 0; z-index: -1;
+      background-image: linear-gradient(rgba(255, 255, 255, 0.055) 1px, transparent 1px), linear-gradient(90deg, rgba(255, 255, 255, 0.055) 1px, transparent 1px);
+      background-size: 20px 20px;
+      -webkit-mask-image: linear-gradient(200deg, #000 0%, transparent 70%); mask-image: linear-gradient(200deg, #000 0%, transparent 70%);
+    }
+    .mark {
+      position: relative; display: grid; place-items: center; flex: none; width: 38px; height: 38px; border-radius: 12px;
+      background: linear-gradient(135deg, #5b8cff 0%, #7c5cff 100%);
+      box-shadow: 0 8px 18px -6px rgba(91, 140, 255, 0.75), inset 0 1px 0 rgba(255, 255, 255, 0.4);
+    }
+    .mark::before {
+      content: ""; width: 19px; height: 19px; background: #fff;
+      -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M13.2 2.2 4.6 13.1a.8.8 0 0 0 .6 1.3h5.9l-1 7.2c-.1.8.9 1.2 1.4.6l8.6-10.9a.8.8 0 0 0-.6-1.3h-5.9l1-7.2c.1-.8-.9-1.2-1.4-.6z'/%3E%3C/svg%3E") center / contain no-repeat;
+      mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23000' d='M13.2 2.2 4.6 13.1a.8.8 0 0 0 .6 1.3h5.9l-1 7.2c-.1.8.9 1.2 1.4.6l8.6-10.9a.8.8 0 0 0-.6-1.3h-5.9l1-7.2c.1-.8-.9-1.2-1.4-.6z'/%3E%3C/svg%3E") center / contain no-repeat;
+    }
     .titles { min-width: 0; }
-    .eyebrow { margin: 0; color: var(--muted); font-size: 11.5px; font-weight: 500; }
-    h1 { margin: 0; font-size: 18px; line-height: 1.2; font-weight: 600; letter-spacing: -0.01em; }
-    .back { margin-inline-start: auto; flex: 0 0 auto; display: inline-flex; align-items: center; min-height: 34px; padding: 0 11px; border-radius: 11px;
-      background: var(--sheet); box-shadow: inset 0 0 0 1px var(--line), 0 1px 2px rgba(16, 24, 40, 0.04); color: var(--ink); font-size: 12px;
-      font-weight: 600; text-decoration: none; white-space: nowrap; transition: background 0.15s; }
-    .back:hover { background: #f9fafb; }
-    .sheet { margin-top: 12px; padding: 14px; border-radius: 18px; background: var(--sheet); box-shadow: var(--shadow); }
-    h2 { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; font-size: 14px; font-weight: 600; }
-    h2::before { content: ""; flex: 0 0 auto; width: 4px; height: 15px; border-radius: 2px; background: linear-gradient(var(--pine), #7c5cff); }
-    .hint { margin: 0; color: var(--muted); font-size: 13px; }
-    #tweets { --tweets-day: #f9fafb; --tweets-tweet: var(--sheet); }
+    .eyebrow { margin: 0; color: rgba(255, 255, 255, 0.66); font-size: 11px; font-weight: 400; }
+    h1 { margin: 0; font-size: 15.5px; line-height: 1.35; font-weight: 600; color: #fff; }
+    .back {
+      margin-inline-start: auto; flex: none; display: inline-flex; align-items: center; gap: 4px; height: 30px; padding: 0 11px 0 9px;
+      border-radius: 999px; border: 1px solid rgba(255, 255, 255, 0.16); background: rgba(255, 255, 255, 0.09); color: #fff;
+      font-size: 11.5px; font-weight: 500; text-decoration: none; white-space: nowrap; transition: background 0.15s, transform 0.12s;
+    }
+    .back::before {
+      content: ""; width: 13px; height: 13px; background: currentColor;
+      -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m9 18 6-6-6-6'/%3E%3C/svg%3E") center / contain no-repeat;
+      mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m9 18 6-6-6-6'/%3E%3C/svg%3E") center / contain no-repeat;
+    }
+    .back:active { transform: scale(0.97); background: rgba(255, 255, 255, 0.16); }
+    .sheet {
+      margin-top: 10px; padding: 12px; border-radius: 16px; background: var(--sheet); border: 1px solid var(--line); box-shadow: var(--shadow);
+      animation: rise 0.42s cubic-bezier(0.2, 0.8, 0.2, 1) 0.05s both;
+    }
+    h2 { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; font-size: 13px; font-weight: 600; }
+    h2::before {
+      content: ""; flex: none; width: 24px; height: 24px; border-radius: 8px; box-shadow: inset 0 0 0 1px #c7d4fc;
+      background: #eef2fe url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%232f5bea' stroke-width='2.2' stroke-linecap='round'%3E%3Cpath d='M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01'/%3E%3C/svg%3E") center / 13px no-repeat;
+    }
+    .hint { margin: 0; color: var(--muted); font-size: 12.5px; }
+    #tweets { --tweets-day: #f7f8fb; --tweets-tweet: var(--sheet); }
+    @keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
   </style>
   {%- if tweets %}
   {{ tweets["style"]|safe }}

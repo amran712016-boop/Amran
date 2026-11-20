@@ -5031,8 +5031,12 @@ def press_action_button(page, path: str, status_id: str, action: str) -> str:
     return blocker or "خارج الشاشة"
 
 
+UNCONFIRMED = "أُرسل الطلب لكن تعذر تأكيد الحالة"
+
+
 def apply_actions_on_path(page, path: str, actions: list[str]) -> dict[str, str]:
-    """Click only inactive controls. Already-on actions are left untouched."""
+    """Click only inactive controls. Already-on actions are left untouched. One pressed but not seen to turn on is
+    tried once more, quietly (see the end)."""
     status_id = ""
     match = re.search(r"status/(\d{6,25})", path or "")
     if match:
@@ -5045,6 +5049,30 @@ def apply_actions_on_path(page, path: str, actions: list[str]) -> dict[str, str]
         state = None
     if not state:
         return {key: "تعذر العثور على المنشور" for key in actions}
+
+    def press(action: str) -> str:
+        """Press the action's button (and the repost's confirm). "" when pressed, else why not."""
+        blocker = press_action_button(page, path, status_id, action)
+        if blocker:
+            return blocker
+        if action == "repost":
+            confirm = page.locator('[data-testid="retweetConfirm"]')
+            try:
+                confirm.wait_for(state="visible", timeout=1200)
+                real_click(confirm.first)
+            except PlaywrightTimeoutError:
+                pass
+        return ""
+
+    def turned_on(action: str, seconds: float) -> bool:
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            again = read_action_state(page, status_id, [action]) or {}
+            if (again.get(action) or {}).get("on"):
+                return True
+            page.wait_for_timeout(60)
+        return False
+
     outcome: dict[str, str] = {}
     pressed = 0
     for action in actions:
@@ -5056,35 +5084,50 @@ def apply_actions_on_path(page, path: str, actions: list[str]) -> dict[str, str]
             page.wait_for_timeout(random.randint(80, 200))
         pressed += 1
         try:
-            blocker = press_action_button(page, path, status_id, action)
+            blocker = press(action)
             if blocker == "missing":
                 outcome[action] = "زر الإجراء غير متاح — تم التجاوز"
                 continue
             if blocker:
                 outcome[action] = f"تعذر النقر: الزر مغطى بـ {blocker}"
                 continue
-            if action == "repost":
-                confirm = page.locator('[data-testid="retweetConfirm"]')
-                try:
-                    confirm.wait_for(state="visible", timeout=1200)
-                    real_click(confirm.first)
-                except PlaywrightTimeoutError:
-                    pass
-            confirmed = False
-            deadline = time.monotonic() + 2.5
-            while time.monotonic() < deadline:
-                again = read_action_state(page, status_id, [action]) or {}
-                if (again.get(action) or {}).get("on"):
-                    confirmed = True
-                    break
-                page.wait_for_timeout(60)
-            outcome[action] = "تم التنفيذ" if confirmed else "أُرسل الطلب لكن تعذر تأكيد الحالة"
+            outcome[action] = "تم التنفيذ" if turned_on(action, 2.5) else UNCONFIRMED
             trace_click(f"{action} النتيجة: {outcome[action]}")
         except Exception as exc:
             if browser_closed_error(exc):
                 raise BrowserClosed() from exc
             outcome[action] = "تعذر التنفيذ"
             trace_click(action + " استثناء " + traceback.format_exc().replace("\n", " | ")[-400:])
+
+    # Pressed but not seen to turn on: once more, with nothing shown to the user. First a fresh look (it may have
+    # gone through, only slowly); still off, it is pressed one more time. A button already on is never pressed:
+    # these buttons switch, and a second press would undo it.
+    unsure = [action for action in actions if outcome.get(action) == UNCONFIRMED]
+    if unsure:
+        try:
+            page.keyboard.press("Escape")                # (a menu the first press left open)
+        except Exception as exc:
+            if browser_closed_error(exc):
+                raise BrowserClosed() from exc
+        page.wait_for_timeout(1200)
+        for action in unsure:
+            try:
+                now = (read_action_state(page, status_id, [action]) or {}).get(action) or {}
+                if now.get("on"):
+                    outcome[action] = "تم التنفيذ"
+                    trace_click(f"{action} إعادة صامتة: كان قد نُفّذ وتأكد متأخرًا")
+                    continue
+                blocker = press(action)
+                if blocker:
+                    trace_click(f"{action} إعادة صامتة: لم يُضغط ({blocker})")
+                    continue
+                if turned_on(action, 4.0):
+                    outcome[action] = "تم التنفيذ"
+                trace_click(f"{action} إعادة صامتة: {outcome[action]}")
+            except Exception as exc:
+                if browser_closed_error(exc):
+                    raise BrowserClosed() from exc
+                trace_click(f"{action} إعادة صامتة: استثناء {type(exc).__name__}")
     return outcome
 
 

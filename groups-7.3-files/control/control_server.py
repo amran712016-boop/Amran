@@ -811,6 +811,48 @@ def script_file_sha(filename: str) -> str:
         return ""
 
 
+# «تجريبي»: a version published to some users only (to try it before everyone). Its files sit beside the one
+# published to everyone (pilot-gg.py, pilot-content.py, pilot.json with the users' code ids). A user among them
+# is offered it; everyone else keeps the version published to all.
+PILOT_META = "pilot.json"
+
+
+def pilot_meta() -> dict:
+    """The trial version and who gets it; {} when there is none."""
+    meta = load_script_meta(PILOT_META)
+    return meta if meta.get("version") and (SCRIPT_DIR / "pilot-gg.py").is_file() else {}
+
+
+def script_for(code_id: str) -> tuple[dict, str, str]:
+    """(meta, script file, content file) of the version this user's app gets: the trial one when the user is among
+    its users, else the one published to everyone."""
+    pilot = pilot_meta()
+    if pilot and code_id in (pilot.get("codes") or []):
+        return pilot, "pilot-gg.py", "pilot-content.py"
+    return load_script_meta(SCRIPT_META), "gg.py", "content.py"
+
+
+def highest_published_version() -> str:
+    """The highest version published (to everyone or as a trial): a new upload must be above it."""
+    versions = [str(load_script_meta(SCRIPT_META).get("version") or ""), str(pilot_meta().get("version") or "")]
+    versions = [version for version in versions if version]
+    return max(versions, key=version_tuple) if versions else ""
+
+
+def remove_script_files(*names: str) -> None:
+    for name in names:
+        try:
+            (SCRIPT_DIR / name).unlink()
+        except OSError:
+            pass
+
+
+def chosen_codes(values: list) -> list:
+    """The ticked users that exist, once each, in order."""
+    known = {row.get("id") for row in load_codes()}
+    return [value for value in dict.fromkeys(str(item) for item in values) if value in known]
+
+
 # ----------------------------------------------------------------------------- notices to the apps
 # تنبيهات وتعليمات يرسلها المالك من اللوحة إلى التطبيقات: للكل أو لمستخدم واحد (رمز). كل تنبيه برقم يزيد،
 # والتطبيق يطلب ما بعد آخر رقم وصله، فلا يصله التنبيه مرتين.
@@ -1708,6 +1750,16 @@ html.loading .ldpill{display:flex}
 .bk{display:flex;gap:8px;align-items:center;font-size:14px;margin:10px 0 0;color:var(--pri)}.bk.none{color:var(--warn)}.bk .i{width:18px;height:18px;flex:none}
 .ckl{display:flex;gap:10px;align-items:center;margin:14px 0 0;font-size:14px;cursor:pointer}.ckl input{width:20px;height:20px;accent-color:var(--pri);flex:none}
 .rs{margin-top:14px}.rs summary{min-height:40px}
+.pk{display:none;margin-top:10px;max-height:260px;overflow:auto;border:1px solid var(--line);border-radius:12px;background:var(--soft)}
+.pub:has(input[value=some]:checked) .pk,.pk.on{display:block}
+.pkr{display:flex;gap:10px;align-items:center;min-height:46px;padding:8px 12px;border-bottom:1px solid var(--line);cursor:pointer;font-size:14px}
+.pkr:last-child{border-bottom:0}.pkr input{width:20px;height:20px;accent-color:var(--pri);flex:none;margin:0}
+.pkn{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
+.pkc{font:12px/1 var(--mono);color:var(--mut);direction:ltr}.pkr.off .pkn{color:var(--mut)}.pke{margin:0;padding:12px;color:var(--mut);font-size:14px}
+.pil{margin-top:18px;padding:14px;border:1.5px dashed var(--pri);border-radius:14px;background:var(--prisoft)}
+.pil-h,.pil-w{display:flex;gap:10px;align-items:flex-start;margin:0;font-size:14px;line-height:1.6}.pil-h .i,.pil-w .i{width:18px;height:18px;flex:none;margin-top:2px;color:var(--pri)}
+.pil-w{margin-top:10px;color:var(--bad)}.pil-w .i{color:var(--bad)}
+.pil-a{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px}.pil-a form{margin:0}.pil-a .btn{margin:0;width:100%}
 input[type=file].fs{height:auto;padding:10px 12px;width:100%;margin-bottom:4px}
 .nav .cnt{position:absolute;top:6px;inset-inline-start:calc(50% + 6px);min-width:18px;height:18px;padding:0 5px;border-radius:99px;background:var(--bad);color:var(--badk);font-style:normal;font-size:11px;font-weight:700;line-height:18px;text-align:center;box-shadow:0 0 0 2px var(--card)}
 .sh{display:flex;align-items:center;gap:10px;justify-content:space-between}.sh .btn{margin:0}
@@ -2017,7 +2069,8 @@ main{padding-bottom:56px}
 <div class="card pad"><h2>سكربت التطبيق</h2>
 <p class="mut">هذا هو برنامج التطبيق. حدّثه من هنا: ارفع الملف المعدّل ثم اضغط «نشر التحديث»، فيظهر للمستخدمين زر «تحديث» داخل التطبيق — دون بناء تطبيق جديد. رقم الإصدار تحدده هنا، ولا حاجة لتعديله داخل الملف.</p>
 <dl class="mvd">
-<div><dt>المنشور الآن</dt><dd>{% if script_live.version %}الإصدار <b>{{script_live.version}}</b> · نُشر {{script_live_when}}{% if script_live.has_content %} · مع content.py{% endif %}{% else %}<span class="mut">لا يوجد سكربت منشور بعد. التطبيقات تعمل بالسكربت المدمج فيها.</span>{% endif %}</dd></div>
+<div><dt>للجميع</dt><dd>{% if script_live.version %}الإصدار <b>{{script_live.version}}</b> · نُشر {{script_live_when}}{% if script_live.has_content %} · مع content.py{% endif %}{% else %}<span class="mut">لا يوجد سكربت منشور بعد. التطبيقات تعمل بالسكربت المدمج فيها.</span>{% endif %}</dd></div>
+{% if script_pilot.version %}<div><dt>تجريبي</dt><dd>الإصدار <b>{{script_pilot.version}}</b> · عند {{script_pilot_names|length}} مستخدم · نُشر {{script_pilot_when}}</dd></div>{% endif %}
 {% if script_staged.version %}<div><dt>المرفوع</dt><dd>الإصدار <b>{{script_staged.version}}</b>{% if script_can_publish %} · <span class="b on">جاهز للنشر</span>{% else %} · <span class="mut">منشور</span>{% endif %}</dd></div>{% endif %}
 </dl>
 <form method="post" action="/{{admin}}/script/upload" enctype="multipart/form-data" data-keep-busy>
@@ -2025,13 +2078,37 @@ main{padding-bottom:56px}
 <input id="sc-gg" class="fs" type="file" name="gg" accept=".py,text/x-python,text/plain" required>
 <label class="l" for="sc-content">ملف content.py <small>(اختياري، إن تغيّر)</small></label>
 <input id="sc-content" class="fs" type="file" name="content" accept=".py,text/x-python,text/plain">
-<label class="l" for="sc-ver">رقم الإصدار <small>(مقترح تلقائيًا، يجب أن يكون أعلى من {{script_live.version or "1.0"}})</small></label>
+<label class="l" for="sc-ver">رقم الإصدار <small>(مقترح تلقائيًا، يجب أن يكون أعلى من {{script_floor or "1.0"}})</small></label>
 <input id="sc-ver" name="version" dir="ltr" value="{{script_next}}" inputmode="decimal" pattern="[0-9٠-٩]+([.٫][0-9٠-٩]+){0,3}" autocomplete="off" autocapitalize="off" spellcheck="false" required>
 <button class="btn wide ghost" style="margin-top:12px">{{ic('code')}}رفع السكربت</button></form>
-{% if script_can_publish %}<form method="post" action="/{{admin}}/script/publish" data-title="نشر التحديث؟" data-confirm="سيصل الإصدار {{script_staged.version}} إلى كل المستخدمين، فيظهر لهم زر «تحديث» في التطبيق. تأكد أنك جرّبت الملف." data-yes="نشر" data-toast="تم نشر التحديث">
-<button class="btn wide" style="margin-top:10px">{{ic('check')}}نشر التحديث (الإصدار {{script_staged.version}})</button></form>{% endif %}
+{% if script_can_publish %}<form class="pub" method="post" action="/{{admin}}/script/publish" data-v="{{script_staged.version}}" data-title="نشر التحديث؟" data-confirm="سيصل الإصدار {{script_staged.version}} إلى كل المستخدمين، فيظهر لهم زر «تحديث» في التطبيق. تأكد أنك جرّبت الملف." data-yes="نشر" data-toast="تم نشر التحديث">
+<p class="l">لمن يصل الإصدار {{script_staged.version}}؟</p>
+<div class="eng">
+<label class="opt"><input type="radio" name="target" value="all" checked><span class="pi">{{ic('users')}}</span><span><b>كل المستخدمين</b><small>يظهر زر «تحديث» للجميع</small></span><span class="ck">{{ic('check')}}</span></label>
+<label class="opt"><input type="radio" name="target" value="some"><span class="pi">{{ic('edit')}}</span><span><b>مستخدمون أختارهم (تجريبي)</b><small>جرّبه عندهم أولًا؛ الباقون يبقون على الإصدار الحالي</small></span><span class="ck">{{ic('check')}}</span></label>
+</div>
+<div class="pk" role="group" aria-label="من يصله الإصدار التجريبي">{% for c in codes %}<label class="pkr{{ '' if c.active else ' off' }}"><input type="checkbox" name="codes" value="{{c.id}}"><span class="pkn">{{ c.label or 'بدون اسم' }}</span><span class="pkc">{{c.code}}</span></label>{% else %}<p class="pke">لا يوجد مستخدمون بعد.</p>{% endfor %}</div>
+<button class="btn wide" style="margin-top:12px">{{ic('check')}}نشر التحديث (الإصدار {{script_staged.version}})</button></form>
+<script>(function(){var f=document.querySelector('form.pub');if(!f)return;var v=f.dataset.v;
+function sync(){var some=f.querySelector('input[name=target][value=some]').checked,n=f.querySelectorAll('input[name=codes]:checked').length;
+f.dataset.confirm=some?(n?'سيصل الإصدار '+v+' إلى '+n+' مستخدم فقط، ويظهر لهم زر «تحديث». الباقون يبقون على الإصدار الحالي.':'لم تختر أي مستخدم. اختر من القائمة من يصله الإصدار التجريبي.'):'سيصل الإصدار '+v+' إلى كل المستخدمين، فيظهر لهم زر «تحديث» في التطبيق. تأكد أنك جرّبت الملف.';
+f.dataset.yes=some?'نشر تجريبي':'نشر'}
+f.addEventListener('change',sync);sync()})();</script>{% endif %}
+{% if script_pilot.version %}<div class="pil">
+<p class="pil-h">{{ic('edit')}}<span>الإصدار التجريبي <b>{{script_pilot.version}}</b> يصل الآن إلى: {{ script_pilot_names|join('، ') if script_pilot_names else 'لا أحد (حُذف من اخترتهم)' }}</span></p>
+{% if not script_live.version %}<p class="pil-w">{{ic('alert')}}<span>لا يوجد إصدار منشور للجميع بعد، فالمستخدمون الجدد خارج التجربة لا يستطيعون تجهيز التطبيق. انشر للجميع حين تتأكد.</span></p>{% endif %}
+<div class="pil-a">
+<form method="post" action="/{{admin}}/script/pilot/promote" data-title="نشر للجميع؟" data-confirm="سيصل الإصدار {{script_pilot.version}} إلى كل المستخدمين، فيظهر لهم زر «تحديث»." data-yes="نشر للجميع" data-toast="تم النشر للجميع"><button class="btn">{{ic('check')}}نشر للجميع</button></form>
+<form method="post" action="/{{admin}}/script/pilot/cancel" data-title="إلغاء الإصدار التجريبي؟" data-confirm="لن يُعرض الإصدار {{script_pilot.version}} على أحد بعد الآن. من حدّث إليه يبقى على نسخته حتى يُنشر إصدار أعلى للجميع." data-yes="إلغاء التجريبي" data-kind="danger" data-toast="أُلغي الإصدار التجريبي"><button class="btn ghost">إلغاء التجريبي</button></form>
+</div>
+<details class="rs"><summary>تعديل من يصله</summary>
+<form method="post" action="/{{admin}}/script/pilot/users" data-toast="تم حفظ المستخدمين">
+<div class="pk on" role="group" aria-label="من يصله الإصدار التجريبي">{% for c in codes %}<label class="pkr{{ '' if c.active else ' off' }}"><input type="checkbox" name="codes" value="{{c.id}}"{% if c.id in script_pilot_ids %} checked{% endif %}><span class="pkn">{{ c.label or 'بدون اسم' }}</span><span class="pkc">{{c.code}}</span></label>{% endfor %}</div>
+<button class="btn wide ghost" style="margin-top:10px">حفظ</button></form></details>
+</div>{% endif %}
 <ul class="notes"><li>{{ic('shield')}}<span>يُنزَّل السكربت عبر اتصال التطبيق المحمي بخادمك، ولا يصل إلا لجهاز يحمل رمزًا صالحًا.</span></li>
-<li>{{ic('alert')}}<span>يُجرّب التطبيق تشغيل الإصدار الجديد قبل اعتماده؛ إن لم يعمل، يبقى على القديم ولا يتعطّل.</span></li></ul></div>
+<li>{{ic('alert')}}<span>يُجرّب التطبيق تشغيل الإصدار الجديد قبل اعتماده؛ إن لم يعمل، يبقى على القديم ولا يتعطّل.</span></li>
+<li>{{ic('edit')}}<span>«تجريبي»: انشر لمستخدمين تختارهم (أنت مثلًا) أولًا، ثم «نشر للجميع» حين تتأكد أنه سليم.</span></li></ul></div>
 </section>
 
 <section class="panel" id="p-link">
@@ -2306,6 +2383,9 @@ def dashboard():
     last_backup = int(SECRETS.get("last_backup") or 0)
     script_live = load_script_meta(SCRIPT_META)
     script_staged = load_script_meta(STAGED_META)
+    script_pilot = pilot_meta()
+    pilot_ids = set(script_pilot.get("codes") or [])
+    script_pilot_names = [row.get("label") or row.get("code") or "" for row in rows if row.get("id") in pilot_ids]
     failures = failure_rows(codes)
     all_failures = load_failures()["items"]
     all_messages = load_support()["items"]
@@ -2321,11 +2401,14 @@ def dashboard():
         backup_when=seen_text({"last_seen": last_backup}) if last_backup else "",
         owner_link=owner_app_link(request.host), in_owner_app=OWNER_APP_MARK in (request.headers.get("User-Agent") or ""),
         this_host=request.host, relay=MOVE_RELAY.split("//")[-1],
-        script_live=script_live, script_staged=script_staged, script_next=next_version(script_live.get("version") or ""),
+        script_live=script_live, script_staged=script_staged, script_next=next_version(highest_published_version()),
+        script_floor=highest_published_version(), script_pilot=script_pilot, script_pilot_ids=pilot_ids,
+        script_pilot_names=script_pilot_names,
+        script_pilot_when=seen_text({"last_seen": int(script_pilot.get("published_at") or 0)}) if script_pilot.get("published_at") else "",
         script_live_when=seen_text({"last_seen": int(script_live.get("published_at") or 0)}) if script_live.get("published_at") else "",
-        script_can_publish=bool(script_staged.get("version")) and (
-            script_staged.get("sha256") != script_live.get("sha256")
-            or script_staged.get("content_sha256") != script_live.get("content_sha256")),
+        script_can_publish=bool(script_staged.get("version")) and all(
+            (script_staged.get("sha256"), script_staged.get("content_sha256")) != (meta.get("sha256"), meta.get("content_sha256"))
+            for meta in (script_live, script_pilot)),
         engine=keys["engine"], gemini_set=gemini_ready(keys), claude_set=bool(keys["claude_sealed"]),
         gemini_model=keys["gemini_model"], claude_model=keys["claude_model"],
         gemini_default=GEMINI_DEFAULT_MODEL, claude_default=CLAUDE_DEFAULT_MODEL,
@@ -2815,7 +2898,7 @@ def script_upload():
     if problem:
         flash("bad", problem)
         return redirect(f"/{ADMIN}")
-    live_version = str(load_script_meta(SCRIPT_META).get("version") or "")
+    live_version = highest_published_version()
     version = (request.form.get("version") or "").strip().translate(str.maketrans("٠١٢٣٤٥٦٧٨٩٫", "0123456789."))
     if not version:
         version = next_version(live_version)
@@ -2823,7 +2906,7 @@ def script_upload():
         flash("bad", "رقم الإصدار غير صحيح. اكتبه أرقامًا ونقاطًا فقط، مثل 1.1")
         return redirect(f"/{ADMIN}")
     if live_version and version_tuple(version) <= version_tuple(live_version):
-        flash("bad", f"رقم الإصدار يجب أن يكون أعلى من المنشور الآن ({live_version})، وإلا لن يظهر التحديث للمستخدمين. "
+        flash("bad", f"رقم الإصدار يجب أن يكون أعلى من آخر إصدار منشور ({live_version})، وإلا لن يظهر التحديث للمستخدمين. "
                      f"مثلًا: {next_version(live_version)}")
         return redirect(f"/{ADMIN}")
     gg_raw = stamp_version(gg_raw, version)
@@ -2857,13 +2940,28 @@ def script_upload():
 
 @app.post(f"/{ADMIN}/script/publish")
 def script_publish():
-    """Make the staged script the one the apps download."""
+    """Make the staged script the one the apps download: everyone's, or a trial for the chosen users."""
     if not logged_in():
         return redirect(f"/{ADMIN}")
+    some = request.form.get("target") == "some"
     with LOCK:
         staged = load_script_meta(STAGED_META)
         if not staged.get("version") or not (SCRIPT_DIR / "staged-gg.py").is_file():
             flash("bad", "لا يوجد سكربت مرفوع لنشره. ارفع الملف أولًا.")
+            return redirect(f"/{ADMIN}")
+        if some:
+            chosen = chosen_codes(request.form.getlist("codes"))
+            if not chosen:
+                flash("bad", "اختر مستخدمًا واحدًا على الأقل ليصله الإصدار التجريبي.")
+                return redirect(f"/{ADMIN}")
+            shutil.copy2(SCRIPT_DIR / "staged-gg.py", SCRIPT_DIR / "pilot-gg.py")
+            if staged.get("has_content") and (SCRIPT_DIR / "staged-content.py").is_file():
+                shutil.copy2(SCRIPT_DIR / "staged-content.py", SCRIPT_DIR / "pilot-content.py")
+            else:
+                remove_script_files("pilot-content.py")
+            write_private_json(SCRIPT_DIR / PILOT_META, dict(staged, published_at=int(time.time()), codes=chosen))
+            flash("ok", f"نُشر الإصدار {staged['version']} تجريبيًا لـ {len(chosen)} مستخدم. يظهر لهم زر «تحديث» خلال "
+                        "دقيقة تقريبًا، والباقون يبقون على الإصدار الحالي.")
             return redirect(f"/{ADMIN}")
         shutil.copy2(SCRIPT_DIR / "staged-gg.py", SCRIPT_DIR / "gg.py")
         if staged.get("has_content") and (SCRIPT_DIR / "staged-content.py").is_file():
@@ -2875,7 +2973,62 @@ def script_publish():
                 pass
         staged["published_at"] = int(time.time())
         write_private_json(SCRIPT_DIR / SCRIPT_META, staged)
+        remove_script_files("pilot-gg.py", "pilot-content.py", PILOT_META)      # (everyone has a newer one now)
     flash("ok", f"نُشر الإصدار {staged['version']}. يظهر للمستخدمين زر «تحديث» خلال دقيقة تقريبًا، أو عند فتح الصفحة.")
+    return redirect(f"/{ADMIN}")
+
+
+@app.post(f"/{ADMIN}/script/pilot/promote")
+def script_pilot_promote():
+    """The trial version goes to everyone."""
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    with LOCK:
+        pilot = pilot_meta()
+        if not pilot:
+            flash("bad", "لا يوجد إصدار تجريبي.")
+            return redirect(f"/{ADMIN}")
+        shutil.copy2(SCRIPT_DIR / "pilot-gg.py", SCRIPT_DIR / "gg.py")
+        if pilot.get("has_content") and (SCRIPT_DIR / "pilot-content.py").is_file():
+            shutil.copy2(SCRIPT_DIR / "pilot-content.py", SCRIPT_DIR / "content.py")
+        else:
+            remove_script_files("content.py")
+        live = {key: value for key, value in pilot.items() if key != "codes"}
+        live["published_at"] = int(time.time())
+        write_private_json(SCRIPT_DIR / SCRIPT_META, live)
+        remove_script_files("pilot-gg.py", "pilot-content.py", PILOT_META)
+    flash("ok", f"نُشر الإصدار {pilot['version']} لكل المستخدمين. يظهر لهم زر «تحديث» خلال دقيقة تقريبًا.")
+    return redirect(f"/{ADMIN}")
+
+
+@app.post(f"/{ADMIN}/script/pilot/cancel")
+def script_pilot_cancel():
+    """No one is offered the trial version any more (those who installed it keep it)."""
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    with LOCK:
+        remove_script_files("pilot-gg.py", "pilot-content.py", PILOT_META)
+    flash("ok", "أُلغي الإصدار التجريبي. من حدّث إليه يبقى على نسخته حتى يُنشر إصدار أعلى للجميع، والباقون على الإصدار المنشور للجميع.")
+    return redirect(f"/{ADMIN}")
+
+
+@app.post(f"/{ADMIN}/script/pilot/users")
+def script_pilot_users():
+    """Change who gets the trial version."""
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    with LOCK:
+        pilot = pilot_meta()
+        if not pilot:
+            flash("bad", "لا يوجد إصدار تجريبي.")
+            return redirect(f"/{ADMIN}")
+        chosen = chosen_codes(request.form.getlist("codes"))
+        if not chosen:
+            flash("bad", "اختر مستخدمًا واحدًا على الأقل، أو ألغِ الإصدار التجريبي.")
+            return redirect(f"/{ADMIN}")
+        pilot["codes"] = chosen
+        write_private_json(SCRIPT_DIR / PILOT_META, pilot)
+    flash("ok", f"صار الإصدار التجريبي {pilot['version']} يصل لـ {len(chosen)} مستخدم.")
     return redirect(f"/{ADMIN}")
 
 
@@ -3068,28 +3221,30 @@ def api_failure():
 def api_script_latest():
     """The app asks for the published script's version, to know whether to offer «تحديث»."""
     body = request.get_json(silent=True) or {}
-    if not code_from_token(body.get("token")):
+    row = code_from_token(body.get("token"))
+    if not row:
         return api_err("انتهت صلاحية الدخول أو أوقِف الرمز أو نُقل لجهاز آخر. أعد إدخال الرمز.", 200)
-    meta = load_script_meta(SCRIPT_META)
-    if not meta.get("version") or not (SCRIPT_DIR / "gg.py").is_file():
+    meta, gg_name, content_name = script_for(row["id"])
+    if not meta.get("version") or not (SCRIPT_DIR / gg_name).is_file():
         return api_ok(version="")
-    return api_ok(version=str(meta.get("version") or ""), sha256=script_file_sha("gg.py"),
-                  has_content=bool(meta.get("has_content")), content_sha256=script_file_sha("content.py"))
+    return api_ok(version=str(meta.get("version") or ""), sha256=script_file_sha(gg_name),
+                  has_content=bool(meta.get("has_content")), content_sha256=script_file_sha(content_name))
 
 
 @app.post(f"/{API}/script-download")
 def api_script_download():
     """The app downloads the published script (gg.py, and content.py when there is one), base64."""
     body = request.get_json(silent=True) or {}
-    if not code_from_token(body.get("token")):
+    row = code_from_token(body.get("token"))
+    if not row:
         return api_err("انتهت صلاحية الدخول أو أوقِف الرمز أو نُقل لجهاز آخر. أعد إدخال الرمز.", 200)
-    meta = load_script_meta(SCRIPT_META)
-    gg_path = SCRIPT_DIR / "gg.py"
+    meta, gg_name, content_name = script_for(row["id"])
+    gg_path = SCRIPT_DIR / gg_name
     if not meta.get("version") or not gg_path.is_file():
         return api_err("لا يوجد سكربت منشور.")
     answer = {"version": str(meta.get("version") or ""),
               "gg": base64.b64encode(gg_path.read_bytes()).decode("ascii")}
-    content_path = SCRIPT_DIR / "content.py"
+    content_path = SCRIPT_DIR / content_name
     if meta.get("has_content") and content_path.is_file():
         answer["content"] = base64.b64encode(content_path.read_bytes()).decode("ascii")
     return api_ok(**answer)

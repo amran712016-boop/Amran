@@ -621,9 +621,41 @@ def balance_of(row: dict) -> float:
         return 0.0
 
 
-def take_comment_price(code_id: str, price: float = COST_PER_COMMENT) -> str:
+def money(amount: float) -> str:
+    """$1.25 ($0.035 when it is not whole cents), and −$0.40 for a balance below zero (a debt the next top-up pays
+    first), as the panel's usd() writes it. Kept whole inside Arabic text (else it shows as 1.25$ or 0.40$−)."""
+    amount = round(float(amount or 0), 4)
+    whole = abs(abs(amount) * 100 - round(abs(amount) * 100)) < 1e-6
+    text = f"{abs(amount):.2f}" if whole else f"{abs(amount):.4f}".rstrip("0")
+    return "\u2066" + ("−$" if amount < 0 else "$") + text + "\u2069"
+
+
+# A «مسبق» user cannot start a task without balance for its paid services, but a task that started goes on to its
+# end even when the balance runs out on the way (the balance may go below zero; the next top-up pays that first).
+# At its start the app gets a pass signed here, which lets that task's comments through.
+TASK_PASS_HOURS = 12
+
+
+def make_task_pass(code_id: str) -> str:
+    until = int(time.time()) + TASK_PASS_HOURS * 3600
+    sig = hmac.new(SECRETS["token_secret"].encode("utf-8"), f"task|{code_id}|{until}".encode("utf-8"), hashlib.sha256).hexdigest()[:32]
+    return f"{until}.{sig}"
+
+
+def task_pass_ok(code_id: str, value) -> bool:
+    try:
+        until_text, sig = str(value or "").split(".", 1)
+        until = int(until_text)
+    except ValueError:
+        return False
+    good = hmac.new(SECRETS["token_secret"].encode("utf-8"), f"task|{code_id}|{until}".encode("utf-8"), hashlib.sha256).hexdigest()[:32]
+    return until > time.time() and hmac.compare_digest(sig, good)
+
+
+def take_comment_price(code_id: str, price: float = COST_PER_COMMENT, in_task: bool = False) -> str:
     """Before a prepaid user's comment its price is taken from the balance at once (so two comments at the same
-    moment cannot both spend the last cent). "" when it may go ahead, else why not. A «آجل» user always may."""
+    moment cannot both spend the last cent). "" when it may go ahead, else why not. A «آجل» user always may, and
+    so does a comment of a task that started with balance (its pass): the balance may then go below zero."""
     with LOCK:
         codes = load_codes()
         row = next((item for item in codes if item.get("id") == code_id), None)
@@ -632,8 +664,8 @@ def take_comment_price(code_id: str, price: float = COST_PER_COMMENT) -> str:
         balance = balance_of(row)
         if price <= 0:
             return ""
-        if balance + 1e-9 < price:
-            return f"رصيدك لا يكفي لكتابة التعليقات (الرصيد ${max(balance, 0):.2f}). اطلب من صاحب البرنامج شحن رصيدك."
+        if balance + 1e-9 < price and not in_task:
+            return f"رصيدك لا يكفي لكتابة التعليقات (الرصيد {money(balance)}). اطلب من صاحب البرنامج شحن رصيدك."
         row["balance"] = round(balance - price, 4)
         save_codes(codes)
     return ""
@@ -1730,7 +1762,7 @@ body{align-items:center;justify-content:center;padding:24px;background:var(--sof
 </form></main></body></html>
 """
 
-DASHBOARD = r"""{% macro ic(n) %}<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-{{n}}"/></svg>{% endmacro %}{% set nokey = (engine=='gemini' and not gemini_set) or (engine=='claude' and not claude_set) %}<!doctype html>
+DASHBOARD = r"""{% macro usd(v) %}{% set r = (v or 0)|float|round(4) %}{% set a = r|abs %}{{ '−' if r < 0 else '' }}${{ '%.2f'|format(a) if (a * 100 - (a * 100)|round)|abs < 0.000001 else ('%.4f'|format(a)).rstrip('0') }}{% endmacro %}{% macro ic(n) %}<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-{{n}}"/></svg>{% endmacro %}{% set nokey = (engine=='gemini' and not gemini_set) or (engine=='claude' and not claude_set) %}<!doctype html>
 <html lang="ar" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#ffffff"><meta name="robots" content="noindex,nofollow"><meta name="format-detection" content="telephone=no">
@@ -2143,7 +2175,7 @@ main{padding-bottom:56px}
 </section>
 {% set pn = {'comment': 'تعليق', 'like': 'إعجاب', 'repost': 'إعادة نشر', 'bookmark': 'مرجعية'} %}
 <details class="card prc"><summary><span class="prc-h">{{ic('key')}}<b>أسعار الخدمات</b></span><span class="prc-s">{% for k in ['comment', 'like', 'repost', 'bookmark'] %}<span>{{pn[k]}} <bdi dir="ltr">${{ '%g'|format(prices[k]) }}</bdi></span>{% endfor %}</span>{{ic('chev')}}</summary>
-<form method="post" action="/{{admin}}/prices" data-toast="تم حفظ الأسعار"><p class="mut">سعر كل خدمة ناجحة بالدولار، و0 للمجانية. «آجل»: تُجمع التكلفة. «مسبق»: تُخصم من الرصيد، ولا تُنفَّذ الخدمة إن لم يكفِ. السعر الجديد يُطبَّق من الآن، وما حُسب قبله يبقى.</p>
+<form method="post" action="/{{admin}}/prices" data-toast="تم حفظ الأسعار"><p class="mut">سعر كل خدمة ناجحة بالدولار، و0 للمجانية. «آجل»: تُجمع التكلفة. «مسبق»: تُخصم من الرصيد، ولا تبدأ مهمة إن لم يكفِ لأرخص خدماتها؛ والمهمة التي بدأت تكمل إلى آخرها ولو نفد الرصيد في نصها (يصير بالسالب، وتسدّه الشحنة التالية). السعر الجديد يُطبَّق من الآن، وما حُسب قبله يبقى.</p>
 <div class="prg">{% for k in ['comment', 'like', 'repost', 'bookmark'] %}<label class="prf"><span>{{pn[k]}}</span><input class="fs" name="{{k}}" dir="ltr" inputmode="decimal" autocomplete="off" value="{{ '%g'|format(prices[k]) }}"></label>{% endfor %}</div>
 <button class="btn wide" style="margin-top:14px">حفظ الأسعار</button></form></details>
 <div class="tb">
@@ -2158,17 +2190,17 @@ main{padding-bottom:56px}
 
 <div class="list" id="list">
 {% for c in codes %}{% set hue = (c.id[:2]|int(0,16)) * 360 // 256 %}
-<article class="u{{ '' if c.active else ' off' }}" data-id="{{c.id}}" data-s="{{ 'on' if c.active else 'off' }}" data-name="{{c.label}}" data-code="{{c.code}}" data-bound="{{ '1' if c.bound_device else '' }}" data-pay="{{c.pay}}" data-bal="{{ '%.2f'|format(c.balance) }}" data-acct="{{c.account_user}}" data-n="{{c.usage.total}}" data-x="{{ c.acts.repost + c.acts.like + c.acts.bookmark }}" data-seen="{{c.last_seen or 0}}" data-q="{{ (c.label ~ ' ' ~ c.code ~ ' ' ~ c.code|replace('-','') ~ ' ' ~ c.usage.accounts|map(attribute='name')|join(' '))|lower }}">
+<article class="u{{ '' if c.active else ' off' }}" data-id="{{c.id}}" data-s="{{ 'on' if c.active else 'off' }}" data-name="{{c.label}}" data-code="{{c.code}}" data-bound="{{ '1' if c.bound_device else '' }}" data-pay="{{c.pay}}" data-bal="{{ usd(c.balance) }}" data-acct="{{c.account_user}}" data-n="{{c.usage.total}}" data-x="{{ c.acts.repost + c.acts.like + c.acts.bookmark }}" data-seen="{{c.last_seen or 0}}" data-q="{{ (c.label ~ ' ' ~ c.code ~ ' ' ~ c.code|replace('-','') ~ ' ' ~ c.usage.accounts|map(attribute='name')|join(' '))|lower }}">
 <div class="who"><div class="av" style="--h:{{hue}}" aria-hidden="true">{{ (c.label or '؟')[:1] }}</div>
 <div class="nm"><h3>{{ c.label or 'بدون اسم' }}{% if c.account_user %}<span class="tg">حساب</span>{% endif %}{% if c.pay == 'prepaid' %}<span class="tg pp">مسبق</span>{% endif %}</h3><p><span class="st">{{ 'يعمل' if c.active else 'موقوف' }}</span><span>{% if c.last_seen %}آخر دخول {{c.last_seen_text}}{% else %}لم يدخل بعد{% endif %}</span></p></div></div>
 <form method="post" action="/{{admin}}/code/toggle" data-toast="{{ 'تم إيقاف الرمز' if c.active else 'تم تشغيل الرمز' }}"><input type="hidden" name="id" value="{{c.id}}"><button class="sw{{ ' on' if c.active else '' }}" role="switch" aria-checked="{{ 'true' if c.active else 'false' }}" aria-label="رمز {{ c.label or 'بدون اسم' }} يعمل"><i></i></button></form>
 <div class="cr"><button type="button" class="code" data-copy="{{c.code}}" aria-label="نسخ الرمز {{c.code}}"><bdi>{{c.code}}</bdi>{{ic('copy')}}</button><button type="button" class="ib" data-more aria-label="خيارات {{ c.label or 'المستخدم' }}">{{ic('more')}}</button></div>
-{% set facts %}{% if c.pay == 'prepaid' %}<span class="bal{{ ' low' if c.balance < 0.05 else '' }}" title="الرصيد المسبق">رصيد <b dir="ltr">${{ '%.2f'|format(c.balance) }}</b></span>{% endif %}<span><b>{{ '{:,}'.format(c.usage.total) }}</b> تعليق</span><span title="التكلفة التقديرية"><b>${{ '%.2f'|format(c.usage.cost) }}</b></span><span class="dev{{ ' on' if c.bound_device else '' }}">{{ic('phone')}}{{ 'جهاز مربوط' if c.bound_device else 'غير مربوط' }}</span>{% endset %}
+{% set facts %}{% if c.pay == 'prepaid' %}<span class="bal{{ ' low' if c.balance < 0.05 else '' }}" title="الرصيد المسبق">رصيد <b dir="ltr">{{ usd(c.balance) }}</b></span>{% endif %}<span><b>{{ '{:,}'.format(c.usage.total) }}</b> تعليق</span><span title="التكلفة التقديرية"><b>${{ '%.2f'|format(c.usage.cost) }}</b></span><span class="dev{{ ' on' if c.bound_device else '' }}">{{ic('phone')}}{{ 'جهاز مربوط' if c.bound_device else 'غير مربوط' }}</span>{% endset %}
 {% if c.usage.accounts %}<details class="acc"><summary class="facts" title="التعليقات حسب حساب X">{{facts}}{{ic('chev')}}</summary>
 <p class="alh">حسابات X ({{c.usage.accounts|length}})</p><ul class="al">
 {% for a in c.usage.accounts %}<li><b><bdi>{{ ('@' ~ a.name) if a.name else ('#' ~ a.id[:8]) }}</bdi></b><span>{{ '{:,}'.format(a.n) }} تعليق</span><span>${{ '%.2f'|format(a.cost) }}</span><div class="pg"><i style="width:{{ ((a.n * 100 / c.usage.total)|round|int) if c.usage.total else 0 }}%"></i></div></li>{% endfor %}
 </ul></details>{% else %}<div class="facts">{{facts}}</div>{% endif %}
-{% if c.ledger %}<details class="led"><summary>سجل الرصيد</summary><ul>{% for e in c.ledger %}<li><span>{{e.note}}</span><b class="{{ 'pl' if e.amount > 0 else 'mi' }}" dir="ltr">{{ '+' if e.amount > 0 else '−' }}${{ '%.2f'|format(e.amount|abs) }}</b><small>{{e.when}} · الرصيد <bdi dir="ltr">${{ '%.2f'|format(e.after) }}</bdi></small></li>{% endfor %}</ul></details>{% endif %}
+{% if c.ledger %}<details class="led"><summary>سجل الرصيد</summary><ul>{% for e in c.ledger %}<li><span>{{e.note}}</span><b class="{{ 'pl' if e.amount > 0 else 'mi' }}" dir="ltr">{{ '+' if e.amount > 0 else '−' }}${{ '%.2f'|format(e.amount|abs) }}</b><small>{{e.when}} · الرصيد <bdi dir="ltr">{{ usd(e.after) }}</bdi></small></li>{% endfor %}</ul></details>{% endif %}
 {% if c.acts.at %}<div class="ax" role="group" aria-label="التنفيذ في تطبيق {{ c.label or 'المستخدم' }}">
 <div><b>{{ '{:,}'.format(c.acts.repost) }}</b><span>الرتويت</span></div>
 <div><b>{{ '{:,}'.format(c.acts.like) }}</b><span>الإعجاب</span></div>
@@ -2497,11 +2529,11 @@ $$('input[name=id]',sheet).forEach(function(i){i.value=d.id});
 $('#sh-copy').dataset.copy=d.code;$('#sh-share').dataset.share='رمز الدخول: '+d.code;
 $('#sh-release').hidden=!d.bound;$('#sh-reset').hidden=!+d.n;
 var pre=d.pay==='prepaid';$('input[name=pay]',$('#sh-pay')).value=pre?'later':'prepaid';
-$('#sh-pay-t').innerHTML=pre?'تحويل إلى «آجل»<small>تُحسب التكلفة ويدفعها لاحقًا، ولا يُخصم من الرصيد</small>':'تحويل إلى «دفع مسبق»<small>لا تُكتب التعليقات إلا برصيد (الرصيد ⁦$'+(d.bal||'0.00')+'⁩)</small>';
+$('#sh-pay-t').innerHTML=pre?'تحويل إلى «آجل»<small>تُحسب التكلفة ويدفعها لاحقًا، ولا يُخصم من الرصيد</small>':'تحويل إلى «دفع مسبق»<small>لا تبدأ مهمة بخدمات مدفوعة بلا رصيد (الرصيد ⁦'+(d.bal||'$0.00')+'⁩)</small>';
 $('#sh-pw').hidden=!d.acct;
 sheet.showModal()}
 $('#sh-bal').onclick=function(){sheet.close();var g=$('#bal');$('input[name=id]',g).value=cur.dataset.id;
-$('#bal-now').textContent=(cur.dataset.name||'المستخدم')+' · الرصيد الآن ⁦$'+(cur.dataset.bal||'0.00')+'⁩'+(cur.dataset.pay==='prepaid'?'':' (هذا المستخدم «آجل»؛ حوّله إلى «مسبق» ليُستخدم رصيده)');
+$('#bal-now').textContent=(cur.dataset.name||'المستخدم')+' · الرصيد الآن ⁦'+(cur.dataset.bal||'$0.00')+'⁩'+(cur.dataset.pay==='prepaid'?'':' (هذا المستخدم «آجل»؛ حوّله إلى «مسبق» ليُستخدم رصيده)');
 var a=$('#bal-a');a.value='';$('#bal-n').value='';g.showModal();a.focus()};
 $('#sh-pw').onclick=function(){sheet.close();var g=$('#pwd');$('input[name=id]',g).value=cur.dataset.id;
 $('#pwd-for').textContent='لحساب '+cur.dataset.acct+'. أعطه كلمة السر الجديدة بعد الحفظ.';var i=$('#pwd-p');i.value='';g.showModal();i.focus()};
@@ -2985,8 +3017,8 @@ def code_balance():
         save_codes(codes)
         name = row.get("label") or row.get("code") or ""
         later = pay_of(row) != PAY_PREPAID
-    flash("ok", f"{'أُضيف' if amount > 0 else 'خُصم'} ${abs(amount):.2f} {'إلى' if amount > 0 else 'من'} رصيد {name}. "
-                f"الرصيد الآن ${row['balance']:.2f}."
+    flash("ok", f"{'أُضيف' if amount > 0 else 'خُصم'} {money(abs(amount))} {'إلى' if amount > 0 else 'من'} رصيد {name}. "
+                f"الرصيد الآن {money(row['balance'])}."
                 + (" (هذا المستخدم «آجل»: لا يُستخدم الرصيد حتى تحوّله إلى «مسبق».)" if later else ""))
     return redirect(f"/{ADMIN}")
 
@@ -3417,7 +3449,7 @@ def signed_in(row: dict, device: str):
     """The answer for a phone that may come in (as for a code): its token."""
     engine, _, _, _ = active_engine()
     return api_ok(token=make_token(row["id"], device), engine=engine or "none", move_key=SECRETS.get("move_public", ""),
-                  pay=pay_of(row), balance=round(balance_of(row), 2))
+                  pay=pay_of(row), balance=round(balance_of(row), 4))
 
 
 def _device_of(body: dict) -> str:
@@ -3506,7 +3538,24 @@ def api_usage():
     row = code_from_token(body.get("token"))
     if not row:
         return api_err("انتهت صلاحية الدخول أو أوقِف الرمز أو نُقل لجهاز آخر. أعد إدخال الرمز.", 200)
-    return api_ok(**usage_by_account(row["id"]), pay=pay_of(row), balance=round(balance_of(row), 2))
+    return api_ok(**usage_by_account(row["id"]), pay=pay_of(row), balance=round(balance_of(row), 4))
+
+
+@app.post(f"/{API}/task-start")
+def api_task_start():
+    """A task is about to start (a new one, a retry, or one whose turn came). A «مسبق» user's task with paid services
+    needs at least the cheapest of them in the balance; then it gets its pass and goes on to its end."""
+    body = request.get_json(silent=True) or {}
+    row = code_from_token(body.get("token"))
+    if not row:
+        return api_err("انتهت صلاحية الدخول أو أوقِف الرمز أو نُقل لجهاز آخر. أعد إدخال الرمز.", 200)
+    prices = load_prices()
+    services = [name for name in body.get("services") if name in SERVICES] if isinstance(body.get("services"), list) else []
+    paid = [prices[name] for name in services if prices[name] > 0]
+    balance = balance_of(row)
+    if pay_of(row) == PAY_PREPAID and paid and balance + 1e-9 < min(paid):
+        return api_err(f"رصيدك {money(balance)} لا يكفي لبدء مهمة جديدة. اطلب من صاحب البرنامج شحن رصيدك.")
+    return api_ok(**{"pass": make_task_pass(row["id"]), "pay": pay_of(row), "balance": round(balance, 4), "prices": prices})
 
 
 @app.post(f"/{API}/charge")
@@ -3527,7 +3576,7 @@ def api_charge():
         if cost > 0 and pay_of(target) == PAY_PREPAID:
             target["balance"] = round(balance_of(target) - cost, 4)
             save_codes(codes)
-    return api_ok(pay=pay_of(target), balance=round(balance_of(target), 2), prices=prices, charged=cost)
+    return api_ok(pay=pay_of(target), balance=round(balance_of(target), 4), prices=prices, charged=cost)
 
 
 @app.post(f"/{API}/stats")
@@ -3740,7 +3789,7 @@ def api_comment():
     if not tweet_text and not image:
         return api_err("لا نص ولا صورة للتغريدة.")
     price = load_prices()["comment"]
-    refused = take_comment_price(row["id"], price)        # («مسبق»: its price is held from the balance first)
+    refused = take_comment_price(row["id"], price, task_pass_ok(row["id"], body.get("pass")))   # («مسبق»: held first)
     if refused:
         return api_err(refused)
     try:

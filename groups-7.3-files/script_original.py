@@ -2671,13 +2671,19 @@ EMBEDDED_PAGE = r'''<!doctype html>
   function money(value) { return "$" + Number(value || 0).toFixed(2); }
   function renderUsage() {
     if (!usageData) return;
-    usageCount.textContent = "التعليقات (" + Number(usageData.total || 0).toLocaleString("en-US") + ")";
-    usageCost.textContent = money(usageData.cost);
-    // Brown at $0, redder as the cost grows, fully red from $10.
-    const brown = [139, 69, 19];
-    const red = [211, 47, 47];
-    const share = Math.max(0, Math.min(1, Number(usageData.cost || 0) / 10));
-    usageCost.style.backgroundColor = "rgb(" + brown.map((value, i) => Math.round(value + (red[i] - value) * share)).join(", ") + ")";
+    // «مسبق»: the balance left (green, red when it is about to run out); «آجل»: the comments and their cost.
+    const prepaid = usageData.pay === "prepaid";
+    usageCount.textContent = prepaid ? "الرصيد" : "التعليقات (" + Number(usageData.total || 0).toLocaleString("en-US") + ")";
+    usageCost.textContent = money(prepaid ? usageData.balance : usageData.cost);
+    if (prepaid) {
+      usageCost.style.backgroundColor = Number(usageData.balance || 0) >= Number(usageData.price || 0.01) * 5 ? "rgb(6, 118, 71)" : "rgb(180, 35, 24)";
+    } else {
+      // Brown at $0, redder as the cost grows, fully red from $10.
+      const brown = [139, 69, 19];
+      const red = [211, 47, 47];
+      const share = Math.max(0, Math.min(1, Number(usageData.cost || 0) / 10));
+      usageCost.style.backgroundColor = "rgb(" + brown.map((value, i) => Math.round(value + (red[i] - value) * share)).join(", ") + ")";
+    }
     usageRows.replaceChildren();
     const accounts = Array.isArray(usageData.accounts) ? usageData.accounts : [];
     if (!accounts.length) {
@@ -2709,7 +2715,9 @@ EMBEDDED_PAGE = r'''<!doctype html>
     document.getElementById("usage-total-n").textContent = Number(usageData.total || 0).toLocaleString("en-US");
     document.getElementById("usage-total-cost").textContent = money(usageData.cost);
     const price = Number(usageData.price || 0.01);
-    usageNote.textContent = usageData.source === "control"
+    usageNote.textContent = prepaid
+      ? "رصيدك " + money(usageData.balance) + ". يُخصم " + money(price) + " لكل تعليق، وبلا رصيد لا تُكتب التعليقات. للشحن راسل صاحب البرنامج."
+      : usageData.source === "control"
       ? (usageData.stale ? "آخر قراءة من لوحة التحكم (الخادم غير متاح الآن). " : "من لوحة التحكم: تُحسب لكل حساب، وتبقى حتى لو أُعيد تثبيت التطبيق. ")
         + money(price) + " لكل تعليق."
       : "محسوبة في هذه النسخة: " + money(price) + " لكل تعليق.";
@@ -3100,7 +3108,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
     rememberGeminiLocal();
   });
   syncGemini();
-  loadCommentsUsage(false);
+  loadCommentsUsage(true);              // (opening the app: the balance as it is now, after a top-up too)
   setInterval(() => { if (!document.hidden) loadCommentsUsage(false); }, 60000);
 
   // تنبيهات المالك وتعليماته من لوحة التحكّم: داخل التطبيق تذهب إلى قائمة التنبيهات (تفتح وحدها)، وفي
@@ -3433,6 +3441,12 @@ EMBEDDED_PAGE = r'''<!doctype html>
       if (!stopId) { showNotice("الصق رابط التغريدة المحددة أو رقمها.", false); stopField.focus(); return; }
     }
     if (!actions.length) { showNotice("اختر إجراءً واحدًا على الأقل.", false); return; }
+    if (actions.includes("comment") && usageData && usageData.pay === "prepaid"
+        && Number(usageData.balance || 0) < Number(usageData.price || 0.01)) {
+      showNotice("رصيدك " + money(usageData.balance) + " لا يكفي للتعليقات. أزل «التعليقات» أو اطلب شحن رصيدك.", false);
+      loadCommentsUsage(true);
+      return;
+    }
     if (actions.includes("comment") && (geminiByOwner || controlOn)) {
       // (Its keys come from the owner when it starts: the script waits for them, and says if they do not come.)
     } else if (actions.includes("comment")) {
@@ -3700,7 +3714,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
     loadActionCounts();
     setTimeout(loadAdminNotices, 40);   // (after its dropped read has let go)
     resyncAccount();
-    if (force || away > 60000) { checkUpdate(); loadCommentsUsage(false); }
+    loadCommentsUsage(true);              // (back in the app: the balance as it is now)
+    if (force || away > 60000) checkUpdate();
   }
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) hiddenSince = Date.now();
@@ -12364,7 +12379,8 @@ def comments_usage(fresh: bool = False) -> dict:
         if isinstance(row, dict):
             accounts.append({"name": str(row.get("name") or "")[:40], "n": int(row.get("n") or 0), "cost": round(float(row.get("cost") or 0), 2)})
     data = {"success": True, "source": "control", "total": int(answer.get("total") or 0), "cost": round(float(answer.get("cost") or 0), 2),
-            "price": float(answer.get("price") or GEMINI_PRICE_PER_COMMENT), "accounts": accounts, "stale": False}
+            "price": float(answer.get("price") or GEMINI_PRICE_PER_COMMENT), "accounts": accounts, "stale": False,
+            "pay": "prepaid" if answer.get("pay") == "prepaid" else "later", "balance": round(float(answer.get("balance") or 0), 2)}
     with _comments_usage_lock:
         _comments_usage_cache.update(at=time.monotonic(), data=data)
     return data
@@ -13844,18 +13860,34 @@ def _forget_unlock() -> None:
         _unlock_cache.update(token="", code="", ok=False, at=0.0)
 
 
-def control_activate(code: str) -> str:
-    """يُفعّل بالرمز عبر الخادم (مربوطًا بجهاز هذا التطبيق)، ويحفظ رمز الجلسة. يعيد اسم المحرّك، أو يرفع خطأ."""
-    data = _control_request("activate", {"code": code, "device": device_id()})
+def _keep_session(data: dict, code: str = "", user: str = "") -> str:
+    """The control server let this phone in: its session token is kept. Returns the writer's name."""
     token = str(data.get("token") or "")
     if not token:
         raise RuntimeError("لم يصل رمز الجلسة من الخادم. أعد المحاولة.")
-    write_private_json(UNLOCK_PATH, {"token": token, "code": code})
+    saved = {"token": token, "code": code}
+    if user:
+        saved["user"] = user
+    write_private_json(UNLOCK_PATH, saved)
     remember_move_key(data)
     with _unlock_lock:
         _unlock_cache.update(token=token, code=code, ok=True, at=time.monotonic())
+    forget_comments_usage()
     stats_changed()
     return str(data.get("engine") or "")
+
+
+def control_activate(code: str) -> str:
+    """يُفعّل بالرمز عبر الخادم (مربوطًا بجهاز هذا التطبيق)، ويحفظ رمز الجلسة. يعيد اسم المحرّك، أو يرفع خطأ."""
+    return _keep_session(_control_request("activate", {"code": code, "device": device_id()}), code=code)
+
+
+def control_sign_in(kind: str, name: str, password: str) -> str:
+    """«تسجيل الدخول» (login) أو «حساب جديد» (register) باسم مستخدم وكلمة سر، مربوطًا بجهاز هذا التطبيق كالرمز."""
+    if kind not in ("login", "register"):
+        raise RuntimeError("طلب غير معروف.")
+    data = _control_request(kind, {"user": name, "password": password, "device": device_id()})
+    return _keep_session(data, user=name)
 
 
 def is_unlocked() -> bool:
@@ -14355,29 +14387,62 @@ input{width:100%;height:50px;padding:0 14px;border-radius:13px;border:1px solid 
 font:600 18px/1 ui-monospace,"SFMono-Regular",Menlo,Consolas,"Liberation Mono",monospace;letter-spacing:3px;outline:none;transition:border-color .15s,box-shadow .15s,background .15s}
 input::placeholder{color:#98a2b3}
 input:focus{border-color:#2f5bea;background:#fff;box-shadow:0 0 0 4px rgba(47,91,234,.16)}
-button{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;height:48px;margin-top:12px;border:1px solid rgba(36,71,200,.6);border-radius:13px;
+#btn{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;height:48px;margin-top:12px;border:1px solid rgba(36,71,200,.6);border-radius:13px;
 background:linear-gradient(180deg,#4a74ff,#2f5bea);color:#fff;font:inherit;font-size:15px;font-weight:600;cursor:pointer;
 box-shadow:0 10px 20px -10px rgba(47,91,234,.9),inset 0 1px 0 rgba(255,255,255,.22);transition:transform .12s}
-button:active{transform:scale(.98)}button:disabled{opacity:.75}
-button:disabled::after{content:"";width:15px;height:15px;border-radius:50%;border:2px solid #fff;border-inline-end-color:transparent;animation:spin .7s linear infinite}
+#btn:active{transform:scale(.98)}#btn:disabled{opacity:.75}
+#btn:disabled::after{content:"";width:15px;height:15px;border-radius:50%;border:2px solid #fff;border-inline-end-color:transparent;animation:spin .7s linear infinite}
 .msg{min-height:22px;margin:12px 0 0;font-size:13px;color:#b42318}
 .foot{display:flex;align-items:center;justify-content:center;gap:6px;margin:0;padding:10px 20px 18px;font-size:11.5px;color:#98a2b3}
 .foot::before{content:"";flex:none;width:13px;height:13px;background:#98a2b3;-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 22s8-3.5 8-10V5l-8-3-8 3v7c0 6.5 8 10 8 10z'/%3E%3Cpath d='m9 12 2 2 4-4'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 22s8-3.5 8-10V5l-8-3-8 3v7c0 6.5 8 10 8 10z'/%3E%3Cpath d='m9 12 2 2 4-4'/%3E%3C/svg%3E") center/contain no-repeat}
 @keyframes rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
 @keyframes spin{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
+
+input{width:100%;height:48px;padding:0 14px;border-radius:13px;border:1px solid #d5dae3;background:#f7f8fb;color:#101828;outline:none;
+font:500 15px/1.2 "Plex Arabic",system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans Arabic",Tahoma,sans-serif;letter-spacing:0;text-align:right;direction:rtl;transition:border-color .15s,box-shadow .15s,background .15s}
+input.cd{height:50px;text-align:center;direction:ltr;font:600 18px/1 ui-monospace,"SFMono-Regular",Menlo,Consolas,"Liberation Mono",monospace;letter-spacing:3px}
+input[type=password]{direction:ltr;text-align:left;letter-spacing:2px}
+input[type=password]::placeholder{letter-spacing:0;text-align:right}
+.pane label{margin-top:12px}.pane label:first-child{margin-top:0}
+.tabs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;margin:16px 16px 0;padding:4px;border-radius:13px;background:#eef1f6}
+.tabs button{width:auto;height:36px;margin:0;padding:0 4px;border:0;border-radius:10px;background:transparent;color:#667085;
+font:inherit;font-size:12.5px;font-weight:600;box-shadow:none;cursor:pointer;transition:background .15s,color .15s}
+.tabs button:active{transform:none}
+.tabs button[aria-selected=true]{background:#fff;color:#101828;box-shadow:0 1px 2px rgba(16,24,40,.1),0 0 0 1px #e6e9f0}
+.hint{margin:10px 0 0;font-size:12px;line-height:1.7;color:#667085;text-align:right}
 </style></head>
-<body><form class="box" onsubmit="go(event)"><div class="hero"><span class="mark" aria-hidden="true"></span><h1>قروبات</h1><p>أدخل رمز الدخول الذي أعطاك إياه صاحب البرنامج.</p></div>
-<div class="body"><label for="code">رمز الدخول</label>
-<input id="code" placeholder="XXXX-XXXX-XXXX" autocomplete="off" autocapitalize="characters" spellcheck="false" autofocus>
+<body><form class="box" onsubmit="go(event)" novalidate>
+<div class="hero"><span class="mark" aria-hidden="true"></span><h1>قروبات</h1><p>ادخل برمز الدخول، أو بحسابك، أو أنشئ حسابًا جديدًا.</p></div>
+<div class="tabs" role="tablist" aria-label="طريقة الدخول"><button type="button" role="tab" data-k="code" aria-selected="true">رمز الدخول</button><button type="button" role="tab" data-k="login" aria-selected="false">تسجيل الدخول</button><button type="button" role="tab" data-k="register" aria-selected="false">حساب جديد</button></div>
+<div class="body">
+<div class="pane" data-p="code"><label for="code">رمز الدخول</label><input id="code" class="cd" placeholder="XXXX-XXXX-XXXX" autocomplete="off" autocapitalize="characters" spellcheck="false" autofocus></div>
+<div class="pane" data-p="login" hidden><label for="lu">اسم المستخدم</label><input id="lu" class="t" dir="auto" autocomplete="username" autocapitalize="off" spellcheck="false"><label for="lp">كلمة السر</label><input id="lp" type="password" autocomplete="current-password"></div>
+<div class="pane" data-p="register" hidden><label for="ru">اسم المستخدم</label><input id="ru" class="t" dir="auto" maxlength="24" autocomplete="username" autocapitalize="off" spellcheck="false" placeholder="حروف وأرقام، بلا مسافات"><label for="rp">كلمة السر</label><input id="rp" type="password" maxlength="128" autocomplete="new-password" placeholder="6 أحرف على الأقل"><label for="rp2">تأكيد كلمة السر</label><input id="rp2" type="password" maxlength="128" autocomplete="new-password"><p class="hint">يُربط حسابك بهذا الجوال. التعليقات تُكتب برصيد مسبق يضيفه لك صاحب البرنامج.</p></div>
 <button id="btn" type="submit">دخول</button><div class="msg" id="msg" role="status"></div></div>
-<p class="foot">الرمز خاص بجهازك ويعمل عليه وحده.</p></form>
+<p class="foot">رمزك أو حسابك مربوط بهذا الجوال ويعمل عليه وحده.</p></form>
 <script>
-async function go(e){e.preventDefault();var b=document.getElementById("btn"),m=document.getElementById("msg");
-var code=document.getElementById("code").value.trim();if(!code)return;b.disabled=true;m.textContent="جارٍ التحقّق…";m.style.color="#667085";
-try{var r=await fetch("/unlock",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({code:code})});
-var d=await r.json();if(d.ok){location.href="/";}else{m.style.color="#b42318";m.textContent=d.error||"الرمز غير صحيح.";b.disabled=false;}}
-catch(x){m.style.color="#b42318";m.textContent="تعذّر الاتصال. أعد المحاولة.";b.disabled=false;}}
+var kind="code";
+function el(id){return document.getElementById(id)}
+function say(t,c){var m=el("msg");m.style.color=c||"#b42318";m.textContent=t}
+function pick(k){kind=k;
+document.querySelectorAll(".tabs button").forEach(function(t){t.setAttribute("aria-selected",String(t.dataset.k===k))});
+document.querySelectorAll(".pane").forEach(function(p){p.hidden=p.dataset.p!==k});
+el("btn").textContent=k==="register"?"إنشاء الحساب":"دخول";say("");
+var f=document.querySelector(".pane[data-p="+k+"] input");if(f)f.focus()}
+document.querySelectorAll(".tabs button").forEach(function(t){t.addEventListener("click",function(){pick(t.dataset.k)})});
+async function go(e){e.preventDefault();var b=el("btn"),url,body;
+if(kind==="code"){var code=el("code").value.trim();if(!code){say("أدخل الرمز.");return}url="/unlock";body={code:code}}
+else if(kind==="login"){var u=el("lu").value.trim(),p=el("lp").value;if(!u||!p){say("أدخل اسم المستخدم وكلمة السر.");return}url="/unlock/login";body={user:u,password:p}}
+else{var nu=el("ru").value.trim(),np=el("rp").value;
+if(nu.length<3){say("اسم المستخدم 3 أحرف على الأقل.");return}
+if(np.length<6){say("كلمة السر 6 أحرف على الأقل.");return}
+if(np!==el("rp2").value){say("كلمتا السر غير متطابقتين.");return}
+url="/unlock/register";body={user:nu,password:np}}
+b.disabled=true;say("جارٍ التحقّق…","#667085");
+try{var r=await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});var d=await r.json();
+if(d.ok){say("تم الدخول. يُفتح التطبيق…","#067647");location.href="/";}else{say(d.error||"تعذّر الدخول.");b.disabled=false}}
+catch(x){say("تعذّر الاتصال. أعد المحاولة.");b.disabled=false}}
 </script></body></html>"""
 
 
@@ -14396,6 +14461,23 @@ def unlock_submit():
         return jsonify(ok=False, error="أدخل الرمز."), 200
     try:
         control_activate(code)
+    except RuntimeError as exc:
+        return jsonify(ok=False, error=str(exc)), 200
+    return jsonify(ok=True)
+
+
+@app.post("/unlock/<kind>")
+def unlock_account(kind: str):
+    """«تسجيل الدخول» أو «حساب جديد» من صفحة الدخول."""
+    if kind not in ("login", "register"):
+        abort(404)
+    body = request.get_json(silent=True) or {}
+    name = str(body.get("user") or "").strip()
+    password = str(body.get("password") or "")
+    if not name or not password:
+        return jsonify(ok=False, error="أدخل اسم المستخدم وكلمة السر."), 200
+    try:
+        control_sign_in(kind, name, password)
     except RuntimeError as exc:
         return jsonify(ok=False, error=str(exc)), 200
     return jsonify(ok=True)
@@ -14436,7 +14518,7 @@ def _unlock_gate():
     if not control_configured():
         return None
     path = request.path
-    if path == "/healthz" or path == "/unlock" or path.startswith("/fonts/"):
+    if path == "/healthz" or path == "/unlock" or path.startswith(("/unlock/", "/fonts/")):
         return None
     if is_unlocked():
         return None

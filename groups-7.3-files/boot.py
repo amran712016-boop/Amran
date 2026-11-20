@@ -160,14 +160,27 @@ def _download_and_save(token: str) -> None:
     tmp.replace(ENGINE_FILE)
 
 
-def fetch_engine(code: str) -> None:
-    """Activate the code, then download and save the script. Raises RuntimeError with a message for the user."""
-    data = _control_request("activate", {"code": code, "device": device_id()})
+def _get_engine(data: dict, code: str = "", user: str = "") -> None:
     token = str(data.get("token") or "")
     if not token:
         raise RuntimeError("لم يصل رمز الجلسة من الخادم. أعد المحاولة.")
     _download_and_save(token)
-    _write_json(UNLOCK_PATH, {"token": token, "code": code})      # (saved last: the engine is now unlocked)
+    saved = {"token": token, "code": code}
+    if user:
+        saved["user"] = user
+    _write_json(UNLOCK_PATH, saved)      # (saved last: the engine is now unlocked)
+
+
+def fetch_engine(code: str) -> None:
+    """Activate the code, then download and save the script. Raises RuntimeError with a message for the user."""
+    _get_engine(_control_request("activate", {"code": code, "device": device_id()}), code=code)
+
+
+def fetch_engine_with_account(kind: str, name: str, password: str) -> None:
+    """Sign in («login») or make a new account («register»), then download and save the script."""
+    if kind not in ("login", "register"):
+        raise RuntimeError("طلب غير معروف.")
+    _get_engine(_control_request(kind, {"user": name, "password": password, "device": device_id()}), user=name)
 
 
 def resume() -> bool:
@@ -228,29 +241,62 @@ input{width:100%;height:50px;padding:0 14px;border-radius:13px;border:1px solid 
 font:600 18px/1 ui-monospace,"SFMono-Regular",Menlo,Consolas,"Liberation Mono",monospace;letter-spacing:3px;outline:none;transition:border-color .15s,box-shadow .15s,background .15s}
 input::placeholder{color:#98a2b3}
 input:focus{border-color:#2f5bea;background:#fff;box-shadow:0 0 0 4px rgba(47,91,234,.16)}
-button{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;height:48px;margin-top:12px;border:1px solid rgba(36,71,200,.6);border-radius:13px;
+#btn{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;height:48px;margin-top:12px;border:1px solid rgba(36,71,200,.6);border-radius:13px;
 background:linear-gradient(180deg,#4a74ff,#2f5bea);color:#fff;font:inherit;font-size:15px;font-weight:600;cursor:pointer;
 box-shadow:0 10px 20px -10px rgba(47,91,234,.9),inset 0 1px 0 rgba(255,255,255,.22);transition:transform .12s}
-button:active{transform:scale(.98)}button:disabled{opacity:.75}
-button:disabled::after{content:"";width:15px;height:15px;border-radius:50%;border:2px solid #fff;border-inline-end-color:transparent;animation:spin .7s linear infinite}
+#btn:active{transform:scale(.98)}#btn:disabled{opacity:.75}
+#btn:disabled::after{content:"";width:15px;height:15px;border-radius:50%;border:2px solid #fff;border-inline-end-color:transparent;animation:spin .7s linear infinite}
 .msg{min-height:22px;margin:12px 0 0;font-size:13px;color:#b42318}
 .foot{display:flex;align-items:center;justify-content:center;gap:6px;margin:0;padding:10px 20px 18px;font-size:11.5px;color:#98a2b3}
 .foot::before{content:"";flex:none;width:13px;height:13px;background:#98a2b3;-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 22s8-3.5 8-10V5l-8-3-8 3v7c0 6.5 8 10 8 10z'/%3E%3Cpath d='m9 12 2 2 4-4'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 22s8-3.5 8-10V5l-8-3-8 3v7c0 6.5 8 10 8 10z'/%3E%3Cpath d='m9 12 2 2 4-4'/%3E%3C/svg%3E") center/contain no-repeat}
 @keyframes rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
 @keyframes spin{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
+
+input{width:100%;height:48px;padding:0 14px;border-radius:13px;border:1px solid #d5dae3;background:#f7f8fb;color:#101828;outline:none;
+font:500 15px/1.2 "Plex Arabic",system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans Arabic",Tahoma,sans-serif;letter-spacing:0;text-align:right;direction:rtl;transition:border-color .15s,box-shadow .15s,background .15s}
+input.cd{height:50px;text-align:center;direction:ltr;font:600 18px/1 ui-monospace,"SFMono-Regular",Menlo,Consolas,"Liberation Mono",monospace;letter-spacing:3px}
+input[type=password]{direction:ltr;text-align:left;letter-spacing:2px}
+input[type=password]::placeholder{letter-spacing:0;text-align:right}
+.pane label{margin-top:12px}.pane label:first-child{margin-top:0}
+.tabs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;margin:16px 16px 0;padding:4px;border-radius:13px;background:#eef1f6}
+.tabs button{width:auto;height:36px;margin:0;padding:0 4px;border:0;border-radius:10px;background:transparent;color:#667085;
+font:inherit;font-size:12.5px;font-weight:600;box-shadow:none;cursor:pointer;transition:background .15s,color .15s}
+.tabs button:active{transform:none}
+.tabs button[aria-selected=true]{background:#fff;color:#101828;box-shadow:0 1px 2px rgba(16,24,40,.1),0 0 0 1px #e6e9f0}
+.hint{margin:10px 0 0;font-size:12px;line-height:1.7;color:#667085;text-align:right}
 </style></head>
-<body><form class="box" onsubmit="go(event)"><div class="hero"><span class="mark" aria-hidden="true"></span><h1>قروبات</h1><p>أدخل رمز الدخول الذي أعطاك إياه صاحب البرنامج. يُجهَّز التطبيق مرة واحدة ثم يبدأ العمل.</p></div>
-<div class="body"><label for="code">رمز الدخول</label>
-<input id="code" placeholder="XXXX-XXXX-XXXX" autocomplete="off" autocapitalize="characters" spellcheck="false" autofocus>
+<body><form class="box" onsubmit="go(event)" novalidate>
+<div class="hero"><span class="mark" aria-hidden="true"></span><h1>قروبات</h1><p>ادخل برمز الدخول أو بحسابك، أو أنشئ حسابًا. يُجهَّز التطبيق مرة واحدة ثم يعمل مباشرة.</p></div>
+<div class="tabs" role="tablist" aria-label="طريقة الدخول"><button type="button" role="tab" data-k="code" aria-selected="true">رمز الدخول</button><button type="button" role="tab" data-k="login" aria-selected="false">تسجيل الدخول</button><button type="button" role="tab" data-k="register" aria-selected="false">حساب جديد</button></div>
+<div class="body">
+<div class="pane" data-p="code"><label for="code">رمز الدخول</label><input id="code" class="cd" placeholder="XXXX-XXXX-XXXX" autocomplete="off" autocapitalize="characters" spellcheck="false" autofocus></div>
+<div class="pane" data-p="login" hidden><label for="lu">اسم المستخدم</label><input id="lu" class="t" dir="auto" autocomplete="username" autocapitalize="off" spellcheck="false"><label for="lp">كلمة السر</label><input id="lp" type="password" autocomplete="current-password"></div>
+<div class="pane" data-p="register" hidden><label for="ru">اسم المستخدم</label><input id="ru" class="t" dir="auto" maxlength="24" autocomplete="username" autocapitalize="off" spellcheck="false" placeholder="حروف وأرقام، بلا مسافات"><label for="rp">كلمة السر</label><input id="rp" type="password" maxlength="128" autocomplete="new-password" placeholder="6 أحرف على الأقل"><label for="rp2">تأكيد كلمة السر</label><input id="rp2" type="password" maxlength="128" autocomplete="new-password"><p class="hint">يُربط حسابك بهذا الجوال. التعليقات تُكتب برصيد مسبق يضيفه لك صاحب البرنامج.</p></div>
 <button id="btn" type="submit">دخول</button><div class="msg" id="msg" role="status"></div></div>
-<p class="foot">الرمز خاص بجهازك ويعمل عليه وحده.</p></form>
+<p class="foot">رمزك أو حسابك مربوط بهذا الجوال ويعمل عليه وحده.</p></form>
 <script>
-async function go(e){e.preventDefault();var b=document.getElementById("btn"),m=document.getElementById("msg");
-var code=document.getElementById("code").value.trim();if(!code)return;b.disabled=true;m.style.color="#667085";m.textContent="جارٍ التحقّق والتجهيز… قد يأخذ لحظات.";
-try{var r=await fetch("SETUP_URL",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({code:code})});
-var d=await r.json();if(d.ok){m.style.color="#067647";m.textContent="تم التجهيز. يُعاد تشغيل التطبيق…";}else{m.style.color="#b42318";m.textContent=d.error||"الرمز غير صحيح.";b.disabled=false;}}
-catch(x){m.style.color="#b42318";m.textContent="تعذّر الاتصال. أعد المحاولة.";b.disabled=false;}}
+var kind="code";
+function el(id){return document.getElementById(id)}
+function say(t,c){var m=el("msg");m.style.color=c||"#b42318";m.textContent=t}
+function pick(k){kind=k;
+document.querySelectorAll(".tabs button").forEach(function(t){t.setAttribute("aria-selected",String(t.dataset.k===k))});
+document.querySelectorAll(".pane").forEach(function(p){p.hidden=p.dataset.p!==k});
+el("btn").textContent=k==="register"?"إنشاء الحساب":"دخول";say("");
+var f=document.querySelector(".pane[data-p="+k+"] input");if(f)f.focus()}
+document.querySelectorAll(".tabs button").forEach(function(t){t.addEventListener("click",function(){pick(t.dataset.k)})});
+async function go(e){e.preventDefault();var b=el("btn"),url,body;
+if(kind==="code"){var code=el("code").value.trim();if(!code){say("أدخل الرمز.");return}url="SETUP_URL";body={code:code}}
+else if(kind==="login"){var u=el("lu").value.trim(),p=el("lp").value;if(!u||!p){say("أدخل اسم المستخدم وكلمة السر.");return}url="SETUP_URL/login";body={user:u,password:p}}
+else{var nu=el("ru").value.trim(),np=el("rp").value;
+if(nu.length<3){say("اسم المستخدم 3 أحرف على الأقل.");return}
+if(np.length<6){say("كلمة السر 6 أحرف على الأقل.");return}
+if(np!==el("rp2").value){say("كلمتا السر غير متطابقتين.");return}
+url="SETUP_URL/register";body={user:nu,password:np}}
+b.disabled=true;say("جارٍ التحقّق والتجهيز… قد يأخذ لحظات.","#667085");
+try{var r=await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});var d=await r.json();
+if(d.ok){say("تم التجهيز. يُعاد تشغيل التطبيق…","#067647");}else{say(d.error||"تعذّر الدخول.");b.disabled=false}}
+catch(x){say("تعذّر الاتصال. أعد المحاولة.");b.disabled=false}}
 </script></body></html>"""
 
 boot_app = Flask(__name__)
@@ -281,6 +327,23 @@ def _setup(access):
         return jsonify(ok=False, error="أدخل الرمز."), 200
     try:
         fetch_engine(code)
+    except RuntimeError as exc:
+        return jsonify(ok=False, error=str(exc)), 200
+    threading.Thread(target=restart_app, name="restart", daemon=True).start()
+    return jsonify(ok=True)
+
+
+@boot_app.post("/<access>/setup/<kind>")
+def _setup_account(access, kind):
+    if not hmac.compare_digest(access, ACCESS_PATH) or kind not in ("login", "register"):
+        return jsonify(ok=False, error="رابط غير صحيح."), 404
+    body = request.get_json(silent=True) or {}
+    name = str(body.get("user") or "").strip()
+    password = str(body.get("password") or "")
+    if not name or not password:
+        return jsonify(ok=False, error="أدخل اسم المستخدم وكلمة السر."), 200
+    try:
+        fetch_engine_with_account(kind, name, password)
     except RuntimeError as exc:
         return jsonify(ok=False, error=str(exc)), 200
     threading.Thread(target=restart_app, name="restart", daemon=True).start()

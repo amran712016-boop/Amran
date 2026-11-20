@@ -518,6 +518,122 @@ def usage_by_account(code_id: str) -> dict:
     return {"total": total, "cost": round(total * COST_PER_COMMENT, 2), "price": COST_PER_COMMENT, "accounts": accounts}
 
 
+# ----------------------------------------------------------------------------- how each user pays
+# «آجل»: the comments are counted and the owner collects their cost later (as before). «مسبق»: the user has a
+# balance the owner tops up (or gives as a trial); each comment takes COST_PER_COMMENT from it, and with too
+# little left no comment is written. Any user can be either; one who makes an account in the app starts «مسبق».
+PAY_LATER, PAY_PREPAID = "later", "prepaid"
+LEDGER_KEEP = 100
+
+
+def pay_of(row: dict) -> str:
+    return PAY_PREPAID if row.get("pay") == PAY_PREPAID else PAY_LATER
+
+
+def balance_of(row: dict) -> float:
+    try:
+        return round(float(row.get("balance") or 0), 4)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def take_comment_price(code_id: str) -> str:
+    """Before a prepaid user's comment its price is taken from the balance at once (so two comments at the same
+    moment cannot both spend the last cent). "" when it may go ahead, else why not. A «آجل» user always may."""
+    with LOCK:
+        codes = load_codes()
+        row = next((item for item in codes if item.get("id") == code_id), None)
+        if row is None or pay_of(row) != PAY_PREPAID:
+            return ""
+        balance = balance_of(row)
+        if balance + 1e-9 < COST_PER_COMMENT:
+            return f"رصيدك لا يكفي لكتابة التعليقات (الرصيد ${max(balance, 0):.2f}). اطلب من صاحب البرنامج شحن رصيدك."
+        row["balance"] = round(balance - COST_PER_COMMENT, 4)
+        save_codes(codes)
+    return ""
+
+
+def give_back_comment_price(code_id: str) -> None:
+    """The comment was not written after all: its price goes back to the balance."""
+    with LOCK:
+        codes = load_codes()
+        row = next((item for item in codes if item.get("id") == code_id), None)
+        if row is not None and pay_of(row) == PAY_PREPAID:
+            row["balance"] = round(balance_of(row) + COST_PER_COMMENT, 4)
+            save_codes(codes)
+
+
+# ----------------------------------------------------------------------------- accounts (a name and a password)
+# A user may also come in with an account made in the app instead of a code. Inside it is a code like any other
+# (the same row: bound to one phone, stopped and released the same way), with a name and a password to sign in.
+ACCOUNT_NAME = re.compile(r"^[\w.\-]{3,24}$")
+PASSWORD_ROUNDS = 200_000
+_signin_failures: dict[str, list] = {}
+_signups: dict[str, list] = {}
+_signin_lock = threading.Lock()
+
+
+def account_pw_hash(password: str, salt: bytes | None = None) -> str:
+    salt = salt or secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PASSWORD_ROUNDS)
+    return f"pbkdf2${PASSWORD_ROUNDS}${salt.hex()}${digest.hex()}"
+
+
+def account_pw_ok(password: str, stored: str) -> bool:
+    try:
+        kind, rounds, salt, digest = str(stored).split("$")
+        if kind != "pbkdf2":
+            return False
+        mine = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt), int(rounds)).hex()
+        return hmac.compare_digest(mine, digest)
+    except (ValueError, TypeError):
+        return False
+
+
+_NO_ONE = account_pw_hash(secrets.token_hex(8))      # (a name nobody has costs the same time as a wrong password)
+
+
+def account_key(name) -> str:
+    return str(name or "").strip().casefold()
+
+
+def account_row(codes: list, name: str) -> dict | None:
+    key = account_key(name)
+    return next((row for row in codes if key and account_key((row.get("account") or {}).get("user")) == key), None)
+
+
+def _recent(times: list, seconds: float) -> list:
+    now = time.time()
+    return [moment for moment in times if now - moment < seconds]
+
+
+def signin_blocked(key: str) -> bool:
+    """Five wrong passwords in 15 minutes for one name (or twenty from one address): wait."""
+    with _signin_lock:
+        for slot, limit in ((key, 5), ("ip:" + (request.remote_addr or ""), 20)):
+            _signin_failures[slot] = _recent(_signin_failures.get(slot, []), 900)
+            if len(_signin_failures[slot]) >= limit:
+                return True
+    return False
+
+
+def signin_failed(key: str) -> None:
+    with _signin_lock:
+        for slot in (key, "ip:" + (request.remote_addr or "")):
+            _signin_failures.setdefault(slot, []).append(time.time())
+
+
+def signup_allowed() -> bool:
+    """At most five new accounts an hour from one address."""
+    address = request.remote_addr or ""
+    with _signin_lock:
+        _signups[address] = _recent(_signups.get(address, []), 3600)
+        if len(_signups[address]) >= 5:
+            return False
+        _signups[address].append(time.time())
+    return True
+
+
 # ----------------------------------------------------------------------------- what each user's app did
 # أرقام التنفيذ التي يعرضها التطبيق في رأس صفحته (الرتويت والإعجاب والمرجعية والتعليقات) لكل حساب X، كما
 # يرسلها التطبيق: قيمها كاملة في كل مرة (لا زيادات)، فتُستبدل ولا تُعدّ مرتين.
@@ -1744,6 +1860,12 @@ html.loading .ldpill{display:flex}
 .fs2{font-size:12.5px}.fm{font-size:14px}
 .fsum{display:flex;flex-wrap:wrap;gap:6px}.fsum span{border:1px solid var(--line);border-radius:9px;padding:3px 10px;font-size:12.5px;color:var(--mut)}.fsum b{color:var(--ink)}.fsum .bad,.fsum .bad b{color:var(--bad)}
 .fl{list-style:none;margin:8px 0 0;padding:0;display:grid;gap:4px;font-size:12.5px}.fl li{padding:6px 10px;border-radius:8px;background:var(--soft);overflow-wrap:anywhere}
+.tg{display:inline-block;margin-inline-start:6px;padding:1px 7px;border-radius:99px;font-size:11px;font-weight:600;vertical-align:2px;background:var(--soft);color:var(--mut);border:1px solid var(--line)}
+.tg.pp{background:var(--prisoft);color:var(--pri);border-color:transparent}
+.bal b{color:var(--pri)}.bal.low b{color:var(--bad)}
+.led{margin-top:8px;font-size:13px}.led summary{cursor:pointer;color:var(--mut);min-height:32px;display:flex;align-items:center}
+.led ul{list-style:none;margin:4px 0 0;padding:0;display:grid;gap:6px}.led li{display:grid;grid-template-columns:1fr auto;gap:0 10px;padding:8px 10px;border-radius:10px;background:var(--soft)}
+.led li small{grid-column:1/-1;color:var(--mut);font-size:11.5px}.led .pl{color:var(--pri)}.led .mi{color:var(--bad)}
 .fl-ok{background:var(--prisoft);color:var(--pri)}.fl-bad{background:var(--badsoft);color:var(--bad)}
 .mvd{display:grid;gap:8px;margin:12px 0 4px;font-size:14px}.mvd div{display:flex;gap:12px;align-items:baseline}.mvd dt{color:var(--mut);min-width:72px;flex:none}.mvd dd{margin:0}
 .mc{font:700 16px/1 var(--mono);letter-spacing:1px;background:var(--soft);border:1px solid var(--line);border-radius:8px;padding:4px 8px;direction:ltr;display:inline-block}
@@ -1909,6 +2031,7 @@ main{padding-bottom:56px}
 
 <main class="wrap">
 <section class="panel on" id="p-users">
+{% if flash %}<div class="note fl-{{flash.kind}}" role="status">{{ic('alert' if flash.kind != 'ok' else 'check')}}<p>{{flash.text}}</p></div>{% endif %}
 {% if nokey and codes %}<div class="note" role="status">{{ic('alert')}}<p>لا يوجد مفتاح للكاتب الحالي، فلن تُكتب أي تعليقات. <button type="button" data-t="keys">أضف المفتاح</button></p></div>{% endif %}
 {% if codes %}
 <section class="hero" aria-label="ملخّص المستخدمين">
@@ -1939,16 +2062,17 @@ main{padding-bottom:56px}
 
 <div class="list" id="list">
 {% for c in codes %}{% set hue = (c.id[:2]|int(0,16)) * 360 // 256 %}
-<article class="u{{ '' if c.active else ' off' }}" data-id="{{c.id}}" data-s="{{ 'on' if c.active else 'off' }}" data-name="{{c.label}}" data-code="{{c.code}}" data-bound="{{ '1' if c.bound_device else '' }}" data-n="{{c.usage.total}}" data-x="{{ c.acts.repost + c.acts.like + c.acts.bookmark }}" data-seen="{{c.last_seen or 0}}" data-q="{{ (c.label ~ ' ' ~ c.code ~ ' ' ~ c.code|replace('-','') ~ ' ' ~ c.usage.accounts|map(attribute='name')|join(' '))|lower }}">
+<article class="u{{ '' if c.active else ' off' }}" data-id="{{c.id}}" data-s="{{ 'on' if c.active else 'off' }}" data-name="{{c.label}}" data-code="{{c.code}}" data-bound="{{ '1' if c.bound_device else '' }}" data-pay="{{c.pay}}" data-bal="{{ '%.2f'|format(c.balance) }}" data-acct="{{c.account_user}}" data-n="{{c.usage.total}}" data-x="{{ c.acts.repost + c.acts.like + c.acts.bookmark }}" data-seen="{{c.last_seen or 0}}" data-q="{{ (c.label ~ ' ' ~ c.code ~ ' ' ~ c.code|replace('-','') ~ ' ' ~ c.usage.accounts|map(attribute='name')|join(' '))|lower }}">
 <div class="who"><div class="av" style="--h:{{hue}}" aria-hidden="true">{{ (c.label or '؟')[:1] }}</div>
-<div class="nm"><h3>{{ c.label or 'بدون اسم' }}</h3><p><span class="st">{{ 'يعمل' if c.active else 'موقوف' }}</span><span>{% if c.last_seen %}آخر دخول {{c.last_seen_text}}{% else %}لم يدخل بعد{% endif %}</span></p></div></div>
+<div class="nm"><h3>{{ c.label or 'بدون اسم' }}{% if c.account_user %}<span class="tg">حساب</span>{% endif %}{% if c.pay == 'prepaid' %}<span class="tg pp">مسبق</span>{% endif %}</h3><p><span class="st">{{ 'يعمل' if c.active else 'موقوف' }}</span><span>{% if c.last_seen %}آخر دخول {{c.last_seen_text}}{% else %}لم يدخل بعد{% endif %}</span></p></div></div>
 <form method="post" action="/{{admin}}/code/toggle" data-toast="{{ 'تم إيقاف الرمز' if c.active else 'تم تشغيل الرمز' }}"><input type="hidden" name="id" value="{{c.id}}"><button class="sw{{ ' on' if c.active else '' }}" role="switch" aria-checked="{{ 'true' if c.active else 'false' }}" aria-label="رمز {{ c.label or 'بدون اسم' }} يعمل"><i></i></button></form>
 <div class="cr"><button type="button" class="code" data-copy="{{c.code}}" aria-label="نسخ الرمز {{c.code}}"><bdi>{{c.code}}</bdi>{{ic('copy')}}</button><button type="button" class="ib" data-more aria-label="خيارات {{ c.label or 'المستخدم' }}">{{ic('more')}}</button></div>
-{% set facts %}<span><b>{{ '{:,}'.format(c.usage.total) }}</b> تعليق</span><span title="التكلفة التقديرية"><b>${{ '%.2f'|format(c.usage.cost) }}</b></span><span class="dev{{ ' on' if c.bound_device else '' }}">{{ic('phone')}}{{ 'جهاز مربوط' if c.bound_device else 'غير مربوط' }}</span>{% endset %}
+{% set facts %}{% if c.pay == 'prepaid' %}<span class="bal{{ ' low' if c.balance < 0.05 else '' }}" title="الرصيد المسبق">رصيد <b dir="ltr">${{ '%.2f'|format(c.balance) }}</b></span>{% endif %}<span><b>{{ '{:,}'.format(c.usage.total) }}</b> تعليق</span><span title="التكلفة التقديرية"><b>${{ '%.2f'|format(c.usage.cost) }}</b></span><span class="dev{{ ' on' if c.bound_device else '' }}">{{ic('phone')}}{{ 'جهاز مربوط' if c.bound_device else 'غير مربوط' }}</span>{% endset %}
 {% if c.usage.accounts %}<details class="acc"><summary class="facts" title="التعليقات حسب حساب X">{{facts}}{{ic('chev')}}</summary>
 <p class="alh">حسابات X ({{c.usage.accounts|length}})</p><ul class="al">
 {% for a in c.usage.accounts %}<li><b><bdi>{{ ('@' ~ a.name) if a.name else ('#' ~ a.id[:8]) }}</bdi></b><span>{{ '{:,}'.format(a.n) }} تعليق</span><span>${{ '%.2f'|format(a.cost) }}</span><div class="pg"><i style="width:{{ ((a.n * 100 / c.usage.total)|round|int) if c.usage.total else 0 }}%"></i></div></li>{% endfor %}
 </ul></details>{% else %}<div class="facts">{{facts}}</div>{% endif %}
+{% if c.ledger %}<details class="led"><summary>سجل الرصيد</summary><ul>{% for e in c.ledger %}<li><span>{{e.note}}</span><b class="{{ 'pl' if e.amount > 0 else 'mi' }}" dir="ltr">{{ '+' if e.amount > 0 else '−' }}${{ '%.2f'|format(e.amount|abs) }}</b><small>{{e.when}} · الرصيد <bdi dir="ltr">${{ '%.2f'|format(e.after) }}</bdi></small></li>{% endfor %}</ul></details>{% endif %}
 {% if c.acts.at %}<div class="ax" role="group" aria-label="التنفيذ في تطبيق {{ c.label or 'المستخدم' }}">
 <div><b>{{ '{:,}'.format(c.acts.repost) }}</b><span>الرتويت</span></div>
 <div><b>{{ '{:,}'.format(c.acts.like) }}</b><span>الإعجاب</span></div>
@@ -2156,6 +2280,9 @@ f.addEventListener('change',sync);sync()})();</script>{% endif %}
 <button type="button" id="sh-share" data-share="" data-close>{{ic('share')}}مشاركة الرمز</button>
 <button type="button" id="sh-rename">{{ic('edit')}}تعديل الاسم</button>
 <form id="sh-release" method="post" action="/{{admin}}/code/release" data-title="تحرير الجهاز؟" data-confirm="يُفكّ ارتباط الرمز بجواله الحالي ليتمكّن صاحبه من تفعيله على جوال آخر." data-yes="تحرير الجهاز" data-toast="تم تحرير الجهاز"><input type="hidden" name="id"><button>{{ic('phone')}}<span>تحرير الجهاز<small>ليُفعَّل الرمز على جوال آخر</small></span></button></form>
+<form id="sh-pay" method="post" action="/{{admin}}/code/pay" data-toast="تم تغيير نوع الدفع"><input type="hidden" name="id"><input type="hidden" name="pay" value="prepaid"><button>{{ic('key')}}<span id="sh-pay-t">تحويل إلى دفع مسبق</span></button></form>
+<button type="button" id="sh-bal">{{ic('plus')}}<span>إضافة رصيد<small>تجريبي أو شحن، ويُخصم <bdi dir="ltr">${{ '%.2f'|format(price) }}</bdi> لكل تعليق</small></span></button>
+<button type="button" id="sh-pw">{{ic('lock')}}<span>تعيين كلمة سر جديدة<small>لصاحب حساب نسي كلمة سره</small></span></button>
 <form id="sh-reset" method="post" action="/{{admin}}/code/reset-cost" data-title="تصفير التكلفة؟" data-confirm="سيُصفَّر عدّاد التعليقات والتكلفة لهذا المستخدم فقط." data-yes="تصفير التكلفة" data-kind="danger" data-toast="تم تصفير التكلفة"><input type="hidden" name="id"><button>{{ic('reset')}}تصفير التكلفة</button></form>
 <hr>
 <form class="del" method="post" action="/{{admin}}/code/delete" data-title="حذف المستخدم؟" data-confirm="يُحذف رمزه نهائيًا وتُفقد إحصائياته، ولا يمكن التراجع." data-yes="حذف المستخدم" data-kind="danger" data-toast="تم حذف المستخدم"><input type="hidden" name="id"><button>{{ic('trash')}}حذف المستخدم</button></form>
@@ -2174,6 +2301,13 @@ f.addEventListener('change',sync);sync()})();</script>{% endif %}
 <label class="ckl"><input type="checkbox" name="confirm" value="1" required> أؤكد نقل كل التطبيقات إلى هذا الخادم</label>
 <div class="da"><button class="btn" type="submit">{{ic('link')}}ربط</button><button class="btn ghost" type="button" data-close>إلغاء</button></div>
 </form></dialog>
+<dialog id="bal" class="ask" aria-labelledby="bal-t"><form class="dg" method="post" action="/{{admin}}/code/balance" data-toast="تم تحديث الرصيد"><input type="hidden" name="id"><h3 id="bal-t">إضافة رصيد</h3><p class="mut" id="bal-now"></p>
+<label class="l" for="bal-a">المبلغ بالدولار <small>(بإشارة سالب للخصم)</small></label><input id="bal-a" class="fs" name="amount" dir="ltr" inputmode="decimal" autocomplete="off" placeholder="2.00" required>
+<label class="l" for="bal-n">الوصف <small>(اختياري)</small></label><input id="bal-n" class="fs" name="note" maxlength="60" autocomplete="off" placeholder="رصيد تجريبي">
+<div class="da"><button type="button" class="btn ghost" data-close>إلغاء</button><button class="btn">إضافة</button></div></form></dialog>
+<dialog id="pwd" class="ask" aria-labelledby="pwd-t"><form class="dg" method="post" action="/{{admin}}/code/password" data-toast="تم تعيين كلمة السر"><input type="hidden" name="id"><h3 id="pwd-t">كلمة سر جديدة</h3><p class="mut" id="pwd-for"></p>
+<label class="l" for="pwd-p">كلمة السر الجديدة <small>(6 أحرف على الأقل)</small></label><input id="pwd-p" class="fs" name="password" dir="ltr" minlength="6" maxlength="128" autocomplete="new-password" required>
+<div class="da"><button type="button" class="btn ghost" data-close>إلغاء</button><button class="btn">حفظ</button></div></form></dialog>
 <dialog id="rn" class="ask" aria-labelledby="rn-t"><form class="dg" method="post" action="/{{admin}}/code/rename" data-toast="تم حفظ الاسم"><input type="hidden" name="id"><h3 id="rn-t">تعديل الاسم</h3><p class="mut">الاسم يظهر لك وحدك في هذه اللوحة، والرمز لا يتغيّر.</p>
 <label class="l" for="rn-l">اسم المستخدم</label><input id="rn-l" name="label" maxlength="40" autocomplete="off" enterkeyhint="done">
 <div class="da"><button type="button" class="btn ghost" data-close>إلغاء</button><button class="btn">حفظ الاسم</button></div></form></dialog>
@@ -2266,7 +2400,15 @@ sa.textContent=av.textContent;sa.style.setProperty('--h',av.style.getPropertyVal
 $$('input[name=id]',sheet).forEach(function(i){i.value=d.id});
 $('#sh-copy').dataset.copy=d.code;$('#sh-share').dataset.share='رمز الدخول: '+d.code;
 $('#sh-release').hidden=!d.bound;$('#sh-reset').hidden=!+d.n;
+var pre=d.pay==='prepaid';$('input[name=pay]',$('#sh-pay')).value=pre?'later':'prepaid';
+$('#sh-pay-t').innerHTML=pre?'تحويل إلى «آجل»<small>تُحسب التكلفة ويدفعها لاحقًا، ولا يُخصم من الرصيد</small>':'تحويل إلى «دفع مسبق»<small>لا تُكتب التعليقات إلا برصيد (الرصيد ⁦$'+(d.bal||'0.00')+'⁩)</small>';
+$('#sh-pw').hidden=!d.acct;
 sheet.showModal()}
+$('#sh-bal').onclick=function(){sheet.close();var g=$('#bal');$('input[name=id]',g).value=cur.dataset.id;
+$('#bal-now').textContent=(cur.dataset.name||'المستخدم')+' · الرصيد الآن ⁦$'+(cur.dataset.bal||'0.00')+'⁩'+(cur.dataset.pay==='prepaid'?'':' (هذا المستخدم «آجل»؛ حوّله إلى «مسبق» ليُستخدم رصيده)');
+var a=$('#bal-a');a.value='';$('#bal-n').value='';g.showModal();a.focus()};
+$('#sh-pw').onclick=function(){sheet.close();var g=$('#pwd');$('input[name=id]',g).value=cur.dataset.id;
+$('#pwd-for').textContent='لحساب '+cur.dataset.acct+'. أعطه كلمة السر الجديدة بعد الحفظ.';var i=$('#pwd-p');i.value='';g.showModal();i.focus()};
 $('#sh-rename').onclick=function(){sheet.close();var d=$('#rn'),i=$('#rn-l');$('input[name=id]',d).value=cur.dataset.id;i.value=cur.dataset.name;d.showModal();i.focus();i.select()};
 
 D.addEventListener('click',function(e){var t=e.target,el;
@@ -2370,6 +2512,12 @@ def dashboard():
     usage_data = load_usage()
     rows = [dict(c, last_seen_text=seen_text(c), usage=usage_of(c["id"], usage_data), acts=acts_of(c["id"], acts_data)) for c in codes]
     for r in rows:
+        r["pay"] = pay_of(r)
+        r["balance"] = balance_of(r)
+        r["account_user"] = str((r.get("account") or {}).get("user") or "")
+        r["ledger"] = [dict(e, when=seen_text({"last_seen": int(e.get("at") or 0)}))
+                       for e in (r.get("ledger") if isinstance(r.get("ledger"), list) else [])[:6] if isinstance(e, dict)]
+        r.pop("account", None)                       # (no password hash goes into the page)
         r["acts_text"] = ("الآن" if time.time() - r["acts"]["at"] < 60 else seen_text({"last_seen": r["acts"]["at"]})) if r["acts"]["at"] else ""
     stats = {"users": len(rows), "active": sum(1 for r in rows if r.get("active")),
              "bound": sum(1 for r in rows if r.get("bound_device")),
@@ -2401,6 +2549,7 @@ def dashboard():
         backup_when=seen_text({"last_seen": last_backup}) if last_backup else "",
         owner_link=owner_app_link(request.host), in_owner_app=OWNER_APP_MARK in (request.headers.get("User-Agent") or ""),
         this_host=request.host, relay=MOVE_RELAY.split("//")[-1],
+        price=COST_PER_COMMENT,
         script_live=script_live, script_staged=script_staged, script_next=next_version(highest_published_version()),
         script_floor=highest_published_version(), script_pilot=script_pilot, script_pilot_ids=pilot_ids,
         script_pilot_names=script_pilot_names,
@@ -2668,6 +2817,83 @@ def code_rename():
             if row.get("id") == code_id:
                 row["label"] = label
         save_codes(codes)
+    return redirect(f"/{ADMIN}")
+
+
+@app.post(f"/{ADMIN}/code/pay")
+def code_pay():
+    """«آجل» or «مسبق» for one user."""
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    code_id = request.form.get("id")
+    pay = PAY_PREPAID if request.form.get("pay") == PAY_PREPAID else PAY_LATER
+    with LOCK:
+        codes = load_codes()
+        for row in codes:
+            if row.get("id") == code_id:
+                row["pay"] = pay
+        save_codes(codes)
+    return redirect(f"/{ADMIN}")
+
+
+@app.post(f"/{ADMIN}/code/balance")
+def code_balance():
+    """Add to (or, with a minus, take from) one user's balance: a trial balance, a top-up, a correction."""
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    code_id = request.form.get("id")
+    raw = (request.form.get("amount") or "").strip().translate(str.maketrans("٠١٢٣٤٥٦٧٨٩٫،", "0123456789.."))
+    raw = raw.replace("$", "").replace(" ", "")
+    try:
+        amount = round(float(raw), 2)
+    except ValueError:
+        amount = 0.0
+    if not amount or abs(amount) > 10000:
+        flash("bad", "اكتب المبلغ رقمًا بالدولار، مثل 2 أو 0.50 (وبإشارة سالب للخصم).")
+        return redirect(f"/{ADMIN}")
+    note = (request.form.get("note") or "").strip()[:60] or ("رصيد تجريبي" if amount > 0 else "تصحيح")
+    with LOCK:
+        codes = load_codes()
+        row = next((item for item in codes if item.get("id") == code_id), None)
+        if row is None:
+            flash("bad", "المستخدم غير موجود.")
+            return redirect(f"/{ADMIN}")
+        row["balance"] = round(balance_of(row) + amount, 4)
+        ledger = row.get("ledger") if isinstance(row.get("ledger"), list) else []
+        ledger.insert(0, {"at": int(time.time()), "amount": amount, "note": note, "after": round(row["balance"], 2)})
+        row["ledger"] = ledger[:LEDGER_KEEP]
+        save_codes(codes)
+        name = row.get("label") or row.get("code") or ""
+        later = pay_of(row) != PAY_PREPAID
+    flash("ok", f"{'أُضيف' if amount > 0 else 'خُصم'} ${abs(amount):.2f} {'إلى' if amount > 0 else 'من'} رصيد {name}. "
+                f"الرصيد الآن ${row['balance']:.2f}."
+                + (" (هذا المستخدم «آجل»: لا يُستخدم الرصيد حتى تحوّله إلى «مسبق».)" if later else ""))
+    return redirect(f"/{ADMIN}")
+
+
+@app.post(f"/{ADMIN}/code/password")
+def code_password():
+    """A new password for an account (its owner forgot it): the owner gives it to them."""
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    code_id = request.form.get("id")
+    password = request.form.get("password") or ""
+    if not 6 <= len(password) <= 128:
+        flash("bad", "كلمة السر 6 أحرف على الأقل.")
+        return redirect(f"/{ADMIN}")
+    stored = account_pw_hash(password)
+    with LOCK:
+        codes = load_codes()
+        row = next((item for item in codes if item.get("id") == code_id and isinstance(item.get("account"), dict)), None)
+        if row is None:
+            flash("bad", "هذا المستخدم ليس له حساب بكلمة سر.")
+            return redirect(f"/{ADMIN}")
+        row["account"]["pw"] = stored
+        save_codes(codes)
+        key = account_key(row["account"].get("user"))
+    with _signin_lock:
+        _signin_failures.pop(key, None)
+    flash("ok", f"عُيّنت كلمة سر جديدة لـ {row['account'].get('user')}. أعطه إياها، ويدخل بها.")
     return redirect(f"/{ADMIN}")
 
 
@@ -3067,6 +3293,85 @@ def api_activate():
     return api_ok(token=make_token(row["id"], device), engine=engine or "none", move_key=SECRETS.get("move_public", ""))
 
 
+def signed_in(row: dict, device: str):
+    """The answer for a phone that may come in (as for a code): its token."""
+    engine, _, _, _ = active_engine()
+    return api_ok(token=make_token(row["id"], device), engine=engine or "none", move_key=SECRETS.get("move_public", ""),
+                  pay=pay_of(row), balance=round(balance_of(row), 2))
+
+
+def _device_of(body: dict) -> str:
+    return re.sub(r"[^A-Za-z0-9]", "", str(body.get("device") or ""))[:64]
+
+
+@app.post(f"/{API}/register")
+def api_register():
+    """A new account made in the app: a user like any other, bound to this phone, paying in advance («مسبق»)."""
+    body = request.get_json(silent=True) or {}
+    device = _device_of(body)
+    name = str(body.get("user") or "").strip()
+    password = str(body.get("password") or "")
+    if not device:
+        return api_err("لم يصل معرّف الجهاز. حدّث التطبيق.")
+    if not ACCOUNT_NAME.match(name):
+        return api_err("اسم المستخدم من 3 إلى 24 حرفًا أو رقمًا، بلا مسافات (يُسمح بـ _ و . و -).")
+    if not 6 <= len(password) <= 128:
+        return api_err("كلمة السر 6 أحرف على الأقل.")
+    with LOCK:
+        taken = account_row(load_codes(), name) is not None
+    if taken:
+        return api_err("اسم المستخدم مأخوذ. اختر اسمًا آخر.")
+    if not signup_allowed():
+        return api_err("حسابات كثيرة من هذه الشبكة. حاول بعد ساعة.")
+    stored = account_pw_hash(password)
+    with LOCK:
+        codes = load_codes()
+        if account_row(codes, name) is not None:
+            return api_err("اسم المستخدم مأخوذ. اختر اسمًا آخر.")
+        now = int(time.time())
+        row = {"id": secrets.token_hex(8), "code": make_code(), "label": name, "active": True, "created": now,
+               "last_seen": now, "bound_device": device, "pay": PAY_PREPAID, "balance": 0.0, "ledger": [],
+               "account": {"user": name, "pw": stored, "at": now}}
+        codes.insert(0, row)
+        save_codes(codes)
+    return signed_in(row, device)
+
+
+@app.post(f"/{API}/login")
+def api_login():
+    """Sign in with an account's name and password (on the phone it is bound to, as a code is)."""
+    body = request.get_json(silent=True) or {}
+    device = _device_of(body)
+    name = str(body.get("user") or "").strip()
+    password = str(body.get("password") or "")
+    if not device:
+        return api_err("لم يصل معرّف الجهاز. حدّث التطبيق.")
+    key = account_key(name)
+    if not key or not password:
+        return api_err("أدخل اسم المستخدم وكلمة السر.")
+    if signin_blocked(key):
+        return api_err("محاولات دخول كثيرة. حاول بعد 15 دقيقة.")
+    with LOCK:
+        row = account_row(load_codes(), name)
+    if not account_pw_ok(password, (row.get("account") or {}).get("pw") if row else _NO_ONE) or row is None:
+        signin_failed(key)
+        return api_err("اسم المستخدم أو كلمة السر غير صحيحة.")
+    if not row.get("active"):
+        return api_err("هذا الحساب موقوف. راجع صاحب البرنامج.")
+    with LOCK:
+        codes = load_codes()
+        target = next((item for item in codes if item.get("id") == row["id"]), None)
+        if target is None:
+            return api_err("الحساب غير موجود.")
+        bound = target.get("bound_device") or ""
+        if bound and bound != device:
+            return api_err("هذا الحساب مُستخدم على جهاز آخر. اطلب من صاحب البرنامج تحرير الجهاز.")
+        target["bound_device"] = device
+        target["last_seen"] = int(time.time())
+        save_codes(codes)
+    return signed_in(target, device)
+
+
 @app.post(f"/{API}/check")
 def api_check():
     body = request.get_json(silent=True) or {}
@@ -3081,7 +3386,7 @@ def api_usage():
     row = code_from_token(body.get("token"))
     if not row:
         return api_err("انتهت صلاحية الدخول أو أوقِف الرمز أو نُقل لجهاز آخر. أعد إدخال الرمز.", 200)
-    return api_ok(**usage_by_account(row["id"]))
+    return api_ok(**usage_by_account(row["id"]), pay=pay_of(row), balance=round(balance_of(row), 2))
 
 
 @app.post(f"/{API}/stats")
@@ -3293,10 +3598,17 @@ def api_comment():
     before = body.get("before") if isinstance(body.get("before"), list) else []
     if not tweet_text and not image:
         return api_err("لا نص ولا صورة للتغريدة.")
+    refused = take_comment_price(row["id"])        # («مسبق»: its price is held from the balance first)
+    if refused:
+        return api_err(refused)
     try:
         comment = write_reply(tweet_text, image, voice, manner, before)
     except RuntimeError as exc:
+        give_back_comment_price(row["id"])
         return api_err(str(exc))
+    except BaseException:
+        give_back_comment_price(row["id"])
+        raise
     record_comment(row["id"], str(body.get("account") or ""), str(body.get("name") or ""))
     return api_ok(comment=comment)
 

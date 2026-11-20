@@ -471,8 +471,51 @@ def load_prices() -> dict:
     return prices
 
 
-def save_prices(prices: dict) -> None:
-    write_private_json(PRICES_PATH, {"version": 1, **{name: round(float(prices.get(name) or 0), 4) for name in SERVICES}})
+def save_prices(prices: dict, welcome: float | None = None) -> None:
+    welcome = load_welcome() if welcome is None else welcome
+    write_private_json(PRICES_PATH, {"version": 1, **{name: round(float(prices.get(name) or 0), 4) for name in SERVICES},
+                                     "welcome": round(float(welcome), 2)})
+
+
+# «رصيد الحساب الجديد»: whoever makes an account in the app starts with this trial balance ($1 until the owner sets
+# another in «أسعار الخدمات»; 0 gives none). Once per phone: a phone that already had an account or a code, or got
+# it before (its account deleted since), starts a new account at $0, so a new account is not a new $1 each time.
+WELCOME_DEFAULT = 1.0
+WELCOME_NOTE = "رصيد تجريبي (حساب جديد)"
+WELCOMED_PATH = DATA_DIR / "welcomed.json"
+
+
+def load_welcome() -> float:
+    data = read_private_json(PRICES_PATH) or {}
+    try:
+        value = float(data.get("welcome", WELCOME_DEFAULT))
+    except (TypeError, ValueError):
+        return WELCOME_DEFAULT
+    return round(value, 2) if 0 <= value <= 100 else WELCOME_DEFAULT
+
+
+def take_welcome(codes: list, device: str) -> float:
+    """(Under LOCK, as an account is made on this phone.) Its trial balance, or 0 when this phone had it already."""
+    amount = load_welcome()
+    if amount <= 0 or any((row.get("bound_device") or "") == device for row in codes):
+        return 0.0
+    key = hashlib.sha256(("welcome|" + device).encode("utf-8")).hexdigest()[:32]
+    data = read_private_json(WELCOMED_PATH) or {}
+    phones = data.get("devices") if isinstance(data.get("devices"), list) else []
+    if key in phones:
+        return 0.0
+    phones.append(key)
+    write_private_json(WELCOMED_PATH, {"devices": phones[-100000:]})
+    return amount
+
+
+def form_dollars(raw) -> float:
+    """A dollar amount typed in the panel (Arabic digits, $ and spaces are fine; empty is 0), or -1 if not a number."""
+    raw = str(raw or "").strip().translate(str.maketrans("٠١٢٣٤٥٦٧٨٩٫،", "0123456789..")).replace("$", "").replace(" ", "")
+    try:
+        return float(raw or "0")
+    except ValueError:
+        return -1.0
 
 
 def _with_cost(row: dict, count_key: str) -> dict:
@@ -1982,7 +2025,7 @@ html.loading .ldpill{display:flex}
 .prc summary::-webkit-details-marker{display:none}.prc summary>.i{order:1;margin-inline-start:auto;width:18px;height:18px;color:var(--mut);transition:transform .2s}
 .prc[open] summary>.i{transform:rotate(180deg)}.prc-h{display:flex;gap:8px;align-items:center}.prc-h .i{width:18px;height:18px;color:var(--pri)}
 .prc-s{order:2;display:flex;flex-wrap:wrap;gap:4px 10px;font-size:12.5px;color:var(--mut);flex-basis:100%;margin-top:-6px;padding-bottom:12px}.prc form{padding-bottom:16px}.prc .mut{margin:0 0 4px;font-size:13px}
-.prg{display:grid;grid-template-columns:1fr 1fr;gap:10px}.prf{display:grid;gap:6px;font-size:13px;font-weight:500;color:var(--mut)}.prf .fs{height:44px;font-variant-numeric:tabular-nums}
+.prg{display:grid;grid-template-columns:1fr 1fr;gap:10px}.prw{margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}.prc .prh{margin:6px 0 0;font-size:12px}.prf{display:grid;gap:6px;font-size:13px;font-weight:500;color:var(--mut)}.prf .fs{height:44px;font-variant-numeric:tabular-nums}
 .tg{display:inline-block;margin-inline-start:6px;padding:1px 7px;border-radius:99px;font-size:11px;font-weight:600;vertical-align:2px;background:var(--soft);color:var(--mut);border:1px solid var(--line)}
 .tg.pp{background:var(--prisoft);color:var(--pri);border-color:transparent}
 .bal b{color:var(--pri)}.bal.low b{color:var(--bad)}
@@ -2174,9 +2217,11 @@ main{padding-bottom:56px}
 </dl>
 </section>
 {% set pn = {'comment': 'تعليق', 'like': 'إعجاب', 'repost': 'إعادة نشر', 'bookmark': 'مرجعية'} %}
-<details class="card prc"><summary><span class="prc-h">{{ic('key')}}<b>أسعار الخدمات</b></span><span class="prc-s">{% for k in ['comment', 'like', 'repost', 'bookmark'] %}<span>{{pn[k]}} <bdi dir="ltr">${{ '%g'|format(prices[k]) }}</bdi></span>{% endfor %}</span>{{ic('chev')}}</summary>
+<details class="card prc"><summary><span class="prc-h">{{ic('key')}}<b>أسعار الخدمات</b></span><span class="prc-s">{% for k in ['comment', 'like', 'repost', 'bookmark'] %}<span>{{pn[k]}} <bdi dir="ltr">${{ '%g'|format(prices[k]) }}</bdi></span>{% endfor %}<span>حساب جديد <bdi dir="ltr">${{ '%g'|format(welcome) }}</bdi></span></span>{{ic('chev')}}</summary>
 <form method="post" action="/{{admin}}/prices" data-toast="تم حفظ الأسعار"><p class="mut">سعر كل خدمة ناجحة بالدولار، و0 للمجانية. «آجل»: تُجمع التكلفة. «مسبق»: تُخصم من الرصيد، ولا تبدأ مهمة إن لم يكفِ لأرخص خدماتها؛ والمهمة التي بدأت تكمل إلى آخرها ولو نفد الرصيد في نصها (يصير بالسالب، وتسدّه الشحنة التالية). السعر الجديد يُطبَّق من الآن، وما حُسب قبله يبقى.</p>
 <div class="prg">{% for k in ['comment', 'like', 'repost', 'bookmark'] %}<label class="prf"><span>{{pn[k]}}</span><input class="fs" name="{{k}}" dir="ltr" inputmode="decimal" autocomplete="off" value="{{ '%g'|format(prices[k]) }}"></label>{% endfor %}</div>
+<label class="prf prw"><span>رصيد الحساب الجديد</span><input class="fs" name="welcome" dir="ltr" inputmode="decimal" autocomplete="off" value="{{ '%g'|format(welcome) }}"></label>
+<p class="mut prh">يُضاف تلقائيًا لكل من ينشئ حسابًا جديدًا في التطبيق، مرة واحدة لكل جوال. و0 يوقفه.</p>
 <button class="btn wide" style="margin-top:14px">حفظ الأسعار</button></form></details>
 <div class="tb">
 <label class="search">{{ic('search')}}<input id="q" type="search" placeholder="ابحث بالاسم أو الرمز" aria-label="ابحث بالاسم أو الرمز" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search"><button type="button" class="qx" id="qx" aria-label="مسح البحث" hidden>{{ic('x')}}</button></label>
@@ -2677,7 +2722,7 @@ def dashboard():
         backup_when=seen_text({"last_seen": last_backup}) if last_backup else "",
         owner_link=owner_app_link(request.host), in_owner_app=OWNER_APP_MARK in (request.headers.get("User-Agent") or ""),
         this_host=request.host, relay=MOVE_RELAY.split("//")[-1],
-        prices=load_prices(),
+        prices=load_prices(), welcome=load_welcome(),
         script_live=script_live, script_staged=script_staged, script_next=next_version(highest_published_version()),
         script_floor=highest_published_version(), script_pilot=script_pilot, script_pilot_ids=pilot_ids,
         script_pilot_names=script_pilot_names,
@@ -2955,20 +3000,20 @@ def prices_save():
         return redirect(f"/{ADMIN}")
     prices = load_prices()
     for name in SERVICES:
-        raw = (request.form.get(name) or "").strip().translate(str.maketrans("٠١٢٣٤٥٦٧٨٩٫،", "0123456789.."))
-        raw = raw.replace("$", "").replace(" ", "")
-        if raw == "":
-            raw = "0"
-        try:
-            value = float(raw)
-        except ValueError:
-            value = -1
+        value = form_dollars(request.form.get(name))
         if not 0 <= value <= 100:
             flash("bad", "اكتب كل سعر رقمًا بالدولار من 0 إلى 100، مثل 0.01 (و0 للخدمة المجانية).")
             return redirect(f"/{ADMIN}")
         prices[name] = round(value, 4)
-    save_prices(prices)
-    flash("ok", "حُفظت الأسعار. تُحسب بها الخدمات من الآن، وما حُسب قبلها يبقى كما هو.")
+    welcome = None                                   # (a form without the field leaves it as it is)
+    if request.form.get("welcome") is not None:
+        welcome = form_dollars(request.form.get("welcome"))
+        if not 0 <= welcome <= 100:
+            flash("bad", "اكتب رصيد الحساب الجديد رقمًا بالدولار من 0 إلى 100، مثل 1 (و0 لإيقافه).")
+            return redirect(f"/{ADMIN}")
+    save_prices(prices, None if welcome is None else round(welcome, 2))
+    flash("ok", "حُفظت الأسعار. تُحسب بها الخدمات من الآن، وما حُسب قبلها يبقى كما هو. "
+                f"رصيد الحساب الجديد: {money(load_welcome())}.")
     return redirect(f"/{ADMIN}")
 
 
@@ -3481,8 +3526,10 @@ def api_register():
         if account_row(codes, name) is not None:
             return api_err("اسم المستخدم مأخوذ. اختر اسمًا آخر.")
         now = int(time.time())
+        gift = take_welcome(codes, device)
         row = {"id": secrets.token_hex(8), "code": make_code(), "label": name, "active": True, "created": now,
-               "last_seen": now, "bound_device": device, "pay": PAY_PREPAID, "balance": 0.0, "ledger": [],
+               "last_seen": now, "bound_device": device, "pay": PAY_PREPAID, "balance": gift,
+               "ledger": [{"at": now, "amount": gift, "note": WELCOME_NOTE, "after": gift}] if gift else [],
                "account": {"user": name, "pw": stored, "at": now}}
         codes.insert(0, row)
         save_codes(codes)

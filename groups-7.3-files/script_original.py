@@ -2669,11 +2669,20 @@ EMBEDDED_PAGE = r'''<!doctype html>
   // there by X account, so they stay when the app is installed again), else counted here.
   let usageData = null;
   function money(value) { return "$" + Number(value || 0).toFixed(2); }
+  // «أسعار الخدمات»: the paid ones, as the owner set them (a price like 0.005 keeps its digits).
+  function priceList(prices, commentPrice) {
+    const names = {comment: "تعليق", like: "إعجاب", repost: "إعادة نشر", bookmark: "مرجعية"};
+    const all = Object.assign({comment: commentPrice}, prices || {});
+    const paid = Object.keys(names).filter((key) => Number(all[key] || 0) > 0);
+    return paid.length ? "الأسعار: " + paid.map((key) => names[key] + " $" + Number(all[key])).join(" · ") + "." : "الخدمات مجانية.";
+  }
   function renderUsage() {
     if (!usageData) return;
     // «مسبق»: the balance left (green, red when it is about to run out); «آجل»: the comments and their cost.
     const prepaid = usageData.pay === "prepaid";
-    usageCount.textContent = prepaid ? "الرصيد" : "التعليقات (" + Number(usageData.total || 0).toLocaleString("en-US") + ")";
+    const prices = usageData.prices || {};
+    const actionsPaid = ["repost", "like", "bookmark"].some((key) => Number(prices[key] || 0) > 0);
+    usageCount.textContent = prepaid ? "الرصيد" : (actionsPaid ? "التكلفة" : "التعليقات (" + Number(usageData.total || 0).toLocaleString("en-US") + ")");
     usageCost.textContent = money(prepaid ? usageData.balance : usageData.cost);
     if (prepaid) {
       usageCost.style.backgroundColor = Number(usageData.balance || 0) >= Number(usageData.price || 0.01) * 5 ? "rgb(6, 118, 71)" : "rgb(180, 35, 24)";
@@ -2715,11 +2724,12 @@ EMBEDDED_PAGE = r'''<!doctype html>
     document.getElementById("usage-total-n").textContent = Number(usageData.total || 0).toLocaleString("en-US");
     document.getElementById("usage-total-cost").textContent = money(usageData.cost);
     const price = Number(usageData.price || 0.01);
+    const priceText = priceList(prices, price);
     usageNote.textContent = prepaid
-      ? "رصيدك " + money(usageData.balance) + ". يُخصم " + money(price) + " لكل تعليق، وبلا رصيد لا تُكتب التعليقات. للشحن راسل صاحب البرنامج."
+      ? "رصيدك " + money(usageData.balance) + ". " + priceText + " بلا رصيد لا تُنفَّذ الخدمات المدفوعة. للشحن راسل صاحب البرنامج."
       : usageData.source === "control"
       ? (usageData.stale ? "آخر قراءة من لوحة التحكم (الخادم غير متاح الآن). " : "من لوحة التحكم: تُحسب لكل حساب، وتبقى حتى لو أُعيد تثبيت التطبيق. ")
-        + money(price) + " لكل تعليق."
+        + priceText
       : "محسوبة في هذه النسخة: " + money(price) + " لكل تعليق.";
   }
   async function loadCommentsUsage(fresh) {
@@ -3441,11 +3451,15 @@ EMBEDDED_PAGE = r'''<!doctype html>
       if (!stopId) { showNotice("الصق رابط التغريدة المحددة أو رقمها.", false); stopField.focus(); return; }
     }
     if (!actions.length) { showNotice("اختر إجراءً واحدًا على الأقل.", false); return; }
-    if (actions.includes("comment") && usageData && usageData.pay === "prepaid"
-        && Number(usageData.balance || 0) < Number(usageData.price || 0.01)) {
-      showNotice("رصيدك " + money(usageData.balance) + " لا يكفي للتعليقات. أزل «التعليقات» أو اطلب شحن رصيدك.", false);
-      loadCommentsUsage(true);
-      return;
+    if (usageData && usageData.pay === "prepaid") {
+      // the cheapest paid service chosen must fit in the balance (the others are skipped tweet by tweet when it runs out)
+      const prices = Object.assign({comment: Number(usageData.price || 0.01)}, usageData.prices || {});
+      const paid = actions.map((key) => Number(prices[key] || 0)).filter((value) => value > 0);
+      if (paid.length && Number(usageData.balance || 0) < Math.min(...paid)) {
+        showNotice("رصيدك " + money(usageData.balance) + " لا يكفي للخدمات المختارة. اطلب شحن رصيدك، أو اختر خدمات مجانية.", false);
+        loadCommentsUsage(true);
+        return;
+      }
     }
     if (actions.includes("comment") && (geminiByOwner || controlOn)) {
       // (Its keys come from the owner when it starts: the script waits for them, and says if they do not come.)
@@ -5095,6 +5109,9 @@ def apply_actions_on_path(page, path: str, actions: list[str]) -> dict[str, str]
         if row.get("on"):
             outcome[action] = "مفعّل مسبقًا — تم التجاوز"
             continue
+        if not service_affordable(action):            # («مسبق»: its price is not in the balance)
+            outcome[action] = NO_BALANCE
+            continue
         if pressed:
             page.wait_for_timeout(random.randint(80, 200))
         pressed += 1
@@ -5107,6 +5124,8 @@ def apply_actions_on_path(page, path: str, actions: list[str]) -> dict[str, str]
                 outcome[action] = f"تعذر النقر: الزر مغطى بـ {blocker}"
                 continue
             outcome[action] = "تم التنفيذ" if turned_on(action, 2.5) else UNCONFIRMED
+            if outcome[action] == "تم التنفيذ":
+                service_used(action)
             trace_click(f"{action} النتيجة: {outcome[action]}")
         except Exception as exc:
             if browser_closed_error(exc):
@@ -5130,6 +5149,7 @@ def apply_actions_on_path(page, path: str, actions: list[str]) -> dict[str, str]
                 now = (read_action_state(page, status_id, [action]) or {}).get(action) or {}
                 if now.get("on"):
                     outcome[action] = "تم التنفيذ"
+                    service_used(action)
                     trace_click(f"{action} إعادة صامتة: كان قد نُفّذ وتأكد متأخرًا")
                     continue
                 blocker = press(action)
@@ -5138,6 +5158,7 @@ def apply_actions_on_path(page, path: str, actions: list[str]) -> dict[str, str]
                     continue
                 if turned_on(action, 4.0):
                     outcome[action] = "تم التنفيذ"
+                    service_used(action)
                 trace_click(f"{action} إعادة صامتة: {outcome[action]}")
             except Exception as exc:
                 if browser_closed_error(exc):
@@ -6470,6 +6491,7 @@ def execute_comment_actions(page, items: list[dict], actions: list[str], api_key
 
 def _execute_comment_actions(page, items: list[dict], task_actions: list[str], api_key: str, model: str, on_progress,
                              should_stop, on_snapshot, account: str, voice: str, ahead) -> list[dict]:
+    billing_refresh()
     results: list[dict] = []
     total = len(items)
     failures = FailedTweets()
@@ -9517,6 +9539,8 @@ def load_action_counts() -> None:
 def count_successes(outcome: dict[str, str], account: str = "") -> None:
     """Add this tweet's successful actions to this account's totals shown at the top of the page."""
     done = [action for action, note in (outcome or {}).items() if note == "تم التنفيذ" and action in ACTION_NAMES]
+    if done:
+        charge_services(account, done)
     if not done or not account:
         return
     with action_counts_lock:
@@ -9852,6 +9876,7 @@ def failed_retry_count(job: dict) -> int:
 
 
 def visit_and_apply(page, items: list[dict], task_actions: list[str], on_progress=None, on_snapshot=None, should_stop=None, account: str = "") -> list[dict]:
+    billing_refresh()
     results: list[dict] = []
     total = len(items)
     failures = FailedTweets()
@@ -12374,13 +12399,15 @@ def comments_usage(fresh: bool = False) -> dict:
         if cached is not None:
             return {**cached, "stale": True}
         return {"success": False, "message": str(exc)}
+    billing_update(answer)
     accounts = []
     for row in answer.get("accounts") or []:
         if isinstance(row, dict):
             accounts.append({"name": str(row.get("name") or "")[:40], "n": int(row.get("n") or 0), "cost": round(float(row.get("cost") or 0), 2)})
     data = {"success": True, "source": "control", "total": int(answer.get("total") or 0), "cost": round(float(answer.get("cost") or 0), 2),
             "price": float(answer.get("price") or GEMINI_PRICE_PER_COMMENT), "accounts": accounts, "stale": False,
-            "pay": "prepaid" if answer.get("pay") == "prepaid" else "later", "balance": round(float(answer.get("balance") or 0), 2)}
+            "pay": "prepaid" if answer.get("pay") == "prepaid" else "later", "balance": round(float(answer.get("balance") or 0), 2),
+            "prices": answer.get("prices") if isinstance(answer.get("prices"), dict) else {}}
     with _comments_usage_lock:
         _comments_usage_cache.update(at=time.monotonic(), data=data)
     return data
@@ -13915,6 +13942,132 @@ def is_unlocked() -> bool:
     if not active:
         _forget_unlock()
     return active
+
+
+# «أسعار الخدمات» في التطبيق: كيف يدفع هذا المستخدم ورصيده وأسعار الخدمات، كما يقولها خادم التحكّم (تُحدَّث مع
+# أرقام التعليقات وبعد كل إبلاغ). لا تُنفَّذ لمستخدم «مسبق» خدمة مدفوعة إن لم يكفِ رصيده. وكل إعادة نشر وإعجاب
+# ومرجعية ناجحة لها سعر تُبلَّغ إلى خادم التحكّم في الخلفية، محفوظة على الجوال حتى يستلمها (فلا تضيع بانقطاع).
+NO_BALANCE = "لم يُنفَّذ: الرصيد لا يكفي"
+PAID_ACTIONS = ("repost", "like", "bookmark")
+CHARGES_PATH = DATA_DIR / "charges.json"
+_billing = {"pay": "later", "balance": 0.0, "prices": None}
+_billing_lock = threading.Lock()
+_charges_lock = threading.Lock()
+_charges_wake = threading.Event()
+
+
+def billing_update(answer: dict) -> None:
+    if not isinstance(answer, dict):
+        return
+    with _billing_lock:
+        if answer.get("pay") in ("later", "prepaid"):
+            _billing["pay"] = answer["pay"]
+        try:
+            if answer.get("balance") is not None:
+                _billing["balance"] = float(answer["balance"])
+        except (TypeError, ValueError):
+            pass
+        prices = answer.get("prices")
+        if isinstance(prices, dict):
+            clean = {}
+            for name, value in prices.items():
+                try:
+                    clean[str(name)] = max(0.0, float(value))
+                except (TypeError, ValueError):
+                    continue
+            _billing["prices"] = clean
+
+
+def billing_refresh() -> None:
+    """Before a task's actions: the balance and the prices as they are now on the control server."""
+    if control_configured():
+        try:
+            comments_usage(fresh=True)
+        except Exception:
+            pass
+
+
+def service_price(action: str):
+    """This service's price; None while the prices are not known yet."""
+    with _billing_lock:
+        prices = _billing["prices"]
+        return None if prices is None else float(prices.get(action) or 0)
+
+
+def service_affordable(action: str) -> bool:
+    """Whether this user may do one more of this service now: a «مسبق» user needs its price in the balance."""
+    with _billing_lock:
+        if _billing["pay"] != "prepaid" or _billing["prices"] is None:
+            return True
+        price = float(_billing["prices"].get(action) or 0)
+        return price <= 0 or _billing["balance"] + 1e-9 >= price
+
+
+def service_used(action: str) -> None:
+    """A paid service was just done: a «مسبق» balance goes down here at once (the next one is weighed against what is
+    left), until the control server says the balance."""
+    with _billing_lock:
+        if _billing["pay"] == "prepaid" and _billing["prices"] is not None:
+            _billing["balance"] -= float(_billing["prices"].get(action) or 0)
+
+
+def charge_services(account: str, done: list) -> None:
+    """Successful paid services, kept on the phone to be reported to the control server in the background."""
+    paid = [action for action in done if action in PAID_ACTIONS and service_price(action) != 0]
+    if not paid or not control_configured():
+        return
+    item = {"id": secrets.token_hex(8), "account": account or "", "name": str(account_names.get(account) or ""),
+            "done": {action: 1 for action in paid}, "at": int(time.time())}
+    with _charges_lock:
+        pending = read_private_json(CHARGES_PATH) or {}
+        items = pending.get("items") if isinstance(pending.get("items"), list) else []
+        items.append(item)
+        write_private_json(CHARGES_PATH, {"items": items[-5000:]})
+    _charges_wake.set()
+
+
+def _send_charges_once() -> bool:
+    """Report the kept paid services (up to 200 at a time). True when there was nothing left to send."""
+    with _charges_lock:
+        pending = read_private_json(CHARGES_PATH) or {}
+        items = [item for item in (pending.get("items") or []) if isinstance(item, dict)][:200]
+    if not items:
+        return True
+    token = _current_token()
+    if not token:
+        return False
+    try:
+        answer = _control_request("charge", {"token": token, "items": items}, seconds=20)
+    except RuntimeError:
+        return False
+    sent = {item.get("id") for item in items}
+    with _charges_lock:
+        pending = read_private_json(CHARGES_PATH) or {}
+        rest = [item for item in (pending.get("items") or []) if isinstance(item, dict) and item.get("id") not in sent]
+        write_private_json(CHARGES_PATH, {"items": rest})
+    billing_update(answer)
+    forget_comments_usage()
+    return not rest
+
+
+def charges_sender() -> None:
+    """In the background: the paid services done here go to the control server, a few tweets' worth at a time."""
+    while True:
+        _charges_wake.wait(timeout=60)
+        _charges_wake.clear()
+        time.sleep(3)
+        if not control_configured():
+            continue
+        try:
+            done = _send_charges_once()
+        except Exception:
+            done = False
+        if not done:
+            time.sleep(15)
+            _charges_wake.set()
+
+
+threading.Thread(target=charges_sender, name="charges", daemon=True).start()
 
 
 def control_comment(tweet_text: str, image: bytes | None, voice: str, account: str, tweet_id: str) -> str:

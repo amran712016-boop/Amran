@@ -449,7 +449,37 @@ def save_keys(keys: dict) -> None:
 
 
 # ----------------------------------------------------------------------------- what each user (and account) used
-COST_PER_COMMENT = 0.01            # التكلفة لكل تعليق
+COST_PER_COMMENT = 0.01            # التكلفة لكل تعليق (قبل «أسعار الخدمات»، وسعره الأول فيها)
+
+# «أسعار الخدمات»: what each service costs the user, as the owner sets them: a comment, and each successful
+# repost, like and bookmark. A cost is counted at the price of its time (a new price does not change what was
+# counted before). At first: a comment as before, the others free.
+SERVICES = ("repost", "like", "bookmark", "comment")
+PRICES_PATH = DATA_DIR / "prices.json"
+
+
+def load_prices() -> dict:
+    data = read_private_json(PRICES_PATH) or {}
+    prices = {"repost": 0.0, "like": 0.0, "bookmark": 0.0, "comment": COST_PER_COMMENT}
+    for name in SERVICES:
+        try:
+            value = float(data.get(name))
+        except (TypeError, ValueError):
+            continue
+        if 0 <= value <= 100:
+            prices[name] = round(value, 4)
+    return prices
+
+
+def save_prices(prices: dict) -> None:
+    write_private_json(PRICES_PATH, {"version": 1, **{name: round(float(prices.get(name) or 0), 4) for name in SERVICES}})
+
+
+def _with_cost(row: dict, count_key: str) -> dict:
+    """Usage counted before the prices had its comments only, at the old fixed price: its cost is set from that once."""
+    if "cost" not in row:
+        row["cost"] = round(int(row.get(count_key) or 0) * COST_PER_COMMENT, 4)
+    return row
 
 
 def load_usage() -> dict:
@@ -457,18 +487,65 @@ def load_usage() -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def record_comment(code_id: str, account: str, name: str) -> None:
-    """Count one written comment against this code and the X account that asked for it."""
+def record_comment(code_id: str, account: str, name: str, price: float = COST_PER_COMMENT) -> None:
+    """Count one written comment, at its price, against this code and the X account that asked for it."""
     account = (account or "—")[:48]
     with LOCK:
         usage = load_usage()
-        code = usage.setdefault(code_id, {"total": 0, "accounts": {}})
+        code = _with_cost(usage.setdefault(code_id, {"total": 0, "accounts": {}}), "total")
+        code.setdefault("accounts", {})
         code["total"] = int(code.get("total") or 0) + 1
-        who = code["accounts"].setdefault(account, {"n": 0, "name": ""})
+        code["cost"] = round(float(code.get("cost") or 0) + price, 4)
+        services = code.setdefault("services", {})
+        services["comment"] = int(services.get("comment") or 0) + 1
+        who = _with_cost(code["accounts"].setdefault(account, {"n": 0, "name": ""}), "n")
         who["n"] = int(who.get("n") or 0) + 1
+        who["cost"] = round(float(who.get("cost") or 0) + price, 4)
         if name:
             who["name"] = name[:40]
         write_private_json(USAGE_PATH, usage)
+
+
+def record_actions(code_id: str, items: list, prices: dict) -> float:
+    """Successful reposts, likes and bookmarks the app reports: counted, with their cost at today's prices. A report
+    the app sends again (its answer was lost) has the same id and is not counted twice. Returns the cost added."""
+    added = 0.0
+    with LOCK:
+        usage = load_usage()
+        code = _with_cost(usage.setdefault(code_id, {"total": 0, "accounts": {}}), "total")
+        code.setdefault("accounts", {})
+        services = code.setdefault("services", {})
+        seen = code.get("seen") if isinstance(code.get("seen"), list) else []
+        known = set(seen)
+        for item in items:
+            report = str(item.get("id") or "")[:40]
+            if report and report in known:
+                continue
+            done = item.get("done") if isinstance(item.get("done"), dict) else {}
+            account = (str(item.get("account") or "") or "—")[:48]
+            who = _with_cost(code["accounts"].setdefault(account, {"n": 0, "name": ""}), "n")
+            acts = who.setdefault("acts", {})
+            for action in ("repost", "like", "bookmark"):
+                try:
+                    count = max(0, min(1000, int(done.get(action) or 0)))
+                except (TypeError, ValueError):
+                    count = 0
+                if not count:
+                    continue
+                cost = count * float(prices.get(action) or 0)
+                services[action] = int(services.get(action) or 0) + count
+                acts[action] = int(acts.get(action) or 0) + count
+                who["cost"] = round(float(who.get("cost") or 0) + cost, 4)
+                code["cost"] = round(float(code.get("cost") or 0) + cost, 4)
+                added += cost
+            if item.get("name"):
+                who["name"] = str(item.get("name"))[:40]
+            if report:
+                seen.append(report)
+                known.add(report)
+        code["seen"] = seen[-3000:]
+        write_private_json(USAGE_PATH, usage)
+    return round(added, 4)
 
 
 def reset_usage(code_id: str) -> None:
@@ -486,15 +563,20 @@ def reset_all_usage() -> None:
         write_private_json(USAGE_PATH, {})
 
 
+def _cost(row: dict, count_key: str) -> float:
+    if "cost" in row:
+        return round(float(row.get("cost") or 0), 2)
+    return round(int(row.get(count_key) or 0) * COST_PER_COMMENT, 2)
+
+
 def usage_of(code_id: str, data: dict | None = None) -> dict:
     row = (data if data is not None else load_usage()).get(code_id) or {"total": 0, "accounts": {}}
     accounts = sorted(
-        ({"id": key, "name": value.get("name") or "", "n": int(value.get("n") or 0),
-          "cost": round(int(value.get("n") or 0) * COST_PER_COMMENT, 2)}
-         for key, value in (row.get("accounts") or {}).items()),
-        key=lambda item: -item["n"])
+        ({"id": key, "name": value.get("name") or "", "n": int(value.get("n") or 0), "cost": _cost(value, "n")}
+         for key, value in (row.get("accounts") or {}).items() if isinstance(value, dict)),
+        key=lambda item: (-item["cost"], -item["n"]))
     total = int(row.get("total") or 0)
-    return {"total": total, "cost": round(total * COST_PER_COMMENT, 2), "accounts": accounts}
+    return {"total": total, "cost": _cost(row, "total"), "accounts": accounts}
 
 
 def usage_by_account(code_id: str) -> dict:
@@ -507,21 +589,23 @@ def usage_by_account(code_id: str) -> dict:
         if not isinstance(value, dict):
             continue
         name = str(value.get("name") or "").strip().lstrip("@")[:40]
-        slot = merged.setdefault(name.lower() if name else "id:" + str(key), {"name": name, "n": 0})
+        slot = merged.setdefault(name.lower() if name else "id:" + str(key), {"name": name, "n": 0, "cost": 0.0})
         slot["n"] += int(value.get("n") or 0)
+        slot["cost"] += _cost(value, "n")
         if name and not slot["name"]:
             slot["name"] = name
     accounts = sorted(
-        ({"name": slot["name"], "n": slot["n"], "cost": round(slot["n"] * COST_PER_COMMENT, 2)} for slot in merged.values()),
-        key=lambda item: -item["n"])
+        ({"name": slot["name"], "n": slot["n"], "cost": round(slot["cost"], 2)} for slot in merged.values()),
+        key=lambda item: (-item["cost"], -item["n"]))
     total = int(row.get("total") or 0)
-    return {"total": total, "cost": round(total * COST_PER_COMMENT, 2), "price": COST_PER_COMMENT, "accounts": accounts}
+    prices = load_prices()
+    return {"total": total, "cost": _cost(row, "total"), "price": prices["comment"], "prices": prices, "accounts": accounts}
 
 
 # ----------------------------------------------------------------------------- how each user pays
 # «آجل»: the comments are counted and the owner collects their cost later (as before). «مسبق»: the user has a
-# balance the owner tops up (or gives as a trial); each comment takes COST_PER_COMMENT from it, and with too
-# little left no comment is written. Any user can be either; one who makes an account in the app starts «مسبق».
+# balance the owner tops up (or gives as a trial); each service takes its price from it («أسعار الخدمات»), and with
+# too little left it is not done. Any user can be either; one who makes an account in the app starts «مسبق».
 PAY_LATER, PAY_PREPAID = "later", "prepaid"
 LEDGER_KEEP = 100
 
@@ -537,7 +621,7 @@ def balance_of(row: dict) -> float:
         return 0.0
 
 
-def take_comment_price(code_id: str) -> str:
+def take_comment_price(code_id: str, price: float = COST_PER_COMMENT) -> str:
     """Before a prepaid user's comment its price is taken from the balance at once (so two comments at the same
     moment cannot both spend the last cent). "" when it may go ahead, else why not. A «آجل» user always may."""
     with LOCK:
@@ -546,20 +630,22 @@ def take_comment_price(code_id: str) -> str:
         if row is None or pay_of(row) != PAY_PREPAID:
             return ""
         balance = balance_of(row)
-        if balance + 1e-9 < COST_PER_COMMENT:
+        if price <= 0:
+            return ""
+        if balance + 1e-9 < price:
             return f"رصيدك لا يكفي لكتابة التعليقات (الرصيد ${max(balance, 0):.2f}). اطلب من صاحب البرنامج شحن رصيدك."
-        row["balance"] = round(balance - COST_PER_COMMENT, 4)
+        row["balance"] = round(balance - price, 4)
         save_codes(codes)
     return ""
 
 
-def give_back_comment_price(code_id: str) -> None:
+def give_back_comment_price(code_id: str, price: float = COST_PER_COMMENT) -> None:
     """The comment was not written after all: its price goes back to the balance."""
     with LOCK:
         codes = load_codes()
         row = next((item for item in codes if item.get("id") == code_id), None)
-        if row is not None and pay_of(row) == PAY_PREPAID:
-            row["balance"] = round(balance_of(row) + COST_PER_COMMENT, 4)
+        if row is not None and pay_of(row) == PAY_PREPAID and price > 0:
+            row["balance"] = round(balance_of(row) + price, 4)
             save_codes(codes)
 
 
@@ -1860,6 +1946,11 @@ html.loading .ldpill{display:flex}
 .fs2{font-size:12.5px}.fm{font-size:14px}
 .fsum{display:flex;flex-wrap:wrap;gap:6px}.fsum span{border:1px solid var(--line);border-radius:9px;padding:3px 10px;font-size:12.5px;color:var(--mut)}.fsum b{color:var(--ink)}.fsum .bad,.fsum .bad b{color:var(--bad)}
 .fl{list-style:none;margin:8px 0 0;padding:0;display:grid;gap:4px;font-size:12.5px}.fl li{padding:6px 10px;border-radius:8px;background:var(--soft);overflow-wrap:anywhere}
+.prc{padding:0 16px}.prc summary{display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center;min-height:54px;list-style:none;cursor:pointer}
+.prc summary::-webkit-details-marker{display:none}.prc summary>.i{order:1;margin-inline-start:auto;width:18px;height:18px;color:var(--mut);transition:transform .2s}
+.prc[open] summary>.i{transform:rotate(180deg)}.prc-h{display:flex;gap:8px;align-items:center}.prc-h .i{width:18px;height:18px;color:var(--pri)}
+.prc-s{order:2;display:flex;flex-wrap:wrap;gap:4px 10px;font-size:12.5px;color:var(--mut);flex-basis:100%;margin-top:-6px;padding-bottom:12px}.prc form{padding-bottom:16px}.prc .mut{margin:0 0 4px;font-size:13px}
+.prg{display:grid;grid-template-columns:1fr 1fr;gap:10px}.prf{display:grid;gap:6px;font-size:13px;font-weight:500;color:var(--mut)}.prf .fs{height:44px;font-variant-numeric:tabular-nums}
 .tg{display:inline-block;margin-inline-start:6px;padding:1px 7px;border-radius:99px;font-size:11px;font-weight:600;vertical-align:2px;background:var(--soft);color:var(--mut);border:1px solid var(--line)}
 .tg.pp{background:var(--prisoft);color:var(--pri);border-color:transparent}
 .bal b{color:var(--pri)}.bal.low b{color:var(--bad)}
@@ -2044,12 +2135,17 @@ main{padding-bottom:56px}
 <dl class="kp">
 <div><dt>أجهزة مربوطة</dt><dd>{{stats.bound}}</dd></div>
 <div><dt>تعليقات مكتوبة</dt><dd>{{ '{:,}'.format(stats.comments) }}</dd></div>
-<div><dt>التكلفة التقديرية</dt><dd>${{ '%.2f'|format(stats.cost) }}</dd></div>
+<div><dt>التكلفة</dt><dd>${{ '%.2f'|format(stats.cost) }}</dd></div>
 <div><dt>الرتويت</dt><dd>{{ '{:,}'.format(stats.repost) }}</dd></div>
 <div><dt>الإعجاب</dt><dd>{{ '{:,}'.format(stats.like) }}</dd></div>
 <div><dt>المرجعية</dt><dd>{{ '{:,}'.format(stats.bookmark) }}</dd></div>
 </dl>
 </section>
+{% set pn = {'comment': 'تعليق', 'like': 'إعجاب', 'repost': 'إعادة نشر', 'bookmark': 'مرجعية'} %}
+<details class="card prc"><summary><span class="prc-h">{{ic('key')}}<b>أسعار الخدمات</b></span><span class="prc-s">{% for k in ['comment', 'like', 'repost', 'bookmark'] %}<span>{{pn[k]}} <bdi dir="ltr">${{ '%g'|format(prices[k]) }}</bdi></span>{% endfor %}</span>{{ic('chev')}}</summary>
+<form method="post" action="/{{admin}}/prices" data-toast="تم حفظ الأسعار"><p class="mut">سعر كل خدمة ناجحة بالدولار، و0 للمجانية. «آجل»: تُجمع التكلفة. «مسبق»: تُخصم من الرصيد، ولا تُنفَّذ الخدمة إن لم يكفِ. السعر الجديد يُطبَّق من الآن، وما حُسب قبله يبقى.</p>
+<div class="prg">{% for k in ['comment', 'like', 'repost', 'bookmark'] %}<label class="prf"><span>{{pn[k]}}</span><input class="fs" name="{{k}}" dir="ltr" inputmode="decimal" autocomplete="off" value="{{ '%g'|format(prices[k]) }}"></label>{% endfor %}</div>
+<button class="btn wide" style="margin-top:14px">حفظ الأسعار</button></form></details>
 <div class="tb">
 <label class="search">{{ic('search')}}<input id="q" type="search" placeholder="ابحث بالاسم أو الرمز" aria-label="ابحث بالاسم أو الرمز" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search"><button type="button" class="qx" id="qx" aria-label="مسح البحث" hidden>{{ic('x')}}</button></label>
 <button class="btn add" type="button" data-open="nu" aria-label="إضافة مستخدم">{{ic('plus')}}<span>إضافة<span class="wd"> مستخدم</span></span></button>
@@ -2281,7 +2377,7 @@ f.addEventListener('change',sync);sync()})();</script>{% endif %}
 <button type="button" id="sh-rename">{{ic('edit')}}تعديل الاسم</button>
 <form id="sh-release" method="post" action="/{{admin}}/code/release" data-title="تحرير الجهاز؟" data-confirm="يُفكّ ارتباط الرمز بجواله الحالي ليتمكّن صاحبه من تفعيله على جوال آخر." data-yes="تحرير الجهاز" data-toast="تم تحرير الجهاز"><input type="hidden" name="id"><button>{{ic('phone')}}<span>تحرير الجهاز<small>ليُفعَّل الرمز على جوال آخر</small></span></button></form>
 <form id="sh-pay" method="post" action="/{{admin}}/code/pay" data-toast="تم تغيير نوع الدفع"><input type="hidden" name="id"><input type="hidden" name="pay" value="prepaid"><button>{{ic('key')}}<span id="sh-pay-t">تحويل إلى دفع مسبق</span></button></form>
-<button type="button" id="sh-bal">{{ic('plus')}}<span>إضافة رصيد<small>تجريبي أو شحن، ويُخصم <bdi dir="ltr">${{ '%.2f'|format(price) }}</bdi> لكل تعليق</small></span></button>
+<button type="button" id="sh-bal">{{ic('plus')}}<span>إضافة رصيد<small>تجريبي أو شحن، ويُخصم حسب أسعار الخدمات</small></span></button>
 <button type="button" id="sh-pw">{{ic('lock')}}<span>تعيين كلمة سر جديدة<small>لصاحب حساب نسي كلمة سره</small></span></button>
 <form id="sh-reset" method="post" action="/{{admin}}/code/reset-cost" data-title="تصفير التكلفة؟" data-confirm="سيُصفَّر عدّاد التعليقات والتكلفة لهذا المستخدم فقط." data-yes="تصفير التكلفة" data-kind="danger" data-toast="تم تصفير التكلفة"><input type="hidden" name="id"><button>{{ic('reset')}}تصفير التكلفة</button></form>
 <hr>
@@ -2549,7 +2645,7 @@ def dashboard():
         backup_when=seen_text({"last_seen": last_backup}) if last_backup else "",
         owner_link=owner_app_link(request.host), in_owner_app=OWNER_APP_MARK in (request.headers.get("User-Agent") or ""),
         this_host=request.host, relay=MOVE_RELAY.split("//")[-1],
-        price=COST_PER_COMMENT,
+        prices=load_prices(),
         script_live=script_live, script_staged=script_staged, script_next=next_version(highest_published_version()),
         script_floor=highest_published_version(), script_pilot=script_pilot, script_pilot_ids=pilot_ids,
         script_pilot_names=script_pilot_names,
@@ -2817,6 +2913,30 @@ def code_rename():
             if row.get("id") == code_id:
                 row["label"] = label
         save_codes(codes)
+    return redirect(f"/{ADMIN}")
+
+
+@app.post(f"/{ADMIN}/prices")
+def prices_save():
+    """«أسعار الخدمات»."""
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    prices = load_prices()
+    for name in SERVICES:
+        raw = (request.form.get(name) or "").strip().translate(str.maketrans("٠١٢٣٤٥٦٧٨٩٫،", "0123456789.."))
+        raw = raw.replace("$", "").replace(" ", "")
+        if raw == "":
+            raw = "0"
+        try:
+            value = float(raw)
+        except ValueError:
+            value = -1
+        if not 0 <= value <= 100:
+            flash("bad", "اكتب كل سعر رقمًا بالدولار من 0 إلى 100، مثل 0.01 (و0 للخدمة المجانية).")
+            return redirect(f"/{ADMIN}")
+        prices[name] = round(value, 4)
+    save_prices(prices)
+    flash("ok", "حُفظت الأسعار. تُحسب بها الخدمات من الآن، وما حُسب قبلها يبقى كما هو.")
     return redirect(f"/{ADMIN}")
 
 
@@ -3389,6 +3509,27 @@ def api_usage():
     return api_ok(**usage_by_account(row["id"]), pay=pay_of(row), balance=round(balance_of(row), 2))
 
 
+@app.post(f"/{API}/charge")
+def api_charge():
+    """The app's successful reposts, likes and bookmarks: counted at today's prices, and a «مسبق» user's balance pays
+    for them. Answers how this user pays now, the balance and the prices."""
+    body = request.get_json(silent=True) or {}
+    row = code_from_token(body.get("token"))
+    if not row:
+        return api_err("انتهت صلاحية الدخول أو أوقِف الرمز أو نُقل لجهاز آخر. أعد إدخال الرمز.", 200)
+    items = body.get("items") if isinstance(body.get("items"), list) else []
+    items = [item for item in items[:500] if isinstance(item, dict)]
+    prices = load_prices()
+    cost = record_actions(row["id"], items, prices) if items else 0.0
+    with LOCK:
+        codes = load_codes()
+        target = next((item for item in codes if item.get("id") == row["id"]), None) or row
+        if cost > 0 and pay_of(target) == PAY_PREPAID:
+            target["balance"] = round(balance_of(target) - cost, 4)
+            save_codes(codes)
+    return api_ok(pay=pay_of(target), balance=round(balance_of(target), 2), prices=prices, charged=cost)
+
+
 @app.post(f"/{API}/stats")
 def api_stats():
     """The app's numbers (as at the top of its page) for each of its X accounts, for the owner to see."""
@@ -3598,18 +3739,19 @@ def api_comment():
     before = body.get("before") if isinstance(body.get("before"), list) else []
     if not tweet_text and not image:
         return api_err("لا نص ولا صورة للتغريدة.")
-    refused = take_comment_price(row["id"])        # («مسبق»: its price is held from the balance first)
+    price = load_prices()["comment"]
+    refused = take_comment_price(row["id"], price)        # («مسبق»: its price is held from the balance first)
     if refused:
         return api_err(refused)
     try:
         comment = write_reply(tweet_text, image, voice, manner, before)
     except RuntimeError as exc:
-        give_back_comment_price(row["id"])
+        give_back_comment_price(row["id"], price)
         return api_err(str(exc))
     except BaseException:
-        give_back_comment_price(row["id"])
+        give_back_comment_price(row["id"], price)
         raise
-    record_comment(row["id"], str(body.get("account") or ""), str(body.get("name") or ""))
+    record_comment(row["id"], str(body.get("account") or ""), str(body.get("name") or ""), price)
     return api_ok(comment=comment)
 
 

@@ -281,7 +281,7 @@ def republish_moves_in_background() -> None:
 
 # ---- «نسخة احتياطية»: all the server's data in one file, encrypted with the control panel's password ----
 BACKUP_FILES = ("secrets.json", "codes.json", "keys.json", "usage.json", "notices.json", "acts.json", "support.json",
-                "move.json", "prices.json", "welcomed.json", "server.crt", "server.key")
+                "move.json", "prices.json", "welcomed.json", "lifetime.json", "server.crt", "server.key")
 BACKUP_MAGIC = b"GGBAK1"
 
 
@@ -594,18 +594,53 @@ def record_actions(code_id: str, items: list, prices: dict) -> float:
     return round(added, 4)
 
 
+# «منذ البداية»: what «تصفير التكلفة» clears is kept here, so the panel can show all the comments and all the cost
+# since the beginning under the numbers now (with the users deleted since, whose counts stay in usage.json).
+LIFETIME_PATH = DATA_DIR / "lifetime.json"
+
+
+def _lifetime_cleared() -> dict:
+    data = read_private_json(LIFETIME_PATH) or {}
+    try:
+        return {"comments": int(data.get("comments") or 0), "cost": float(data.get("cost") or 0)}
+    except (TypeError, ValueError):
+        return {"comments": 0, "cost": 0.0}
+
+
+def _add_up(totals: dict, rows) -> dict:
+    for row in rows:
+        if isinstance(row, dict):
+            totals["comments"] += int(row.get("total") or 0)
+            totals["cost"] += float(_with_cost(dict(row), "total").get("cost") or 0)
+    return totals
+
+
+def _keep_cleared(rows) -> None:
+    """(Under LOCK.) Counts about to be cleared go into the totals since the beginning."""
+    totals = _add_up(_lifetime_cleared(), rows)
+    write_private_json(LIFETIME_PATH, {"version": 1, "comments": totals["comments"], "cost": round(totals["cost"], 4)})
+
+
+def lifetime_totals(usage: dict | None = None) -> dict:
+    """All the comments and all the cost since the beginning: what is counted now plus what was cleared."""
+    totals = _add_up(_lifetime_cleared(), (load_usage() if usage is None else usage).values())
+    return {"comments": totals["comments"], "cost": round(totals["cost"], 2)}
+
+
 def reset_usage(code_id: str) -> None:
-    """تصفير تكلفة رمز واحد."""
+    """تصفير تكلفة رمز واحد (ويبقى محسوبًا في «منذ البداية»)."""
     with LOCK:
         usage = load_usage()
         if code_id in usage:
+            _keep_cleared([usage[code_id]])
             usage.pop(code_id, None)
             write_private_json(USAGE_PATH, usage)
 
 
 def reset_all_usage() -> None:
-    """تصفير كل التكاليف."""
+    """تصفير كل التكاليف (ويبقى محسوبًا في «منذ البداية»)."""
     with LOCK:
+        _keep_cleared(load_usage().values())
         write_private_json(USAGE_PATH, {})
 
 
@@ -1901,6 +1936,7 @@ input::placeholder{color:var(--mut);opacity:.8}
 .kp div:first-child{padding-inline-start:0;border:0}
 .kp dt{font-size:12px;color:#a3cbc6;line-height:1.5}
 .kp dd{font-size:20px;font-weight:500;line-height:1.4;font-variant-numeric:tabular-nums}
+.kpa{display:block;margin-top:1px;font-size:11px;line-height:1.4;color:#a3cbc6;font-variant-numeric:tabular-nums;white-space:nowrap}
 
 /* ---- search, filter, sort ---- */
 .tb{position:sticky;top:0;z-index:10;display:flex;gap:8px;padding:10px 0 8px;margin-top:4px;background:var(--bg)}
@@ -2207,14 +2243,14 @@ main{padding-bottom:56px}
 <section class="hero" aria-label="ملخّص المستخدمين">
 <div>
 <div class="ht"><div class="tot"><b>{{stats.users}}</b><span>مستخدم</span></div>
-{% if stats.comments %}<form method="post" action="/{{admin}}/reset-cost-all" data-title="تصفير كل التكاليف؟" data-confirm="سيُصفَّر عدّاد التعليقات والتكلفة لكل المستخدمين." data-yes="تصفير التكاليف" data-kind="danger" data-toast="تم تصفير كل التكاليف"><button class="hb">{{ic('reset')}}تصفير التكاليف</button></form>{% endif %}</div>
+{% if stats.comments %}<form method="post" action="/{{admin}}/reset-cost-all" data-title="تصفير كل التكاليف؟" data-confirm="سيُصفَّر عدّاد التعليقات والتكلفة لكل المستخدمين، ويبقى محسوبًا في «منذ البداية» أعلى الصفحة." data-yes="تصفير التكاليف" data-kind="danger" data-toast="تم تصفير كل التكاليف"><button class="hb">{{ic('reset')}}تصفير التكاليف</button></form>{% endif %}</div>
 <div class="ratio" aria-hidden="true"><i style="width:{{ stats.active * 100 / stats.users }}%"></i></div>
 <div class="rl"><span><b>{{stats.active}}</b> يعمل</span><span><b>{{stats.users - stats.active}}</b> موقوف</span></div>
 </div>
 <dl class="kp">
 <div><dt>أجهزة مربوطة</dt><dd>{{stats.bound}}</dd></div>
-<div><dt>تعليقات مكتوبة</dt><dd>{{ '{:,}'.format(stats.comments) }}</dd></div>
-<div><dt>التكلفة</dt><dd>${{ '%.2f'|format(stats.cost) }}</dd></div>
+<div><dt>تعليقات مكتوبة</dt><dd>{{ '{:,}'.format(stats.comments) }}</dd><small class="kpa">منذ البداية <bdi dir="ltr">{{ '{:,}'.format(stats.all_comments) }}</bdi></small></div>
+<div><dt>التكلفة</dt><dd>${{ '%.2f'|format(stats.cost) }}</dd><small class="kpa">منذ البداية <bdi dir="ltr">${{ '%.2f'|format(stats.all_cost) }}</bdi></small></div>
 <div><dt>الرتويت</dt><dd>{{ '{:,}'.format(stats.repost) }}</dd></div>
 <div><dt>الإعجاب</dt><dd>{{ '{:,}'.format(stats.like) }}</dd></div>
 <div><dt>المرجعية</dt><dd>{{ '{:,}'.format(stats.bookmark) }}</dd></div>
@@ -2505,7 +2541,7 @@ f.addEventListener('change',sync);sync()})();</script>{% endif %}
 <form id="sh-pay" method="post" action="/{{admin}}/code/pay" data-toast="تم تغيير نوع الدفع"><input type="hidden" name="id"><input type="hidden" name="pay" value="prepaid"><button>{{ic('key')}}<span id="sh-pay-t">تحويل إلى دفع مسبق</span></button></form>
 <button type="button" id="sh-bal">{{ic('plus')}}<span>إضافة رصيد<small>تجريبي أو شحن، ويُخصم حسب أسعار الخدمات</small></span></button>
 <button type="button" id="sh-pw">{{ic('lock')}}<span>تعيين كلمة سر جديدة<small>لصاحب حساب نسي كلمة سره</small></span></button>
-<form id="sh-reset" method="post" action="/{{admin}}/code/reset-cost" data-title="تصفير التكلفة؟" data-confirm="سيُصفَّر عدّاد التعليقات والتكلفة لهذا المستخدم فقط." data-yes="تصفير التكلفة" data-kind="danger" data-toast="تم تصفير التكلفة"><input type="hidden" name="id"><button>{{ic('reset')}}تصفير التكلفة</button></form>
+<form id="sh-reset" method="post" action="/{{admin}}/code/reset-cost" data-title="تصفير التكلفة؟" data-confirm="سيُصفَّر عدّاد التعليقات والتكلفة لهذا المستخدم فقط، ويبقى محسوبًا في «منذ البداية» أعلى الصفحة." data-yes="تصفير التكلفة" data-kind="danger" data-toast="تم تصفير التكلفة"><input type="hidden" name="id"><button>{{ic('reset')}}تصفير التكلفة</button></form>
 <hr>
 <form class="del" method="post" action="/{{admin}}/code/delete" data-title="حذف المستخدم؟" data-confirm="يُحذف رمزه نهائيًا وتُفقد إحصائياته، ولا يمكن التراجع." data-yes="حذف المستخدم" data-kind="danger" data-toast="تم حذف المستخدم"><input type="hidden" name="id"><button>{{ic('trash')}}حذف المستخدم</button></form>
 </div></dialog>
@@ -2747,6 +2783,8 @@ def dashboard():
              "cost": round(sum(r["usage"]["cost"] for r in rows), 2),
              "repost": sum(r["acts"]["repost"] for r in rows), "like": sum(r["acts"]["like"] for r in rows),
              "bookmark": sum(r["acts"]["bookmark"] for r in rows)}
+    since_start = lifetime_totals(usage_data)
+    stats["all_comments"], stats["all_cost"] = since_start["comments"], since_start["cost"]
     notices = notice_rows(codes)
     messages = support_rows(codes)
     move = load_move()

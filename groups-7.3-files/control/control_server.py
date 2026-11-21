@@ -281,7 +281,7 @@ def republish_moves_in_background() -> None:
 
 # ---- «نسخة احتياطية»: all the server's data in one file, encrypted with the control panel's password ----
 BACKUP_FILES = ("secrets.json", "codes.json", "keys.json", "usage.json", "notices.json", "acts.json", "support.json",
-                "move.json", "prices.json", "welcomed.json", "lifetime.json", "server.crt", "server.key")
+                "move.json", "prices.json", "welcomed.json", "lifetime.json", "pace.json", "server.crt", "server.key")
 BACKUP_MAGIC = b"GGBAK1"
 
 
@@ -510,6 +510,26 @@ def take_welcome(codes: list, device: str) -> float:
     phones.append(key)
     write_private_json(WELCOMED_PATH, {"devices": phones[-100000:]})
     return amount
+
+
+# «سرعة التنفيذ»: how long the app takes to type a whole comment, and how long it waits between one button press and
+# the next, in seconds (each time a number at random between «من» and «إلى»). Set in the users tab, given to every
+# app with each task's start, so every user's next task goes at it.
+PACE_PATH = DATA_DIR / "pace.json"
+PACE_DEFAULTS = {"typing": (3.0, 8.0), "gap": (0.3, 1.0)}
+PACE_LIMITS = {"typing": 60.0, "gap": 10.0}
+
+
+def load_pace() -> dict:
+    data = read_private_json(PACE_PATH) or {}
+    out = {}
+    for key, default in PACE_DEFAULTS.items():
+        try:
+            low, high = (round(float(value), 2) for value in data.get(key))
+        except (TypeError, ValueError):
+            low, high = default
+        out[key] = [low, high] if 0 <= low <= high <= PACE_LIMITS[key] else list(default)
+    return out
 
 
 def form_dollars(raw) -> float:
@@ -2263,6 +2283,13 @@ main{padding-bottom:56px}
 <label class="prf prw"><span>رصيد الحساب الجديد</span><input class="fs" name="welcome" dir="ltr" inputmode="decimal" autocomplete="off" value="{{ '%g'|format(welcome) }}"></label>
 <p class="mut prh">يُضاف تلقائيًا لكل من ينشئ حسابًا جديدًا في التطبيق، مرة واحدة لكل جوال. و0 يوقفه.</p>
 <button class="btn wide" style="margin-top:14px">حفظ الأسعار</button></form></details>
+<details class="card prc"><summary><span class="prc-h">{{ic('sort')}}<b>سرعة التنفيذ</b></span><span class="prc-s"><span>كتابة التعليق <bdi dir="ltr">{{ '%g'|format(pace.typing[0]) }}–{{ '%g'|format(pace.typing[1]) }}</bdi> ث</span><span>بين الأزرار <bdi dir="ltr">{{ '%g'|format(pace.gap[0]) }}–{{ '%g'|format(pace.gap[1]) }}</bdi> ث</span></span>{{ic('chev')}}</summary>
+<form method="post" action="/{{admin}}/pace" data-toast="تم حفظ سرعة التنفيذ"><p class="mut">بالثواني، ويختار التطبيق كل مرة رقمًا عشوائيًا بين «من» و«إلى». تُطبَّق على كل المستخدمين من مهمتهم التالية.</p>
+<p class="l">مدة كتابة التعليق كله</p>
+<div class="prg"><label class="prf"><span>من</span><input class="fs" name="typing_from" dir="ltr" inputmode="decimal" autocomplete="off" value="{{ '%g'|format(pace.typing[0]) }}"></label><label class="prf"><span>إلى</span><input class="fs" name="typing_to" dir="ltr" inputmode="decimal" autocomplete="off" value="{{ '%g'|format(pace.typing[1]) }}"></label></div>
+<p class="l">بين نقر كل زر والذي بعده</p>
+<div class="prg"><label class="prf"><span>من</span><input class="fs" name="gap_from" dir="ltr" inputmode="decimal" autocomplete="off" value="{{ '%g'|format(pace.gap[0]) }}"></label><label class="prf"><span>إلى</span><input class="fs" name="gap_to" dir="ltr" inputmode="decimal" autocomplete="off" value="{{ '%g'|format(pace.gap[1]) }}"></label></div>
+<button class="btn wide" style="margin-top:14px">حفظ سرعة التنفيذ</button></form></details>
 <div class="tb">
 <label class="search">{{ic('search')}}<input id="q" type="search" placeholder="ابحث بالاسم أو الرمز" aria-label="ابحث بالاسم أو الرمز" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search"><button type="button" class="qx" id="qx" aria-label="مسح البحث" hidden>{{ic('x')}}</button></label>
 <button class="btn add" type="button" data-open="nu" aria-label="إضافة مستخدم">{{ic('plus')}}<span>إضافة<span class="wd"> مستخدم</span></span></button>
@@ -2809,7 +2836,7 @@ def dashboard():
         backup_when=seen_text({"last_seen": last_backup}) if last_backup else "",
         owner_link=owner_app_link(request.host), in_owner_app=OWNER_APP_MARK in (request.headers.get("User-Agent") or ""),
         this_host=request.host, relay=MOVE_RELAY.split("//")[-1],
-        prices=load_prices(), welcome=load_welcome(),
+        prices=load_prices(), welcome=load_welcome(), pace=load_pace(),
         app_slots=app_panel(codes), app_dl_link=app_download_link(), app_package=APP_PACKAGE,
         script_live=script_live, script_staged=script_staged, script_next=next_version(highest_published_version()),
         script_floor=highest_published_version(), script_pilot=script_pilot, script_pilot_ids=pilot_ids,
@@ -3102,6 +3129,30 @@ def prices_save():
     save_prices(prices, None if welcome is None else round(welcome, 2))
     flash("ok", "حُفظت الأسعار. تُحسب بها الخدمات من الآن، وما حُسب قبلها يبقى كما هو. "
                 f"رصيد الحساب الجديد: {money(load_welcome())}.")
+    return redirect(f"/{ADMIN}")
+
+
+@app.post(f"/{ADMIN}/pace")
+def pace_save():
+    """«سرعة التنفيذ»: comment typing and the wait between buttons, from / to, in seconds."""
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    pace = {}
+    for key, name in (("typing", "كتابة التعليق"), ("gap", "الانتظار بين الأزرار")):
+        low, high = form_dollars(request.form.get(key + "_from")), form_dollars(request.form.get(key + "_to"))
+        if low < 0 or high < 0 or low != low or high != high:          # (and not «nan»)
+            flash("bad", f"اكتب {name} بالثواني أرقامًا، مثل {'3 و8' if key == 'typing' else '0.3 و1'}.")
+            return redirect(f"/{ADMIN}")
+        if low > high:
+            flash("bad", f"في {name}: «من» يجب ألا يكون أكبر من «إلى».")
+            return redirect(f"/{ADMIN}")
+        if high > PACE_LIMITS[key]:
+            flash("bad", f"{name} حتى {PACE_LIMITS[key]:g} ثانية على الأكثر.")
+            return redirect(f"/{ADMIN}")
+        pace[key] = [round(low, 2), round(high, 2)]
+    write_private_json(PACE_PATH, {"version": 1, **pace})
+    flash("ok", f"حُفظت سرعة التنفيذ: كتابة التعليق من {pace['typing'][0]:g} إلى {pace['typing'][1]:g} ثانية، وبين الأزرار من "
+                f"{pace['gap'][0]:g} إلى {pace['gap'][1]:g} ثانية. تُطبَّق على كل المستخدمين من مهمتهم التالية.")
     return redirect(f"/{ADMIN}")
 
 
@@ -4020,7 +4071,8 @@ def api_task_start():
     balance = balance_of(row)
     if pay_of(row) == PAY_PREPAID and paid and balance + 1e-9 < min(paid):
         return api_err(f"رصيدك {money(balance)} لا يكفي لبدء مهمة جديدة. اطلب من صاحب البرنامج شحن رصيدك.")
-    return api_ok(**{"pass": make_task_pass(row["id"]), "pay": pay_of(row), "balance": round(balance, 4), "prices": prices})
+    return api_ok(**{"pass": make_task_pass(row["id"]), "pay": pay_of(row), "balance": round(balance, 4), "prices": prices,
+                     "pace": load_pace()})
 
 
 @app.post(f"/{API}/charge")

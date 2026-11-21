@@ -5229,7 +5229,7 @@ def apply_actions_on_path(page, path: str, actions: list[str]) -> dict[str, str]
             outcome[action] = "مفعّل مسبقًا — تم التجاوز"
             continue
         if pressed:
-            page.wait_for_timeout(random.randint(80, 200))
+            page.wait_for_timeout(pace_ms("gap"))   # (between one button and the next: «سرعة التنفيذ»)
         pressed += 1
         try:
             blocker = press(action)
@@ -6269,23 +6269,49 @@ def open_reply_composer(page, path: str) -> None:
     raise PlaywrightTimeoutError("tweetTextarea_0 not visible after retries")
 
 
-# A reply is typed into the box a letter at a time at an uneven pace, not pasted whole. The whole comment takes
-# TYPING_TOTAL_MS (between the two, at random), whatever its length. (It was 5 to 10 seconds: the slowest part of a
-# comment.)
-TYPING_TOTAL_MS = (1500, 3000)
+# «سرعة التنفيذ» (set in the control panel, given with each task's start): how long typing the whole comment takes,
+# and the wait between one button press and the next, in seconds, each time at random between the two. These are
+# used when no control server says otherwise.
+PACE_DEFAULTS = {"typing": (3.0, 8.0), "gap": (0.3, 1.0)}
+PACE_LIMITS = {"typing": 60.0, "gap": 10.0}
+_pace = dict(PACE_DEFAULTS)
+
+
+def pace_update(answer) -> None:
+    pace = answer.get("pace") if isinstance(answer, dict) else None
+    if not isinstance(pace, dict):
+        return
+    for key, limit in PACE_LIMITS.items():
+        try:
+            low, high = (float(value) for value in pace.get(key))
+        except (TypeError, ValueError):
+            continue
+        if 0 <= low <= high <= limit:
+            _pace[key] = (low, high)
+
+
+def pace_ms(key: str) -> int:
+    low, high = _pace.get(key) or PACE_DEFAULTS[key]
+    return int(random.uniform(low, high) * 1000)
+
+
+# A reply is typed into the box a letter at a time at an uneven pace, not pasted whole. The whole comment takes the
+# panel's typing time (see pace_ms), whatever its length.
 TYPE_STEPS_PER_CALL = 20        # (in the app the typing is done by the page itself, this many letters a call)
 
 
 def typing_plan(text: str) -> list[list]:
     """[letter, milliseconds to wait after it] in order, paced so the whole comment is typed
-    over TYPING_TOTAL_MS whatever its length (the letters still appear one after another)."""
+    over the panel's typing time whatever its length (the letters still appear one after another)."""
     steps: list[list] = [[ch, 0] for ch in text]
     if not steps:
         return steps
-    total = random.randint(*TYPING_TOTAL_MS)    # total time to type the whole comment, in ms
-    share = total / len(steps)
-    for step in steps:
-        step[1] = max(4, int(share * random.uniform(0.6, 1.4)))
+    total = pace_ms("typing")                   # total time to type the whole comment, in ms
+    weights = [random.uniform(0.6, 1.4) for _ in steps]
+    scale = total / sum(weights)                # (uneven letter by letter, the whole exactly that long)
+    for step, weight in zip(steps, weights):
+        step[1] = max(4, int(weight * scale))
+    steps[-1][1] += max(0, total - sum(step[1] for step in steps))     # (what the rounding left out)
     return steps
 
 
@@ -6508,7 +6534,7 @@ def publish_reply(page, text: str, path: str) -> tuple[bool, str]:
     if blocked:
         return False, blocked
     insert_reply_text(page, text)
-    page.wait_for_timeout(250)
+    page.wait_for_timeout(pace_ms("gap"))               # (before «send»)
     click_reply_send(page)
     snippet = text[:24]
     try:
@@ -6732,7 +6758,7 @@ def _execute_comment_actions(page, items: list[dict], task_actions: list[str], a
                     result["actions"]["comment"] = "لم يُرجع النموذج تعليقًا صالحًا"
                 else:
                     result["comment"] = comment
-                    page.wait_for_timeout(300)
+                    page.wait_for_timeout(pace_ms("gap"))         # (before the reply button)
                     posted, detail = publish_reply(page, comment, target_path)
                     result["actions"]["comment"] = "تم التنفيذ" if posted else (detail or "أُرسل الطلب لكن تعذر تأكيد الحالة")
         except RuntimeError as exc:
@@ -14344,6 +14370,7 @@ def task_may_start(account: str, services: list) -> str:
         shown = ("\u2066−$" if balance < 0 else "\u2066$") + (f"{abs(balance):.2f}" if whole else f"{abs(balance):.4f}".rstrip("0")) + "\u2069"
         return f"رصيدك {shown} لا يكفي لبدء مهمة جديدة. اطلب من صاحب البرنامج شحن رصيدك."
     billing_update(answer)
+    pace_update(answer)
     forget_comments_usage()
     with _task_passes_lock:
         _task_passes[account] = str(answer.get("pass") or "")

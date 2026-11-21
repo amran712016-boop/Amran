@@ -5182,6 +5182,119 @@ def press_action_button(page, path: str, status_id: str, action: str) -> str:
 UNCONFIRMED = "أُرسل الطلب لكن تعذر تأكيد الحالة"
 
 
+# X's own answer to each press. When X refuses (a temporary restriction after many actions), its page still turns the
+# button on for a moment, then puts it back: the button alone would say «done». So the answer to X's request is read
+# (FavoriteTweet, CreateRetweet, CreateBookmark, CreateTweet); when it is not seen, the button must stay on.
+ACTION_REQUESTS = {"like": "FavoriteTweet", "repost": "CreateRetweet", "bookmark": "CreateBookmark", "comment": "CreateTweet"}
+X_LIMITED = "رفض X التفاعل (تقييد مؤقت)"
+X_UNDONE = "ألغى X التفاعل بعد النقر (تقييد مؤقت)"
+X_REPLY_LIMITED = "رفض X الرد (تقييد مؤقت)"
+X_LIMIT_CODES = {88, 185, 226, 326, 344, 348}       # rate limit, daily limit, «looks automated», locked…
+X_ALREADY_CODES = {139, 327}                        # already liked / already reposted
+X_LIMIT_WORDS = re.compile(r"rate.?limit|over the .{0,16}limit|too many|automated|try again later|temporar", re.I)
+
+
+def x_answer(request) -> str:
+    """"ok", "already", "limited", "error", or "" when the answer cannot be read."""
+    try:
+        response = request.response()
+    except Exception:
+        response = None
+    if response is None:
+        return ""
+    status = int(getattr(response, "status", 0) or 0)
+    if status in (420, 429):
+        return "limited"
+    try:
+        body = response.json()
+    except Exception:
+        body = None
+    errors = body.get("errors") if isinstance(body, dict) else None
+    if errors:
+        rows = [row for row in errors if isinstance(row, dict)]
+        codes = {int(row.get("code")) for row in rows if str(row.get("code", "")).lstrip("-").isdigit()}
+        words = " ".join(str(row.get("message") or "") for row in rows)
+        if codes & X_ALREADY_CODES:
+            return "already"
+        if codes & X_LIMIT_CODES or X_LIMIT_WORDS.search(words):
+            return "limited"
+        return "error"
+    if status >= 400:
+        return "error"
+    return "ok" if 200 <= status < 300 or (isinstance(body, dict) and body.get("data")) else ""
+
+
+class XAnswers:
+    """X's answers to the presses on this page, kept as they arrive (read later: reading one inside the event would
+    wait on the page from its own messages)."""
+
+    def __init__(self, page):
+        self.page = page
+        self.got: list = []
+        self.read: dict[int, str] = {}
+        self.listening = False
+        try:
+            page.on("requestfinished", self._finished)
+            self.listening = True
+        except Exception:
+            pass
+
+    def _finished(self, request) -> None:
+        address = str(getattr(request, "url", "") or "")
+        if "/graphql/" in address and any("/" + name in address for name in ACTION_REQUESTS.values()):
+            self.got.append(request)
+
+    def mark(self) -> int:
+        return len(self.got)
+
+    def answer(self, action: str, since: int) -> str:
+        """X's answer to this action's request sent since `since`, or "" while none has come."""
+        name = "/" + ACTION_REQUESTS.get(action, "-")
+        for index in range(since, len(self.got)):
+            request = self.got[index]
+            if name in str(getattr(request, "url", "") or ""):
+                if index not in self.read:
+                    self.read[index] = x_answer(request)
+                if self.read[index]:
+                    return self.read[index]
+        return ""
+
+    @property
+    def heard(self) -> bool:
+        """Whether X's answers are seen on this page at all (else only the button can tell)."""
+        return any(self.read.values())
+
+    def close(self) -> None:
+        if self.listening:
+            try:
+                self.page.remove_listener("requestfinished", self._finished)
+            except Exception:
+                pass
+
+
+def confirm_press(page, answers: XAnswers, since: int, action: str, status_id: str, seconds: float = 4.0) -> str:
+    """What came of one press: X's own answer when it is seen; else the button, on and still on a moment later (on,
+    then back off: X refused it)."""
+    deadline = time.monotonic() + seconds
+    on_since = None
+    while True:
+        said = answers.answer(action, since)
+        if said:
+            return {"ok": "تم التنفيذ", "already": "تم التنفيذ", "limited": X_LIMITED}.get(said, "تعذر التنفيذ: رفضه X")
+        row = (read_action_state(page, status_id, [action]) or {}).get(action) or {}
+        now = time.monotonic()
+        if row.get("on"):
+            on_since = on_since or now
+            if not answers.heard and now - on_since >= 1.5:
+                return "تم التنفيذ"                  # (no answers seen on this page: on for a while is done)
+        elif on_since is not None:
+            trace_click(f"{action} عاد الزر غير مفعّل بعد النقر: رفضه X")
+            return X_UNDONE
+        if now >= deadline:
+            return "تم التنفيذ" if on_since is not None else UNCONFIRMED
+        page.wait_for_timeout(120)
+
+
 def buttons_when_loaded(page, status_id: str, actions: list[str], seconds: float = 8.0) -> dict | None:
     """The tweet's buttons as soon as every one asked for is there (on, or off with its place to press); after
     `seconds`, whatever was read last. None when the tweet is not on the page."""
@@ -5230,15 +5343,14 @@ def apply_actions_on_path(page, path: str, actions: list[str]) -> dict[str, str]
                 pass
         return ""
 
-    def turned_on(action: str, seconds: float) -> bool:
-        deadline = time.monotonic() + seconds
-        while time.monotonic() < deadline:
-            again = read_action_state(page, status_id, [action]) or {}
-            if (again.get(action) or {}).get("on"):
-                return True
-            page.wait_for_timeout(60)
-        return False
+    answers = XAnswers(page)
+    try:
+        return _press_actions(page, path, status_id, actions, state, press, answers)
+    finally:
+        answers.close()
 
+
+def _press_actions(page, path: str, status_id: str, actions: list[str], state: dict, press, answers: XAnswers) -> dict[str, str]:
     outcome: dict[str, str] = {}
     pressed = 0
     for action in actions:
@@ -5250,6 +5362,7 @@ def apply_actions_on_path(page, path: str, actions: list[str]) -> dict[str, str]
             page.wait_for_timeout(pace_ms("gap"))   # (between one button and the next: «سرعة التنفيذ»)
         pressed += 1
         try:
+            since = answers.mark()
             blocker = press(action)
             if blocker == "missing":
                 outcome[action] = "زر الإجراء غير متاح — تم التجاوز"
@@ -5257,7 +5370,7 @@ def apply_actions_on_path(page, path: str, actions: list[str]) -> dict[str, str]
             if blocker:
                 outcome[action] = f"تعذر النقر: الزر مغطى بـ {blocker}"
                 continue
-            outcome[action] = "تم التنفيذ" if turned_on(action, 2.5) else UNCONFIRMED
+            outcome[action] = confirm_press(page, answers, since, action, status_id)
             if outcome[action] == "تم التنفيذ":
                 service_used(action)
             trace_click(f"{action} النتيجة: {outcome[action]}")
@@ -5269,7 +5382,8 @@ def apply_actions_on_path(page, path: str, actions: list[str]) -> dict[str, str]
 
     # Pressed but not seen to turn on: once more, with nothing shown to the user. First a fresh look (it may have
     # gone through, only slowly); still off, it is pressed one more time. A button already on is never pressed:
-    # these buttons switch, and a second press would undo it.
+    # these buttons switch, and a second press would undo it. One X refused is not pressed again (more refused
+    # requests while it restricts the account only make it worse).
     unsure = [action for action in actions if outcome.get(action) == UNCONFIRMED]
     if unsure:
         try:
@@ -5286,12 +5400,15 @@ def apply_actions_on_path(page, path: str, actions: list[str]) -> dict[str, str]
                     service_used(action)
                     trace_click(f"{action} إعادة صامتة: كان قد نُفّذ وتأكد متأخرًا")
                     continue
+                since = answers.mark()
                 blocker = press(action)
                 if blocker:
                     trace_click(f"{action} إعادة صامتة: لم يُضغط ({blocker})")
                     continue
-                if turned_on(action, 4.0):
-                    outcome[action] = "تم التنفيذ"
+                again = confirm_press(page, answers, since, action, status_id, 5.0)
+                if again != UNCONFIRMED:
+                    outcome[action] = again
+                if outcome[action] == "تم التنفيذ":
                     service_used(action)
                 trace_click(f"{action} إعادة صامتة: {outcome[action]}")
             except Exception as exc:
@@ -6542,6 +6659,10 @@ def click_reply_send(page) -> None:
     real_click(enabled.last)
 
 
+REPLY_SHOWN_JS = """(snippet) => [...document.querySelectorAll('article[data-testid="tweet"]')]
+  .some((article) => (article.innerText || "").includes(snippet))"""
+
+
 def publish_reply(page, text: str, path: str) -> tuple[bool, str]:
     blocked = reply_block_reason(page)
     if blocked:
@@ -6553,19 +6674,33 @@ def publish_reply(page, text: str, path: str) -> tuple[bool, str]:
         return False, blocked
     insert_reply_text(page, text)
     page.wait_for_timeout(pace_ms("gap"))               # (before «send»)
-    click_reply_send(page)
-    snippet = text[:24]
+    answers = XAnswers(page)
     try:
-        page.wait_for_function(
-            """(snippet) => [...document.querySelectorAll('article[data-testid="tweet"]')]
-              .some((article) => (article.innerText || "").includes(snippet))""",
-            arg=snippet,
-            timeout=12000,
-        )
-        return True, ""
-    except PlaywrightTimeoutError:
+        since = answers.mark()
+        click_reply_send(page)
+        snippet = text[:24]
+        deadline = time.monotonic() + 12
+        while True:
+            said = answers.answer("comment", since)
+            if said == "ok":
+                return True, ""
+            if said == "limited":
+                return False, X_REPLY_LIMITED
+            if said == "error":
+                return False, reply_block_reason(page) or "رفض X نشر الرد"
+            try:
+                if page.evaluate(REPLY_SHOWN_JS, snippet):
+                    return True, ""
+            except Exception as exc:
+                if browser_closed_error(exc):
+                    raise
+            if time.monotonic() >= deadline:
+                break
+            page.wait_for_timeout(200)
         blocked = reply_block_reason(page)
         return False, blocked or "أُرسل الطلب لكن الرد لم يظهر في الصفحة"
+    finally:
+        answers.close()
 
 
 def comment_failure_text(exc: Exception) -> str:
@@ -6654,6 +6789,7 @@ def _execute_comment_actions(page, items: list[dict], task_actions: list[str], a
     results: list[dict] = []
     total = len(items)
     failures = FailedTweets()
+    limited = LimitedTweets()
     # Where each tweet's result starts in results: going back after a pause drops them from there on.
     starts: dict[int, int] = {}
     if on_progress:
@@ -6802,6 +6938,10 @@ def _execute_comment_actions(page, items: list[dict], task_actions: list[str], a
             on_snapshot(list(results))
         if on_progress:
             on_progress(index + 1, total, "act")
+        back = limited.seen(index, result["actions"])
+        if back is not None:
+            page, index = x_limit_pause(limited, results, starts, back, index, should_stop, on_progress, on_snapshot, total, page)
+            continue
         page.wait_for_timeout(600)
     return results
 
@@ -9873,13 +10013,51 @@ def open_task_tweet(page, url: str, skip_if_on):
 
 
 class TweetsKeptFailing(Exception):
-    """Two tweets in a row would not open a third time in one task, so it stops. results: what it did
-    before (with the two that would not open); at: the number of the tweet it stopped at (from 1)."""
+    """Two tweets in a row would not open a third time in one task (why "open"), or X kept refusing the presses after
+    its pauses (why "limited"), so it stops. results: what it did before; at: the number of the tweet it stopped at
+    (from 1)."""
 
-    def __init__(self, results: list[dict], at: int):
-        super().__init__("تعذّر فتح التغريدات ثلاث مرات")
+    def __init__(self, results: list[dict], at: int, why: str = "open"):
+        super().__init__("تعذّر فتح التغريدات ثلاث مرات" if why == "open" else "X ما زال يرفض التفاعل")
         self.results = results
         self.at = at
+        self.why = why
+
+
+# X refusing every press on two tweets in a row (a temporary restriction): the browser is closed for
+# X_LIMIT_PAUSE_SECONDS, then the task goes back to the first of the two and goes on. After X_LIMIT_PAUSES pauses
+# in one task, the next time it stops.
+X_LIMIT_PAUSE_SECONDS = 240
+X_LIMIT_PAUSES = 3
+X_REFUSED_NOTES = (X_LIMITED, X_UNDONE, X_REPLY_LIMITED, "الحساب وصل حد الردود مؤقتًا")
+
+
+class LimitedTweets:
+    def __init__(self):
+        self.last: int | None = None
+        self.pauses = 0
+
+    def seen(self, index: int, notes: dict) -> int | None:
+        """This tweet's outcome. Returns the first of two refused in a row (to go back to after a pause), or None.
+        A tweet with nothing pressed (all on already…) says nothing either way."""
+        notes = [str(note) for note in (notes or {}).values()]
+        refused = any(note in X_REFUSED_NOTES for note in notes)
+        if "تم التنفيذ" in notes:
+            self.last = None
+            return None
+        if not refused:
+            return None
+        before, self.last = self.last, index
+        if before is None:
+            return None
+        self.last = None
+        return before
+
+    def next_pause(self) -> int | None:
+        if self.pauses >= X_LIMIT_PAUSES:
+            return None
+        self.pauses += 1
+        return X_LIMIT_PAUSE_SECONDS
 
 
 class FailedTweets:
@@ -10102,6 +10280,7 @@ def apply_actions_immediately(page, url: str, actions: list[str]) -> dict[str, s
 COMMENT_RETRY_SAFE = (
     "تعذر فتح التغريدة", "تعذر العثور على المنشور", "لم يُرجع النموذج تعليقًا صالحًا", "لم يظهر مربع كتابة الرد",
     "زر النشر بقي معطّلًا", "لم تُفتح التغريدة في الوقت المناسب", "الحساب وصل حد الردود مؤقتًا",
+    "رفض X الرد (تقييد مؤقت)",
 )
 
 
@@ -10153,10 +10332,31 @@ def failed_retry_count(job: dict) -> int:
     return len(failed_retry_items(job))
 
 
+def x_limit_pause(limited: LimitedTweets, results: list, starts: dict, back: int, index: int, should_stop, on_progress,
+                  on_snapshot, total: int, page):
+    """X refused two tweets in a row: close the browser for a while, then go back to the first of them (what was
+    recorded from it on goes). Returns (the page to go on with, the index to go on from). After the last pause, the
+    task stops (TweetsKeptFailing)."""
+    seconds = limited.next_pause()
+    if seconds is None:
+        raise TweetsKeptFailing(results, index + 1, "limited")
+    trace_click(f"X رفض التفاعل في تغريدتين متتاليتين: إغلاق المتصفح {seconds // 60} دقائق ثم المتابعة")
+    new_page = pause_after_failures(should_stop, on_progress, total, None, seconds, "limited")
+    if new_page is None:
+        return page, index                          # (stopped meanwhile, or no reopening here: the loop sees)
+    del results[starts[back]:]
+    if on_snapshot:
+        on_snapshot(list(results))
+    if on_progress:
+        on_progress(back, total, "act")
+    return new_page, back - 1
+
+
 def visit_and_apply(page, items: list[dict], task_actions: list[str], on_progress=None, on_snapshot=None, should_stop=None, account: str = "") -> list[dict]:
     results: list[dict] = []
     total = len(items)
     failures = FailedTweets()
+    limited = LimitedTweets()
     # Where each tweet's result starts in results: going back after a pause drops them from there on.
     starts: dict[int, int] = {}
     if on_progress:
@@ -10265,6 +10465,9 @@ def visit_and_apply(page, items: list[dict], task_actions: list[str], on_progres
             on_snapshot(list(results))
         if on_progress:
             on_progress(index + 1, total, "act")
+        back = limited.seen(index, result["actions"])
+        if back is not None:
+            page, index = x_limit_pause(limited, results, starts, back, index, should_stop, on_progress, on_snapshot, total, page)
     return results
 
 
@@ -10448,6 +10651,13 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
             publish_job(job_id, phase="collect", collected=0, requested=0, message=f"يبحث عن التغريدة المحددة. الخطوة {done}، وما زال يحمّل الأقدم.")
         elif phase == "act":
             publish_job(job_id, phase="act", done=done, collected=done, requested=requested, message=f"تنفيذ {done} من {requested}.")
+        elif phase == "limited":
+            # X refused every press on two tweets in a row (a temporary restriction): done = seconds left.
+            if done > 0:
+                publish_job(job_id, phase="act", message=(
+                    f"X رفض التفاعل في تغريدتين متتاليتين (تقييد مؤقت)، فأُغلق المتصفح. المتابعة منهما بعد {done // 60}:{done % 60:02d}."))
+            else:
+                publish_job(job_id, phase="act", message="انتهى الانتظار. إعادة فتح المتصفح والمتابعة من التغريدتين…")
         elif phase in ("pause", "pause_again"):
             # Two tweets in a row would not open: the browser is closed, done = seconds left. The second
             # time ("pause_again") is the last: a third time stops the task.
@@ -10511,6 +10721,7 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
             else:
                 publish_job(job_id, phase="act", requested=len(items), collected=len(items), done=len(prefix), message=f"استئناف التنفيذ من {len(prefix)} من {len(items)}.")
             stopped_at = 0   # the tweet the task stopped at when two kept failing to open
+            stop_why = "open"
             if len(prefix) >= len(items):
                 results = prefix
             else:
@@ -10524,7 +10735,7 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
                     )
 
                 def on_act(done: int, requested: int, phase: str) -> None:
-                    if phase in ("pause", "pause_again"):
+                    if phase in ("pause", "pause_again", "limited"):
                         on_progress(done, requested, phase)
                     else:
                         on_progress(len(prefix) + done, len(items), "act")
@@ -10538,15 +10749,18 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
                     else:
                         fresh = visit_and_apply(page, pending, actions, on_act, snapshot, lambda: job_cancelled(job_id), profile_key(auth_token))
                 except TweetsKeptFailing as stop:
-                    fresh, stopped_at = stop.results, len(prefix) + stop.at
+                    fresh, stopped_at, stop_why = stop.results, len(prefix) + stop.at, getattr(stop, "why", "open")
                 results = prefix + fresh
                 refine_collected_links(fresh)
             if stopped_at:
                 publish_job(
                     job_id, status="done", success=False, phase="act", done=len(results), requested=len(items),
                     collected=len(items), results=results, items=items, actions=actions, username=group_name,
-                    message=(f"توقفت المهمة عند التغريدة {stopped_at} من {len(items)}: تعذّر فتح تغريدتين متتاليتين ثلاث مرات "
-                             f"(بعد انتظار ثلاث دقائق ونصف ثم دقيقة)، والأرجح أن X يمنع هذا الحساب من فتح التغريدات الآن."),
+                    message=(f"توقفت المهمة عند التغريدة {stopped_at} من {len(items)}: " + (
+                        f"X ما زال يرفض التفاعل لهذا الحساب بعد {X_LIMIT_PAUSES} انتظارات ({X_LIMIT_PAUSE_SECONDS // 60} دقائق كل مرة). "
+                        "أعد المحاولة لاحقًا من «إعادة المحاولة للفاشلة»." if stop_why == "limited" else
+                        "تعذّر فتح تغريدتين متتاليتين ثلاث مرات (بعد انتظار ثلاث دقائق ونصف ثم دقيقة)، "
+                        "والأرجح أن X يمنع هذا الحساب من فتح التغريدات الآن.")),
                 )
                 return
             if job_cancelled(job_id):

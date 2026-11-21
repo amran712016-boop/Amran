@@ -9434,10 +9434,87 @@ def tweet_flags_from_api(data, status_id: str) -> dict | None:
     return None
 
 
+# «الانتقال داخل الصفحة»: once the page is on a tweet, the next tweet is opened inside X's own page, as when a
+# person taps a tweet there (its address changes and X draws the tweet), instead of loading X anew for each one:
+# quicker, and lighter on the phone. It goes on only once the tweet before has left the page and the new one is
+# there, so nothing is ever pressed on the one before. When the new one does not come in time, it is loaded in
+# full as before; two misses in a row and the task loads each tweet in full from then on. Every
+# IN_PAGE_FULL_EVERY tweets one is loaded in full anyway, so a page kept for hours does not grow heavy.
+IN_PAGE_MOVES = True
+IN_PAGE_WAIT_SECONDS = 7
+IN_PAGE_FULL_EVERY = 30
+_in_page: dict[int, dict] = {}              # id(page) -> {"since_full", "missed", "off"}
+
+MOVE_IN_PAGE_JS = r"""
+({path, statusId}) => {
+  if (!/(^|\.)(x|twitter)\.com$/.test(location.hostname)) return "elsewhere";
+  if (!/\/status\/\d+/.test(location.pathname)) return "not-on-a-tweet";
+  if (location.pathname.includes("/status/" + statusId)) return "same";
+  if (document.querySelector('[role="dialog"], [data-testid="sheetDialog"]')) return "dialog";
+  const articles = [...document.querySelectorAll('article[data-testid="tweet"]')];
+  if (!articles.length) return "no-tweet";
+  window.__ggBefore = new WeakSet(articles);          // the tweet before (and its replies): none may be pressed
+  const state = {key: Math.random().toString(36).slice(2, 8), state: undefined, usr: null,
+                 idx: history.state && typeof history.state.idx === "number" ? history.state.idx + 1 : 0};
+  history.pushState(state, "", path);
+  window.dispatchEvent(new PopStateEvent("popstate", {state}));
+  return "ok";
+}
+"""
+
+MOVED_STATE_JS = r"""
+(statusId) => {
+  const before = window.__ggBefore;
+  const articles = [...document.querySelectorAll('article[data-testid="tweet"]')];
+  if (before && articles.some((article) => before.has(article))) return "before";
+  return articles.some((article) => [...article.querySelectorAll('a[href*="/status/"]')]
+    .some((node) => (node.getAttribute("href") || "").includes("/status/" + statusId))) ? "ready" : "wait";
+}
+"""
+
+
+def move_in_page(page, status_id: str, canonical: str) -> bool:
+    """Start opening this tweet inside the page now on X (True), or say it is to be loaded in full (False)."""
+    if not IN_PAGE_MOVES or not status_id:
+        return False
+    state = _in_page.setdefault(id(page), {"since_full": 0, "missed": 0, "off": False})
+    if state["off"]:
+        return False
+    if state["since_full"] >= IN_PAGE_FULL_EVERY:
+        state["since_full"] = 0                     # (this one in full: the page starts light again)
+        return False
+    path = canonical if re.fullmatch(r"/[A-Za-z0-9_]{1,15}/status/\d{6,25}", canonical or "") \
+        else f"/i/web/status/{status_id}"
+    try:
+        return page.evaluate(MOVE_IN_PAGE_JS, {"path": path, "statusId": status_id}) == "ok"
+    except Exception:
+        return False
+
+
+def in_page_moved(page, shown: bool) -> None:
+    state = _in_page.setdefault(id(page), {"since_full": 0, "missed": 0, "off": False})
+    if shown:
+        state["since_full"] += 1
+        state["missed"] = 0
+        return
+    state["missed"] += 1
+    if state["missed"] >= 2 and not state["off"]:
+        state["off"] = True
+        trace_click("الانتقال داخل الصفحة لم ينجح مرتين متتاليتين: كل تغريدة تُحمَّل كاملة في باقي المهمة")
+
+
 def open_status_page(page, url: str, skip_if_on: list[str] | None = None) -> tuple[str | None, str]:
     """Open a tweet. With skip_if_on, return (path, "already_on") the moment the
     tweet's buttons show every listed action already on, without waiting for the
-    rest of the page to load."""
+    rest of the page to load. Inside the page already on X when it can (see move_in_page)."""
+    note = {"fell_back": False}
+    opened, reason = _open_status_page(page, url, skip_if_on, note)
+    if note["fell_back"] and opened:
+        in_page_moved(page, False)          # (a miss: the move did not show a tweet that is there; a deleted one is not)
+    return opened, reason
+
+
+def _open_status_page(page, url: str, skip_if_on, note: dict) -> tuple[str | None, str]:
     match = re.search(r"status/(\d{6,25})", url or "")
     status_id = match.group(1) if match else ""
     canonical = normalize_status_path(url) or ""
@@ -9462,26 +9539,56 @@ def open_status_page(page, url: str, skip_if_on: list[str] | None = None) -> tup
         if "/graphql/" in address and ("TweetDetail" in address or "TweetResultByRestId" in address):
             replies.append(request)
 
+    def read_replies():
+        flags = api_flags
+        while replies and flags is None:
+            request = replies.pop(0)
+            try:
+                response = request.response()
+                flags = tweet_flags_from_api(response.json(), status_id) if response else None
+            except Exception:
+                flags = None
+            if flags is not None and os.environ.get("COLLECT_DEBUG"):
+                print(f"tweet {status_id} api state: {flags}", flush=True)
+        return flags
+
     if quick and status_id:
         page.on("requestfinished", on_finished)
     try:
-        try:
-            page.goto(target, wait_until="commit" if quick else "domcontentloaded", timeout=20_000)
-        except Exception:
-            return None, "fail"
+        moved = move_in_page(page, status_id, canonical)
+        if moved:
+            # Inside the page: on only once the tweet before has left it and this one is there; else in full.
+            shown = ""
+            limit = time.monotonic() + IN_PAGE_WAIT_SECONDS
+            while time.monotonic() < limit:
+                if quick and status_id:
+                    api_flags = read_replies()
+                    if api_flags is not None and all(api_flags.get(name) for name in quick):
+                        in_page_moved(page, True)
+                        return canonical or f"/i/web/status/{status_id}", "already_on"
+                try:
+                    shown = page.evaluate(MOVED_STATE_JS, status_id) or ""
+                except Exception:
+                    shown = ""
+                    break
+                if shown == "ready":
+                    break
+                page.wait_for_timeout(120)
+            moved = shown == "ready"
+            if moved:
+                in_page_moved(page, True)
+            else:
+                note["fell_back"] = True
+        if not moved:
+            try:
+                page.goto(target, wait_until="commit" if quick else "domcontentloaded", timeout=20_000)
+            except Exception:
+                return None, "fail"
         revealed = False
         deadline = time.monotonic() + (12 if quick else 8)
         while time.monotonic() < deadline:
             if quick and status_id:
-                while replies and api_flags is None:
-                    request = replies.pop(0)
-                    try:
-                        response = request.response()
-                        api_flags = tweet_flags_from_api(response.json(), status_id) if response else None
-                    except Exception:
-                        api_flags = None
-                    if api_flags is not None and os.environ.get("COLLECT_DEBUG"):
-                        print(f"tweet {status_id} api state: {api_flags}", flush=True)
+                api_flags = read_replies()
                 if api_flags is not None and all(api_flags.get(name) for name in quick):
                     return canonical or f"/i/web/status/{status_id}", "already_on"
                 try:

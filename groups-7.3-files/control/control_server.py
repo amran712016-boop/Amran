@@ -281,7 +281,7 @@ def republish_moves_in_background() -> None:
 
 # ---- «نسخة احتياطية»: all the server's data in one file, encrypted with the control panel's password ----
 BACKUP_FILES = ("secrets.json", "codes.json", "keys.json", "usage.json", "notices.json", "acts.json", "support.json",
-                "move.json", "prices.json", "welcomed.json", "lifetime.json", "pace.json", "server.crt", "server.key")
+                "move.json", "prices.json", "welcomed.json", "lifetime.json", "pace.json", "history.json", "server.crt", "server.key")
 BACKUP_MAGIC = b"GGBAK1"
 
 
@@ -571,6 +571,7 @@ def record_comment(code_id: str, account: str, name: str, price: float = COST_PE
         if name:
             who["name"] = name[:40]
         write_private_json(USAGE_PATH, usage)
+        history_add({"comment": 1})
 
 
 def record_actions(code_id: str, items: list, prices: dict) -> float:
@@ -866,6 +867,28 @@ def load_acts() -> dict:
     return data if isinstance(data, dict) else {}
 
 
+# «الرسم البياني»: the activity of all the users together, hour by hour (kept HISTORY_HOURS), from the day this server
+# started keeping it: reposts, likes and bookmarks as they grow in the apps' reports, comments as they are written.
+HISTORY_PATH = DATA_DIR / "history.json"
+HISTORY_HOURS = 24 * 90
+HISTORY_KEYS = ("repost", "like", "bookmark", "comment")
+
+
+def history_add(grown: dict) -> None:
+    """(Under LOCK.) Add to this hour's counts."""
+    if not any(int(grown.get(name) or 0) for name in HISTORY_KEYS):
+        return
+    data = read_private_json(HISTORY_PATH) or {}
+    hours = data.get("hours") if isinstance(data.get("hours"), dict) else {}
+    key = str(int(time.time() // 3600))
+    row = (list(hours.get(key)) if isinstance(hours.get(key), list) else []) + [0] * 4
+    hours[key] = [int(row[i] or 0) + int(grown.get(name) or 0) for i, name in enumerate(HISTORY_KEYS)]
+    if len(hours) > HISTORY_HOURS:
+        for old in sorted(hours, key=lambda item: int(item) if str(item).isdigit() else 0)[:-HISTORY_HOURS]:
+            hours.pop(old, None)
+    write_private_json(HISTORY_PATH, {"version": 1, "since": int(data.get("since") or time.time()), "hours": hours})
+
+
 def save_acts_of(code_id: str, accounts: list) -> None:
     """The app's numbers now, for each of its X accounts: they replace what it sent before."""
     clean = {}
@@ -887,8 +910,19 @@ def save_acts_of(code_id: str, accounts: list) -> None:
         clean[key] = dict(counts, name=name)
     with LOCK:
         data = load_acts()
+        before = (data.get(code_id) or {}).get("accounts") or {}
+        grown = {name: 0 for name in ("repost", "like", "bookmark")}
+        for key, counts in clean.items():
+            old = before.get(key)
+            if not isinstance(old, dict):
+                continue                    # (an account seen for the first time: its numbers are from before)
+            for name in grown:
+                step = counts[name] - int(old.get(name) or 0)
+                if 0 < step < 100_000:      # (a count that went down: the app started counting again)
+                    grown[name] += step
         data[code_id] = {"at": int(time.time()), "accounts": clean}
         write_private_json(ACTS_PATH, data)
+        history_add(grown)
 
 
 def acts_of(code_id: str, data: dict | None = None) -> dict:
@@ -2097,7 +2131,28 @@ html.loading .ldpill{display:flex}
 .mvd{display:grid;gap:8px;margin:12px 0 4px;font-size:14px}.mvd div{display:flex;gap:12px;align-items:baseline}.mvd dt{color:var(--mut);min-width:72px;flex:none}.mvd dd{margin:0}
 .mc{font:700 16px/1 var(--mono);letter-spacing:1px;background:var(--soft);border:1px solid var(--line);border-radius:8px;padding:4px 8px;direction:ltr;display:inline-block}
 .bk{display:flex;gap:8px;align-items:center;font-size:14px;margin:10px 0 0;color:var(--pri)}.bk.none{color:var(--warn)}.bk .i{width:18px;height:18px;flex:none}
-.ckl{display:flex;gap:10px;align-items:center;margin:14px 0 0;font-size:14px;cursor:pointer}.ckl input{width:20px;height:20px;accent-color:var(--pri);flex:none}
+.ckl{display:flex;gap:10px;align-items:center;margin:14px 0 0;font-size:14px;cursor:pointer}
+:root{--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a}[data-theme=dark]{--s1:#3987e5;--s2:#d95926;--s3:#199e70}
+.hch{margin:12px 0 4px}.hch .i{width:17px;height:17px}
+.ask.ch{max-width:620px}.ch-h{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.ch-seg{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;margin-top:12px;padding:4px;border-radius:12px;background:var(--soft)}
+.ch-seg button{height:34px;border:0;border-radius:9px;background:none;color:var(--mut);font:inherit;font-size:13px;font-weight:600;cursor:pointer}
+.ch-seg button[aria-selected=true]{background:var(--card);color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.08),0 0 0 1px var(--line)}
+.ch-lg{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}
+.ch-lg button{display:inline-flex;align-items:center;gap:7px;min-height:34px;padding:0 11px;border:1px solid var(--line);border-radius:99px;background:var(--card);color:var(--ink);font:inherit;font-size:12.5px;cursor:pointer}
+.ch-lg button[aria-pressed=false]{opacity:.42}.ch-lg b{font-variant-numeric:tabular-nums}
+.ch-lg i,.ch-tip i{display:inline-block;width:14px;height:3px;border-radius:2px;background:var(--c);flex:none}.ch-lg i.sq{width:10px;height:10px;border-radius:3px}
+.ch-box{position:relative;margin-top:10px;direction:ltr;min-height:120px}#ch-svg{display:block;width:100%;height:220px;overflow:visible}
+.ch-tip{position:absolute;z-index:2;pointer-events:none;min-width:140px;padding:8px 11px;border:1px solid var(--line);border-radius:10px;background:var(--card);box-shadow:var(--pop);font-size:12px;direction:rtl;text-align:right}
+.ch-tip .d{color:var(--mut);margin-bottom:2px}.ch-tip .r{display:flex;align-items:center;gap:7px;margin-top:3px}.ch-tip b{font-variant-numeric:tabular-nums;color:var(--ink)}.ch-tip span{color:var(--mut)}
+.ch-empty{margin:0;padding:44px 8px;text-align:center;color:var(--mut);font-size:13px;direction:rtl}
+.ch-users{display:grid;gap:12px;direction:rtl;padding:2px 0}.ch-u{display:grid;gap:6px;outline:0;border-radius:8px}.ch-u:focus-visible{box-shadow:0 0 0 3px var(--ring)}
+.ch-u .nm{display:flex;justify-content:space-between;gap:10px;font-size:13px}.ch-u .nm span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ch-u .nm b{font-variant-numeric:tabular-nums}
+.ch-u .bar{display:flex;gap:2px;height:16px}.ch-u .bar span{display:block;height:100%;background:var(--c)}.ch-u .bar span:last-child{border-radius:4px 0 0 4px}
+.ch-note{margin:10px 0 0;font-size:12px}.ch-tb{margin-top:10px}.ch-tb summary{cursor:pointer;font-size:13px;color:var(--mut)}
+.ch-tw{overflow:auto;max-height:260px;margin-top:8px;border:1px solid var(--line);border-radius:10px}
+#ch-table{width:100%;border-collapse:collapse;font-size:12.5px}#ch-table th,#ch-table td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}
+#ch-table th{position:sticky;top:0;background:var(--soft);color:var(--mut);font-weight:600}#ch-table td.n{font-variant-numeric:tabular-nums}.ckl input{width:20px;height:20px;accent-color:var(--pri);flex:none}
 .rs{margin-top:14px}.rs summary{min-height:40px}
 .pk{display:none;margin-top:10px;max-height:260px;overflow:auto;border:1px solid var(--line);border-radius:12px;background:var(--soft)}
 .pub:has(input[value=some]:checked) .pk,.apub:has(input[value=some]:checked) .pk,.pk.on{display:block}
@@ -2232,7 +2287,7 @@ main{padding-bottom:56px}
 <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
 <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
 <symbol id="i-eye" viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></symbol>
-<symbol id="i-sort" viewBox="0 0 24 24"><path d="M3 6h18M6 12h12M10 18h4"/></symbol>
+<symbol id="i-sort" viewBox="0 0 24 24"><path d="M3 6h18M6 12h12M10 18h4"/></symbol><symbol id="i-chart" viewBox="0 0 24 24"><path d="M4 4v16h16M8 15l3.5-4 3 2.5L20 7"/></symbol>
 <symbol id="i-alert" viewBox="0 0 24 24"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01"/></symbol>
 <symbol id="i-lock" viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></symbol>
 <symbol id="i-msg" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></symbol>
@@ -2267,6 +2322,7 @@ main{padding-bottom:56px}
 {% if stats.comments %}<form method="post" action="/{{admin}}/reset-cost-all" data-title="تصفير كل التكاليف؟" data-confirm="سيُصفَّر عدّاد التعليقات والتكلفة لكل المستخدمين، ويبقى محسوبًا في «منذ البداية» أعلى الصفحة." data-yes="تصفير التكاليف" data-kind="danger" data-toast="تم تصفير كل التكاليف"><button class="hb">{{ic('reset')}}تصفير التكاليف</button></form>{% endif %}</div>
 <div class="ratio" aria-hidden="true"><i style="width:{{ stats.active * 100 / stats.users }}%"></i></div>
 <div class="rl"><span><b>{{stats.active}}</b> يعمل</span><span><b>{{stats.users - stats.active}}</b> موقوف</span></div>
+<button type="button" class="hb hch" id="ch-open" data-open="chart">{{ic('chart')}}الرسم البياني</button>
 </div>
 <dl class="kp">
 <div><dt>أجهزة مربوطة</dt><dd>{{stats.bound}}</dd></div>
@@ -2604,6 +2660,79 @@ f.addEventListener('change',sync);sync()})();</script>{% endif %}
 <bdi class="big" id="rd-code"></bdi>
 <div class="da"><button type="button" class="btn ghost" id="rd-share" data-share="" data-close>{{ic('share')}}مشاركة</button><button type="button" class="btn" id="rd-copy" data-copy="" data-close>{{ic('copy')}}نسخ الرمز</button></div></div></dialog>
 
+<dialog id="chart" class="ask ch" aria-labelledby="ch-t" data-url="/{{admin}}/chart"><div class="dg">
+<div class="ch-h"><h3 id="ch-t">نشاط المستخدمين</h3><button type="button" class="ib" data-close aria-label="إغلاق">{{ic('x')}}</button></div>
+<div class="ch-seg" role="tablist" aria-label="المدة"><button type="button" role="tab" data-r="7" aria-selected="true">7 أيام</button><button type="button" role="tab" data-r="30" aria-selected="false">30 يومًا</button><button type="button" role="tab" data-r="u" aria-selected="false">المستخدمون</button></div>
+<div class="ch-lg" id="ch-lg" aria-label="السلاسل (اضغط لإخفاء أو إظهار)"></div>
+<div class="ch-box" id="ch-box"><svg id="ch-svg" role="img" aria-labelledby="ch-t"></svg><div class="ch-users" id="ch-users" hidden></div><p class="ch-empty" id="ch-empty">جارٍ التحميل…</p><div class="ch-tip" id="ch-tip" hidden></div></div>
+<p class="mut ch-note" id="ch-note"></p>
+<details class="ch-tb"><summary>عرض كجدول</summary><div class="ch-tw"><table id="ch-table"></table></div></details>
+</div></dialog>
+<script>(function(){
+var D=document,dlg=D.getElementById('chart');if(!dlg)return;
+var NS='http://www.w3.org/2000/svg';
+var S=[{k:'like',n:'الإعجاب',c:'var(--s1)'},{k:'bookmark',n:'المرجعية',c:'var(--s2)'},{k:'comment',n:'التعليقات',c:'var(--s3)'}];
+var WD=['الأحد','الإثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
+var data=null,range='7',off={};
+var svg=D.getElementById('ch-svg'),tip=D.getElementById('ch-tip'),lg=D.getElementById('ch-lg'),us=D.getElementById('ch-users'),
+empty=D.getElementById('ch-empty'),note=D.getElementById('ch-note'),tb=D.getElementById('ch-table'),box=D.getElementById('ch-box');
+function fmt(v){return Number(v||0).toLocaleString('en-US')}
+function mk(n,a){var e=D.createElementNS(NS,n);for(var k in a)e.setAttribute(k,a[k]);return e}
+function h(t,c,x){var e=D.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;return e}
+function shown(){return S.filter(function(s){return !off[s.k]})}
+function dkey(d){return d.getFullYear()+'-'+d.getMonth()+'-'+d.getDate()}
+function dl(d){return d.getDate()+'/'+(d.getMonth()+1)}
+function days(n){var out=[],t=new Date(),base=new Date(t.getFullYear(),t.getMonth(),t.getDate()),at={};
+for(var i=n-1;i>=0;i--){var d=new Date(base);d.setDate(base.getDate()-i);var r={d:d,v:{like:0,bookmark:0,comment:0}};at[dkey(d)]=r;out.push(r)}
+var hrs=data.hours||{};for(var k in hrs){var r2=at[dkey(new Date(Number(k)*3600000))];if(r2){var row=hrs[k];r2.v.like+=row[1]||0;r2.v.bookmark+=row[2]||0;r2.v.comment+=row[3]||0}}
+if(!data.since)return out;var s=new Date(data.since*1000),s0=new Date(s.getFullYear(),s.getMonth(),s.getDate());
+return out.filter(function(r){return r.d>=s0})}
+function nice(max){var raw=max/4,p=Math.pow(10,Math.floor(Math.log10(raw))),m=raw/p;return Math.max(1,(m<=1?1:m<=2?2:m<=5?5:10)*p)}
+function legend(tot,bars){lg.replaceChildren();S.forEach(function(s){var b=h('button');b.type='button';b.setAttribute('aria-pressed',String(!off[s.k]));
+var key=h('i',bars?'sq':null);key.style.setProperty('--c',s.c);b.append(key,h('span',null,s.n),h('b',null,fmt(tot[s.k])));
+b.onclick=function(){if(!off[s.k]&&shown().length===1)return;off[s.k]=!off[s.k];draw()};lg.append(b)})}
+function table(head,body){tb.replaceChildren();var tr=h('tr');head.forEach(function(x){tr.append(h('th',null,x))});var th=h('thead');th.append(tr);
+var bd=h('tbody');body.forEach(function(r){var row=h('tr');r.forEach(function(c,i){row.append(h('td',i?'n':null,i?fmt(c):c))});bd.append(row)});tb.append(th,bd)}
+function say(text){svg.style.display='none';us.hidden=true;empty.hidden=false;empty.textContent=text}
+function place(px,py){var bw=box.clientWidth,tw=tip.offsetWidth;tip.style.left=Math.max(0,Math.min(bw-tw,px-tw/2))+'px';tip.style.top=Math.max(0,py)+'px'}
+function tipFill(title,vals){tip.replaceChildren(h('div','d',title));shown().forEach(function(s){var r=h('div','r'),k=h('i');k.style.setProperty('--c',s.c);r.append(k,h('b',null,fmt(vals[s.k])),h('span',null,s.n));tip.append(r)});tip.hidden=false}
+function lines(){var rows=days(Number(range)),tot={like:0,bookmark:0,comment:0};
+rows.forEach(function(r){S.forEach(function(s){tot[s.k]+=r.v[s.k]})});legend(tot,false);
+table(['اليوم'].concat(S.map(function(s){return s.n})),rows.slice().reverse().map(function(r){return [WD[r.d.getDay()]+' '+dl(r.d)].concat(S.map(function(s){return r.v[s.k]}))}));
+note.textContent=data.since?'يُسجَّل النشاط من '+dl(new Date(data.since*1000))+' (بتوقيت جهازك)، فالأيام قبله لا تظهر.':'يبدأ تسجيل النشاط من الآن.';
+if(!rows.some(function(r){return S.some(function(s){return r.v[s.k]})}))return say('لا يوجد نشاط مسجّل في هذه المدة بعد. يُسجَّل من الآن، فارجع بعد قليل.');
+empty.hidden=true;us.hidden=true;svg.style.display='';svg.replaceChildren();
+var W=Math.max(280,box.clientWidth),H=220,L=42,R=14,T=12,B=26,sh=shown(),n=rows.length,max=1;svg.setAttribute('viewBox','0 0 '+W+' '+H);
+rows.forEach(function(r){sh.forEach(function(s){max=Math.max(max,r.v[s.k])})});
+var st=nice(max),top=Math.ceil(max/st)*st,X=function(i){return n===1?(L+W-R)/2:L+i*(W-L-R)/(n-1)},Y=function(v){return T+(H-T-B)*(1-v/top)};
+for(var g=0;g<=top+1e-9;g+=st){svg.append(mk('line',{x1:L,x2:W-R,y1:Y(g),y2:Y(g),stroke:'var(--line)','stroke-width':1}));
+var tx=mk('text',{x:L-8,y:Y(g)+4,'text-anchor':'end','font-size':11,fill:'var(--mut)'});tx.textContent=g>=10000?fmt(g/1000)+'K':fmt(g);svg.append(tx)}
+var every=n<=8?1:Math.ceil(n/6);rows.forEach(function(r,i){if(i!==n-1&&(i%every||n-1-i<every*0.7))return;var tx2=mk('text',{x:X(i),y:H-7,'text-anchor':'middle','font-size':11,fill:'var(--mut)'});tx2.textContent=dl(r.d);svg.append(tx2)});
+sh.forEach(function(s){var d='';rows.forEach(function(r,i){d+=(i?'L':'M')+X(i).toFixed(1)+' '+Y(r.v[s.k]).toFixed(1)});
+svg.append(mk('path',{d:d,fill:'none',stroke:s.c,'stroke-width':2,'stroke-linejoin':'round','stroke-linecap':'round'}))});
+sh.forEach(function(s){rows.forEach(function(r,i){if(n<=8||i===n-1)svg.append(mk('circle',{cx:X(i),cy:Y(r.v[s.k]),r:4,fill:s.c,stroke:'var(--card)','stroke-width':2}))})});
+var cross=mk('line',{y1:T,y2:H-B,stroke:'var(--mut)','stroke-width':1,visibility:'hidden'}),hit=mk('rect',{x:0,y:0,width:W,height:H,fill:'transparent'});svg.append(cross,hit);
+function at(ev){var b=svg.getBoundingClientRect(),x=(ev.clientX-b.left)*W/b.width;return n===1?0:Math.max(0,Math.min(n-1,Math.round((x-L)*(n-1)/(W-L-R))))}
+function show(i){var r=rows[i];cross.setAttribute('x1',X(i));cross.setAttribute('x2',X(i));cross.setAttribute('visibility','visible');
+tipFill(WD[r.d.getDay()]+' '+dl(r.d),r.v);place(X(i)*svg.getBoundingClientRect().width/W,0)}
+hit.addEventListener('pointermove',function(ev){show(at(ev))});hit.addEventListener('pointerdown',function(ev){show(at(ev))});
+hit.addEventListener('pointerleave',function(){cross.setAttribute('visibility','hidden');tip.hidden=true})}
+function users(){var list=data.users||[],sh=shown(),tot={like:0,bookmark:0,comment:0};list.forEach(function(u){S.forEach(function(s){tot[s.k]+=u[s.k]})});legend(tot,true);
+table(['المستخدم'].concat(S.map(function(s){return s.n})),list.map(function(u){return [u.name].concat(S.map(function(s){return u[s.k]}))}));
+note.textContent='كل ما فعله كل مستخدم حتى الآن (الإعجاب والمرجعية كما في تطبيقه، والتعليقات المكتوبة)، الأكثر نشاطًا أولًا'+(data.more?'، ويُخفى '+data.more+' أقل نشاطًا':'')+'.';
+if(!list.length)return say('لا يوجد نشاط للمستخدمين بعد.');
+svg.style.display='none';empty.hidden=true;us.hidden=false;us.replaceChildren();
+var sum=function(u){return sh.reduce(function(a,s){return a+u[s.k]},0)},max=Math.max.apply(null,list.map(sum).concat([1]));
+list.forEach(function(u){var row=h('div','ch-u'),nm=h('div','nm'),bar=h('div','bar');nm.append(h('span',null,u.name),h('b',null,fmt(sum(u))));
+bar.style.width=Math.max(2,sum(u)*100/max)+'%';sh.forEach(function(s){if(!u[s.k])return;var seg=h('span');seg.style.setProperty('--c',s.c);seg.style.flex=u[s.k]+' 0 0';bar.append(seg)});
+row.append(nm,bar);row.tabIndex=0;var open=function(){tipFill(u.name,u);place(box.clientWidth/2,row.offsetTop+row.offsetHeight+4)};
+row.addEventListener('pointerenter',open);row.addEventListener('focus',open);row.addEventListener('pointerleave',function(){tip.hidden=true});row.addEventListener('blur',function(){tip.hidden=true});us.append(row)})}
+function draw(){tip.hidden=true;if(data)(range==='u'?users:lines)()}
+dlg.querySelectorAll('.ch-seg button').forEach(function(b){b.addEventListener('click',function(){range=b.dataset.r;
+dlg.querySelectorAll('.ch-seg button').forEach(function(x){x.setAttribute('aria-selected',String(x===b))});draw()})});
+D.getElementById('ch-open').addEventListener('click',function(){say('جارٍ التحميل…');fetch(dlg.dataset.url,{cache:'no-store',credentials:'same-origin'})
+.then(function(r){return r.json()}).then(function(j){if(!j||!j.ok)throw 0;data=j;draw()}).catch(function(){say('تعذّر جلب البيانات. أعد فتح الرسم.')})});
+addEventListener('resize',function(){if(dlg.open)draw()})})();</script>
 <dialog id="cf" class="sheet" aria-labelledby="cft"><div class="grab"></div><div class="dg"><h3 id="cft"></h3><p class="mut" id="cfm"></p><div class="da"><button type="button" class="btn ghost" data-close>إلغاء</button><button type="button" class="btn" id="cfok">تأكيد</button></div></div></dialog>
 <div class="toasts" aria-live="polite"></div>
 
@@ -3133,6 +3262,28 @@ def prices_save():
     flash("ok", "حُفظت الأسعار. تُحسب بها الخدمات من الآن، وما حُسب قبلها يبقى كما هو. "
                 f"رصيد الحساب الجديد: {money(load_welcome())}.")
     return redirect(f"/{ADMIN}")
+
+
+@app.get(f"/{ADMIN}/chart")
+def chart_data():
+    """«الرسم البياني»: the hours kept, and each user's numbers now (likes and bookmarks from the app, comments counted
+    here)."""
+    if not logged_in():
+        return jsonify(ok=False), 403
+    data = read_private_json(HISTORY_PATH) or {}
+    hours = {key: [int(value or 0) for value in row[:4]] for key, row in (data.get("hours") or {}).items()
+             if str(key).isdigit() and isinstance(row, list)}
+    with LOCK:
+        codes = load_codes()
+    usage, acts = load_usage(), load_acts()
+    users = []
+    for row in codes:
+        done = acts_of(row["id"], acts)
+        users.append({"name": row.get("label") or row.get("code") or "", "like": done["like"], "bookmark": done["bookmark"],
+                      "comment": usage_of(row["id"], usage)["total"]})
+    users = [user for user in users if user["like"] or user["bookmark"] or user["comment"]]
+    users.sort(key=lambda user: -(user["like"] + user["bookmark"] + user["comment"]))
+    return jsonify(ok=True, since=int(data.get("since") or 0), hours=hours, users=users[:12], more=max(0, len(users) - 12))
 
 
 @app.post(f"/{ADMIN}/pace")

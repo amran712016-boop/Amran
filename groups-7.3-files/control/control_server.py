@@ -2043,7 +2043,7 @@ html.loading .ldpill{display:flex}
 .ckl{display:flex;gap:10px;align-items:center;margin:14px 0 0;font-size:14px;cursor:pointer}.ckl input{width:20px;height:20px;accent-color:var(--pri);flex:none}
 .rs{margin-top:14px}.rs summary{min-height:40px}
 .pk{display:none;margin-top:10px;max-height:260px;overflow:auto;border:1px solid var(--line);border-radius:12px;background:var(--soft)}
-.pub:has(input[value=some]:checked) .pk,.pk.on{display:block}
+.pub:has(input[value=some]:checked) .pk,.apub:has(input[value=some]:checked) .pk,.pk.on{display:block}
 .pkr{display:flex;gap:10px;align-items:center;min-height:46px;padding:8px 12px;border-bottom:1px solid var(--line);cursor:pointer;font-size:14px}
 .pkr:last-child{border-bottom:0}.pkr input{width:20px;height:20px;accent-color:var(--pri);flex:none;margin:0}
 .pkn{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
@@ -2412,20 +2412,48 @@ f.addEventListener('change',sync);sync()})();</script>{% endif %}
 <li>{{ic('edit')}}<span>«تجريبي»: انشر لمستخدمين تختارهم (أنت مثلًا) أولًا، ثم «نشر للجميع» حين تتأكد أنه سليم.</span></li></ul></div>
 
 <div class="card pad" id="apk"><h2>ملف التطبيق (APK)</h2>
-<p class="mut">ارفع آخر نسخة بنيتها من التطبيق: يظهر لمن نسخته أقدم زر «تنزيل التطبيق» أعلى صفحة السكربت، ويصلك رابط ثابت تشاركه في التنبيهات أو أي مكان، ويعطي دائمًا آخر نسخة ترفعها.</p>
+<p class="mut">ارفع آخر نسخة بنيتها من التطبيق، ثم انشرها للجميع أو لمستخدمين تختارهم (تجريبي): يظهر لمن نسخته أقدم زر «تنزيل التطبيق» أعلى صفحة السكربت. ورابط التنزيل الثابت يعطي دائمًا النسخة المنشورة للجميع.</p>
+{% set al, ap, ast = app_slots.live, app_slots.pilot, app_slots.staged %}
 <dl class="mvd">
-<div><dt>المرفوع</dt><dd>{% if app_file %}الإصدار <b>{{app_file.version}}</b> <span class="mut">(رقم {{app_file.code}})</span> · {{app_size}} · رُفع {{app_when}}{% else %}<span class="mut">لم يُرفع ملف تطبيق بعد.</span>{% endif %}</dd></div>
-{% if app_file %}<div><dt>الحزمة</dt><dd><bdi dir="ltr">{{app_file.package}}</bdi>{% if app_file.package != app_package %} · <span class="b">لا تطابق تطبيق المستخدمين</span>{% endif %}</dd></div>{% endif %}
+<div><dt>للجميع</dt><dd>{% if al %}الإصدار <b>{{al.version}}</b> <span class="mut">(رقم {{al.code}})</span> · {{al.size_text}} · نُشر {{al.when}}{% else %}<span class="mut">لم تُنشر نسخة للجميع بعد.</span>{% endif %}</dd></div>
+{% if ap %}<div><dt>تجريبي</dt><dd>الإصدار <b>{{ap.version}}</b> <span class="mut">(رقم {{ap.code}})</span> · عند {{ap.names|length}} مستخدم · نُشر {{ap.when}}</dd></div>{% endif %}
+{% if ast %}<div><dt>المرفوع</dt><dd>الإصدار <b>{{ast.version}}</b> <span class="mut">(رقم {{ast.code}})</span> · {{ast.size_text}} · <span class="b on">جاهز للنشر</span>{% if ast.package != app_package %} · <span class="b">حزمة أخرى: <bdi dir="ltr">{{ast.package}}</bdi></span>{% endif %}</dd></div>{% endif %}
 </dl>
 <form method="post" action="/{{admin}}/app/upload" enctype="multipart/form-data" data-keep-busy>
 <label class="l" for="ap-file">ملف التطبيق <small>(‎.apk)</small></label>
 <input id="ap-file" class="fs" type="file" name="apk" accept=".apk,application/vnd.android.package-archive" required>
-<button class="btn wide ghost" style="margin-top:12px">{{ic('phone')}}{{ 'رفع نسخة أحدث' if app_file else 'رفع التطبيق' }}</button></form>
-{% if app_file %}<p class="l">رابط التنزيل</p>
+<button class="btn wide ghost" style="margin-top:12px">{{ic('phone')}}رفع التطبيق</button></form>
+{% if ast %}<form class="apub" method="post" action="/{{admin}}/app/publish" data-v="{{ast.version}}" data-title="نشر التطبيق؟" data-confirm="يصل الإصدار {{ast.version}} من التطبيق إلى كل المستخدمين، فيظهر زر «تنزيل التطبيق» لكل من نسخته أقدم." data-yes="نشر" data-toast="تم نشر التطبيق">
+<p class="l">لمن يصل الإصدار {{ast.version}}؟</p>
+<div class="eng">
+<label class="opt"><input type="radio" name="target" value="all" checked><span class="pi">{{ic('users')}}</span><span><b>كل المستخدمين</b><small>يظهر زر «تنزيل التطبيق» لكل من نسخته أقدم</small></span><span class="ck">{{ic('check')}}</span></label>
+<label class="opt"><input type="radio" name="target" value="some"><span class="pi">{{ic('edit')}}</span><span><b>مستخدمون أختارهم (تجريبي)</b><small>جرّبه عندهم أولًا؛ الباقون يبقون على نسختهم</small></span><span class="ck">{{ic('check')}}</span></label>
+</div>
+<div class="pk" role="group" aria-label="من تصله النسخة التجريبية">{% for c in codes %}<label class="pkr{{ '' if c.active else ' off' }}"><input type="checkbox" name="codes" value="{{c.id}}"><span class="pkn">{{ c.label or 'بدون اسم' }}</span><span class="pkc">{{c.code}}</span></label>{% else %}<p class="pke">لا يوجد مستخدمون بعد.</p>{% endfor %}</div>
+<label class="ckl" style="margin-top:12px"><input type="checkbox" name="notify" value="1" checked> أرسل لهم تنبيهًا بالنسخة</label>
+<button class="btn wide" style="margin-top:12px">{{ic('check')}}نشر التطبيق (الإصدار {{ast.version}})</button></form>
+<script>(function(){var f=document.querySelector('form.apub');if(!f)return;var v=f.dataset.v;
+function sync(){var some=f.querySelector('input[name=target][value=some]').checked,n=f.querySelectorAll('input[name=codes]:checked').length;
+f.dataset.confirm=some?(n?'يصل الإصدار '+v+' من التطبيق إلى '+n+' مستخدم فقط، ويظهر لهم زر «تنزيل التطبيق». الباقون يبقون على نسختهم.':'لم تختر أي مستخدم. اختر من القائمة من تصله النسخة التجريبية.'):'يصل الإصدار '+v+' من التطبيق إلى كل المستخدمين، فيظهر زر «تنزيل التطبيق» لكل من نسخته أقدم.';
+f.dataset.yes=some?'نشر تجريبي':'نشر'}
+f.addEventListener('change',sync);sync()})();</script>{% endif %}
+{% if ap %}<div class="pil">
+<p class="pil-h">{{ic('edit')}}<span>النسخة التجريبية <b>{{ap.version}}</b> من التطبيق تصل الآن إلى: {{ ap.names|join('، ') if ap.names else 'لا أحد (حُذف من اخترتهم)' }}</span></p>
+<div class="pil-a">
+<form method="post" action="/{{admin}}/app/pilot/promote" data-title="نشر للجميع؟" data-confirm="يصل الإصدار {{ap.version}} من التطبيق إلى كل المستخدمين، فيظهر زر «تنزيل التطبيق» لكل من نسخته أقدم." data-yes="نشر للجميع" data-toast="تم النشر للجميع"><button class="btn">{{ic('check')}}نشر للجميع</button></form>
+<form method="post" action="/{{admin}}/app/pilot/cancel" data-title="إلغاء النسخة التجريبية؟" data-confirm="لن يُعرض الإصدار {{ap.version}} من التطبيق على أحد بعد الآن. من نزّله يبقى عليه." data-yes="إلغاء التجريبي" data-kind="danger" data-toast="أُلغيت النسخة التجريبية"><button class="btn ghost">إلغاء التجريبي</button></form>
+</div>
+<details class="rs"><summary>تعديل من تصله</summary>
+<form method="post" action="/{{admin}}/app/pilot/users" data-toast="تم حفظ المستخدمين">
+<div class="pk on" role="group" aria-label="من تصله النسخة التجريبية">{% for c in codes %}<label class="pkr{{ '' if c.active else ' off' }}"><input type="checkbox" name="codes" value="{{c.id}}"{% if c.id in ap.codes %} checked{% endif %}><span class="pkn">{{ c.label or 'بدون اسم' }}</span><span class="pkc">{{c.code}}</span></label>{% endfor %}</div>
+<button class="btn wide ghost" style="margin-top:10px">حفظ</button></form></details>
+</div>{% endif %}
+{% if al %}<p class="l">رابط التنزيل <small>(النسخة المنشورة للجميع)</small></p>
 <code class="lk">{{app_dl_link}}</code>
 <div class="da"><button type="button" class="btn" data-copy="{{app_dl_link}}">{{ic('copy')}}نسخ الرابط</button><button type="button" class="btn ghost" data-share="{{app_dl_link}}">{{ic('share')}}مشاركة</button></div>
-<form method="post" action="/{{admin}}/app/notify" data-title="إرسال تنبيه؟" data-confirm="يصل لكل المستخدمين تنبيه بأن الإصدار {{app_file.version}} من التطبيق جاهز، مع رابط التنزيل." data-yes="إرسال" data-toast="تم إرسال التنبيه"><button class="btn wide" style="margin-top:12px">{{ic('bell')}}إرسال تنبيه للمستخدمين</button></form>{% endif %}
+<form method="post" action="/{{admin}}/app/notify" data-title="إرسال تنبيه؟" data-confirm="يصل لكل المستخدمين تنبيه بأن الإصدار {{al.version}} من التطبيق جاهز، مع رابط التنزيل." data-yes="إرسال" data-toast="تم إرسال التنبيه"><button class="btn wide" style="margin-top:12px">{{ic('bell')}}إرسال تنبيه للمستخدمين</button></form>{% endif %}
 <ul class="notes"><li>{{ic('shield')}}<span>زر «تنزيل التطبيق» داخل التطبيق يُنزّله عبر اتصاله المحمي بخادمك ويحفظه في «التنزيلات» بلا أي تحذير. أما الرابط فيُفتح في المتصفح، وقد يعرض «الاتصال غير خاص» لأن شهادة خادمك ذاتية: اضغط «متقدم» ثم «متابعة».</span></li>
+<li>{{ic('edit')}}<span>«تجريبي»: انشره لمستخدمين تختارهم (أنت مثلًا) أولًا، ثم «نشر للجميع» حين تتأكد أنه يعمل.</span></li>
 <li>{{ic('alert')}}<span>ليُثبَّت فوق النسخة الموجودة دون حذفها: نفس مفتاح التوقيع (keystore) الذي بنيت به النسخة السابقة، ورقم إصدار (versionCode) أعلى منها.</span></li></ul></div>
 </section>
 
@@ -2700,7 +2728,6 @@ def dashboard():
     if not logged_in():
         return render_template_string(LOGIN_PAGE, admin=ADMIN, error="")
     keys = load_keys()
-    app_file = app_meta()
     with LOCK:
         codes = load_codes()
     acts_data = load_acts()
@@ -2745,9 +2772,7 @@ def dashboard():
         owner_link=owner_app_link(request.host), in_owner_app=OWNER_APP_MARK in (request.headers.get("User-Agent") or ""),
         this_host=request.host, relay=MOVE_RELAY.split("//")[-1],
         prices=load_prices(), welcome=load_welcome(),
-        app_file=app_file, app_dl_link=app_download_link(), app_package=APP_PACKAGE,
-        app_size=size_text(int(app_file.get("size") or 0)) if app_file else "",
-        app_when=seen_text({"last_seen": int(app_file.get("at") or 0)}) if app_file else "",
+        app_slots=app_panel(codes), app_dl_link=app_download_link(), app_package=APP_PACKAGE,
         script_live=script_live, script_staged=script_staged, script_next=next_version(highest_published_version()),
         script_floor=highest_published_version(), script_pilot=script_pilot, script_pilot_ids=pilot_ids,
         script_pilot_names=script_pilot_names,
@@ -3329,13 +3354,12 @@ def failure_details(failure_id: int):
 
 
 # ----------------------------------------------------------------------------- the app itself (its APK)
-# «ملف التطبيق» in the «السكربت» tab: the owner uploads the app's APK. It is offered at a fixed secret link (to share
-# anywhere: a browser downloads it), and to the apps through their own protected connection: their page shows
-# «تنزيل التطبيق» when this one is newer than theirs, and saves it in the phone's downloads (no browser, so no
-# warning about the server's own certificate).
+# «ملف التطبيق» in the «السكربت» tab: the owner uploads the app's APK, then publishes it to everyone or, as a trial,
+# to the users they choose (as with the script). The apps get it through their own protected connection: their page
+# shows «تنزيل التطبيق» when the one meant for them is newer than theirs, and saves it in the phone's downloads (no
+# browser, so no warning about the server's own certificate). A fixed secret link gives everyone's (to share anywhere).
 APP_DIR = DATA_DIR / "app"
-APP_FILE = APP_DIR / "app.apk"
-APP_META = APP_DIR / "app.json"
+APP_SLOTS = ("staged", "pilot", "live")        # uploaded, not offered yet · a trial for the chosen users · everyone's
 APP_MAX = 300 * 1024 * 1024
 APP_PACKAGE = "app.tg.groups.session"          # (the users' app; another package is kept, but no app offers it)
 APK_MIME = "application/vnd.android.package-archive"
@@ -3416,10 +3440,72 @@ def apk_info(path: Path) -> dict:
             "version": str(info.get("versionName") or code).strip()[:40] or str(code)}
 
 
-def app_meta() -> dict:
-    """The uploaded app (version, code, package, size, sha256, at), or {} when there is none."""
-    meta = read_private_json(APP_META) or {}
-    return meta if meta.get("sha256") and APP_FILE.is_file() else {}
+def app_path(slot: str) -> Path:
+    return APP_DIR / f"{slot}.apk"
+
+
+def app_meta(slot: str = "live") -> dict:
+    """One of the kept apps (version, code, package, size, sha256, at; a trial's codes), or {} when there is none."""
+    meta = read_private_json(APP_DIR / f"{slot}.json") or {}
+    return meta if meta.get("sha256") and app_path(slot).is_file() else {}
+
+
+def app_drop(slot: str) -> None:
+    for path in (app_path(slot), APP_DIR / f"{slot}.json"):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def app_move(source: str, target: str, **extra) -> dict:
+    """(Under LOCK.) The app in one place goes to another (no copy of a big file), with its record."""
+    meta = dict(app_meta(source), **extra)
+    os.replace(app_path(source), app_path(target))
+    write_private_json(APP_DIR / f"{target}.json", meta)
+    try:
+        (APP_DIR / f"{source}.json").unlink()
+    except OSError:
+        pass
+    return meta
+
+
+def app_for(code_id: str) -> tuple[dict, str]:
+    """The app meant for this user: their trial if they are in one, else everyone's; ({}, "") when there is none."""
+    pilot = app_meta("pilot")
+    if pilot and code_id in (pilot.get("codes") or []):
+        return pilot, "pilot"
+    live = app_meta("live")
+    return (live, "live") if live else ({}, "")
+
+
+def app_panel(codes: list) -> dict:
+    """The three places as the panel shows them."""
+    names = {row.get("id"): row.get("label") or row.get("code") or "" for row in codes}
+    out = {}
+    for slot in APP_SLOTS:
+        meta = app_meta(slot)
+        if meta:
+            meta = dict(meta, size_text=size_text(int(meta.get("size") or 0)),
+                        when=seen_text({"last_seen": int(meta.get("published_at") or meta.get("at") or 0)}))
+            if slot == "pilot":
+                meta["names"] = [names[code] for code in meta.get("codes") or [] if code in names]
+        out[slot] = meta
+    return out
+
+
+def _app_from_first_build() -> None:
+    """The first build of this kept one file, offered to everyone (app.apk): it is everyone's."""
+    old = APP_DIR / "app.apk"
+    if old.is_file() and (APP_DIR / "app.json").is_file() and not app_path("live").is_file():
+        try:
+            os.replace(old, app_path("live"))
+            os.replace(APP_DIR / "app.json", APP_DIR / "live.json")
+        except OSError:
+            pass
+
+
+_app_from_first_build()
 
 
 def app_file_name(meta: dict) -> str:
@@ -3428,7 +3514,7 @@ def app_file_name(meta: dict) -> str:
 
 
 def app_download_link() -> str:
-    """The fixed link (it always gives the latest upload), at the address the apps use."""
+    """The fixed link (it always gives everyone's latest), at the address the apps use."""
     port = "" if LISTEN_PORT == 443 else f":{LISTEN_PORT}"
     return f"https://{public_host()}{port}/{APP_DL}/BOT-GROB.apk"
 
@@ -3439,7 +3525,7 @@ def size_text(size: int) -> str:
 
 @app.post(f"/{ADMIN}/app/upload")
 def app_upload():
-    """«رفع التطبيق»: the APK, checked (an APK whose package and version can be read), kept for download."""
+    """«رفع التطبيق»: the APK, checked (an APK whose package and version can be read), kept ready to publish."""
     if not logged_in():
         return redirect(f"/{ADMIN}")
     upload = request.files.get("apk")
@@ -3461,9 +3547,13 @@ def app_upload():
                 digest.update(chunk)
                 out.write(chunk)
         info = apk_info(temporary)
+        live = app_meta("live")
+        if live and info["package"] == live.get("package") and info["code"] < int(live.get("code") or 0):
+            raise ValueError(f"رقم البناء (versionCode) في هذا الملف {info['code']} أقل من النسخة المنشورة للجميع "
+                             f"({live['code']})، فلن يُثبَّت فوقها. ابنِ التطبيق برقم أعلى.")
         with LOCK:
-            temporary.replace(APP_FILE)
-            write_private_json(APP_META, {**info, "size": size, "sha256": digest.hexdigest(), "at": int(time.time())})
+            temporary.replace(app_path("staged"))
+            write_private_json(APP_DIR / "staged.json", {**info, "size": size, "sha256": digest.hexdigest(), "at": int(time.time())})
     except ValueError as exc:
         flash("bad", str(exc))
         return redirect(f"/{ADMIN}")
@@ -3476,34 +3566,120 @@ def app_upload():
         except OSError:
             pass
     other = "" if info["package"] == APP_PACKAGE else (
-        f" تنبيه: اسم حزمته {info['package']} لا يطابق تطبيق المستخدمين ({APP_PACKAGE})، فلن يعرضه التطبيق عليهم؛ يبقى الرابط فقط.")
-    flash("ok", f"رُفع التطبيق: الإصدار {info['version']} (رقم {info['code']}). يظهر زر «تنزيل التطبيق» لمن نسخته أقدم، "
-                f"والرابط جاهز للنسخ أو «إرسال تنبيه».{other}")
+        f" تنبيه: اسم حزمته {info['package']} لا يطابق تطبيق المستخدمين ({APP_PACKAGE})، فلن يعرضه التطبيق عليهم.")
+    flash("ok", f"رُفع التطبيق: الإصدار {info['version']} (رقم {info['code']}) وجاهز للنشر. اختر لمن يصل ثم اضغط «نشر التطبيق».{other}")
+    return redirect(f"/{ADMIN}")
+
+
+def app_notice_to(meta: dict, codes: list | None) -> None:
+    """A notice that this version is ready: to everyone with the link, or to each of a trial's users."""
+    if codes is None:
+        add_notice(f"نسخة جديدة من التطبيق ({meta['version']}) جاهزة. افتح التطبيق واضغط «تنزيل التطبيق» في أعلى الصفحة، "
+                   f"أو نزّلها من الرابط: {app_download_link()}", "info", "all")
+        return
+    for code in codes:
+        add_notice(f"نسخة تجريبية من التطبيق ({meta['version']}) جاهزة لك. افتح التطبيق واضغط «تنزيل التطبيق» في أعلى الصفحة.",
+                   "info", code)
+
+
+@app.post(f"/{ADMIN}/app/publish")
+def app_publish():
+    """The uploaded app goes to everyone, or as a trial to the chosen users; with a notice to them if asked."""
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    some = request.form.get("target") == "some"
+    chosen = chosen_codes(request.form.getlist("codes")) if some else None
+    if some and not chosen:
+        flash("bad", "اختر مستخدمًا واحدًا على الأقل لتصله النسخة التجريبية.")
+        return redirect(f"/{ADMIN}")
+    with LOCK:
+        if not app_meta("staged"):
+            flash("bad", "لا يوجد ملف تطبيق مرفوع لنشره. ارفع الملف أولًا.")
+            return redirect(f"/{ADMIN}")
+        now = int(time.time())
+        if some:
+            app_drop("pilot")
+            meta = app_move("staged", "pilot", published_at=now, codes=chosen)
+        else:
+            meta = app_move("staged", "live", published_at=now)
+            app_drop("pilot")                       # (everyone has it now: a trial before it is over)
+    told = request.form.get("notify") == "1"
+    if told:
+        app_notice_to(meta, chosen)
+    if some:
+        flash("ok", f"نُشر الإصدار {meta['version']} من التطبيق تجريبيًا لـ {len(chosen)} مستخدم: يظهر لهم زر «تنزيل التطبيق»"
+                    f"{' ووصلهم تنبيه' if told else ''}، والباقون يبقون على نسختهم.")
+    else:
+        flash("ok", f"نُشر الإصدار {meta['version']} من التطبيق للجميع: يظهر زر «تنزيل التطبيق» لكل من نسخته أقدم"
+                    f"{'، ووصلهم تنبيه بالرابط' if told else ''}.")
+    return redirect(f"/{ADMIN}")
+
+
+@app.post(f"/{ADMIN}/app/pilot/promote")
+def app_pilot_promote():
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    with LOCK:
+        if not app_meta("pilot"):
+            flash("bad", "لا توجد نسخة تجريبية.")
+            return redirect(f"/{ADMIN}")
+        meta = app_move("pilot", "live", published_at=int(time.time()))
+        meta.pop("codes", None)
+        write_private_json(APP_DIR / "live.json", meta)
+    flash("ok", f"صار الإصدار {meta['version']} من التطبيق للجميع. اضغط «إرسال تنبيه للمستخدمين» ليصلهم الرابط.")
+    return redirect(f"/{ADMIN}")
+
+
+@app.post(f"/{ADMIN}/app/pilot/cancel")
+def app_pilot_cancel():
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    with LOCK:
+        app_drop("pilot")
+    flash("ok", "أُلغيت النسخة التجريبية من التطبيق. من نزّلها يبقى عليها.")
+    return redirect(f"/{ADMIN}")
+
+
+@app.post(f"/{ADMIN}/app/pilot/users")
+def app_pilot_users():
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    chosen = chosen_codes(request.form.getlist("codes"))
+    if not chosen:
+        flash("bad", "اختر مستخدمًا واحدًا على الأقل، أو اضغط «إلغاء التجريبي».")
+        return redirect(f"/{ADMIN}")
+    with LOCK:
+        meta = app_meta("pilot")
+        if not meta:
+            flash("bad", "لا توجد نسخة تجريبية.")
+            return redirect(f"/{ADMIN}")
+        meta["codes"] = chosen
+        write_private_json(APP_DIR / "pilot.json", meta)
+    flash("ok", f"تصل النسخة التجريبية الآن إلى {len(chosen)} مستخدم.")
     return redirect(f"/{ADMIN}")
 
 
 @app.post(f"/{ADMIN}/app/notify")
 def app_notify():
-    """«إرسال تنبيه»: a notice to all users that this version is ready, with its link."""
+    """«إرسال تنبيه»: a notice to all users that everyone's version is ready, with its link."""
     if not logged_in():
         return redirect(f"/{ADMIN}")
-    meta = app_meta()
+    meta = app_meta("live")
     if not meta:
-        flash("bad", "ارفع ملف التطبيق أولًا.")
+        flash("bad", "انشر التطبيق للجميع أولًا.")
         return redirect(f"/{ADMIN}")
-    add_notice(f"نسخة جديدة من التطبيق ({meta['version']}) جاهزة. افتح التطبيق واضغط «تنزيل التطبيق» في أعلى الصفحة، "
-               f"أو نزّلها من الرابط: {app_download_link()}", "info", "all")
+    app_notice_to(meta, None)
     flash("ok", f"أُرسل لكل المستخدمين تنبيه بالإصدار {meta['version']} ورابطه.")
     return redirect(f"/{ADMIN}")
 
 
 @app.get(f"/{APP_DL}/<name>")
 def app_public_download(name):
-    """The fixed link to the latest uploaded app, for a browser (any name after it gives the same file)."""
-    meta = app_meta()
+    """The fixed link to everyone's latest app, for a browser (any name after it gives the same file)."""
+    meta = app_meta("live")
     if not meta:
-        return "لا يوجد تطبيق مرفوع بعد.", 404
-    return send_file(APP_FILE, mimetype=APK_MIME, as_attachment=True, download_name=app_file_name(meta),
+        return "لا يوجد تطبيق منشور بعد.", 404
+    return send_file(app_path("live"), mimetype=APK_MIME, as_attachment=True, download_name=app_file_name(meta),
                      conditional=True, max_age=0)
 
 
@@ -4013,27 +4189,30 @@ def api_notices():
 
 @app.post(f"/{API}/app-latest")
 def api_app_latest():
-    """The uploaded app, for the app's page to offer «تنزيل التطبيق» when it is newer than the one installed."""
+    """The app meant for this user (their trial, else everyone's), for their page to offer «تنزيل التطبيق» when it
+    is newer than the one installed."""
     body = request.get_json(silent=True) or {}
-    if not code_from_token(body.get("token")):
+    row = code_from_token(body.get("token"))
+    if not row:
         return api_err("انتهت صلاحية الدخول أو أوقِف الرمز أو نُقل لجهاز آخر. أعد إدخال الرمز.", 200)
-    meta = app_meta()
+    meta, slot = app_for(row["id"])
     if not meta:
         return api_ok(available=False)
     return api_ok(available=True, version=meta["version"], code=meta["code"], package=meta["package"],
-                  size=meta["size"], sha256=meta["sha256"], name=app_file_name(meta))
+                  size=meta["size"], sha256=meta["sha256"], name=app_file_name(meta), trial=slot == "pilot")
 
 
 @app.post(f"/{API}/app-download")
 def api_app_download():
-    """The uploaded APK itself, through the app's protected connection."""
+    """The APK meant for this user, through the app's protected connection."""
     body = request.get_json(silent=True) or {}
-    if not code_from_token(body.get("token")):
+    row = code_from_token(body.get("token"))
+    if not row:
         return api_err("انتهت صلاحية الدخول أو أوقِف الرمز أو نُقل لجهاز آخر. أعد إدخال الرمز.", 200)
-    meta = app_meta()
+    meta, slot = app_for(row["id"])
     if not meta:
-        return api_err("لا يوجد تطبيق مرفوع على خادم التحكّم.")
-    return send_file(APP_FILE, mimetype=APK_MIME, as_attachment=True, download_name=app_file_name(meta), max_age=0)
+        return api_err("لا يوجد تطبيق منشور على خادم التحكّم.")
+    return send_file(app_path(slot), mimetype=APK_MIME, as_attachment=True, download_name=app_file_name(meta), max_age=0)
 
 
 @app.post(f"/{API}/comment")

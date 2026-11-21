@@ -3148,6 +3148,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
         if (inApp) pushNative(item.text, "admin-" + item.kind);
         else showNotice("📢 " + item.text, item.kind === "info");
       }
+      if ((data.notices || []).length && typeof checkAppUpdate === "function") checkAppUpdate(true);   // (a new app, maybe)
     } catch (_) {
     } finally {
       noticesBusy = false;
@@ -3709,9 +3710,9 @@ EMBEDDED_PAGE = r'''<!doctype html>
   const appBar = document.getElementById("app-bar");
   const appText = document.getElementById("app-text");
   const appButton = document.getElementById("app-button");
-  async function checkAppUpdate() {
+  async function checkAppUpdate(fresh) {
     try {
-      const response = await fetchWithTimeout(apiRoot + "/app-update", {cache: "no-store"}, 20000);
+      const response = await fetchWithTimeout(apiRoot + "/app-update" + (fresh ? "?fresh=1" : ""), {cache: "no-store"}, 20000);
       const data = await response.json();
       if (!data.success) return;
       if (data.available && !appButton.disabled) {
@@ -3778,7 +3779,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
     setTimeout(loadAdminNotices, 40);   // (after its dropped read has let go)
     resyncAccount();
     loadCommentsUsage(true);              // (back in the app: the balance as it is now)
-    if (force || away > 60000) checkUpdate();
+    if (force || away > 60000) { checkUpdate(); checkAppUpdate(false); }
   }
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) hiddenSince = Date.now();

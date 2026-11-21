@@ -7468,6 +7468,7 @@ def _run_on_account_browser(auth_token: str, work):
             if state["playwright"] is None:
                 state["playwright"] = sync_playwright().start()
             state["context"], new_page = open_saved(state["playwright"])
+            in_page_fresh(new_page)
             try:
                 new_page.goto("https://www.google.com/", wait_until="domcontentloaded", timeout=60_000)
                 new_page.wait_for_timeout(2000)
@@ -7491,11 +7492,13 @@ def _run_on_account_browser(auth_token: str, work):
                 trace_click("المهمة على صفحة متصفح هذا الحساب المفتوحة")
                 state["context"] = kept.get("context")
                 state["playwright"] = kept.get("playwright")
+                in_page_fresh(kept["page"])
                 return work(kept["page"])
             state["playwright"] = sync_playwright().start()
             state["context"], page = open_saved(state["playwright"])
             if same_browser:
                 keep(page)
+            in_page_fresh(page)
             return work(page)
         finally:
             browser_restart.fn = None
@@ -9484,7 +9487,8 @@ def tweet_flags_from_api(data, status_id: str) -> dict | None:
 # person taps a tweet there (its address changes and X draws the tweet), instead of loading X anew for each one:
 # quicker, and lighter on the phone. It goes on only once the tweet before has left the page and the new one is
 # there, so nothing is ever pressed on the one before. When the new one does not come in time, it is loaded in
-# full as before; two misses in a row and the task loads each tweet in full from then on. Every
+# full as before; two misses in a row and the task loads each tweet in full from then on (its next task tries again).
+# Every
 # IN_PAGE_FULL_EVERY tweets one is loaded in full anyway, so a page kept for hours does not grow heavy.
 IN_PAGE_MOVES = True
 IN_PAGE_WAIT_SECONDS = 7
@@ -9535,6 +9539,12 @@ def move_in_page(page, status_id: str, canonical: str) -> bool:
         return page.evaluate(MOVE_IN_PAGE_JS, {"path": path, "statusId": status_id}) == "ok"
     except Exception:
         return False
+
+
+def in_page_fresh(page) -> None:
+    """A task starts on this page (a new one, or an account's page kept open from its last task): the in-page move
+    is tried again, whatever the task before found."""
+    _in_page.pop(id(page), None)
 
 
 def in_page_moved(page, shown: bool) -> None:

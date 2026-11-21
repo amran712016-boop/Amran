@@ -1198,6 +1198,12 @@ EMBEDDED_PAGE = r'''<!doctype html>
     }
     .update-bar .ub-ic .i { width: 15px; height: 15px; }
     #update-text { flex: 1; min-width: 0; }
+    .ab-main { flex: 1; min-width: 0; display: grid; gap: 7px; }
+    .ab-prog { display: block; height: 6px; border-radius: 99px; background: var(--brand-line); overflow: hidden; }
+    .ab-prog i { display: block; height: 100%; width: 0; border-radius: inherit; background: linear-gradient(90deg, #4a74ff, var(--brand-3)); transition: width 0.45s var(--ease); }
+    .ab-prog.done i { background: linear-gradient(90deg, #12b76a, #039855); }
+    .ab-prog.wait i { width: 30% !important; animation: ab-wait 1.2s ease-in-out infinite; }
+    @keyframes ab-wait { 0% { transform: translateX(120%); } 100% { transform: translateX(-340%); } }
     .update-bar .btn { min-height: 32px; padding: 0 12px; font-size: 12px; }
 
     /* ------------------------------------------------------------------ sheets (dialogs) */
@@ -1548,7 +1554,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
     </div>
     <div id="app-bar" class="update-bar" role="status" hidden>
       <span class="ub-ic" aria-hidden="true"><i class="i i-download"></i></span>
-      <span id="app-text"></span>
+      <span class="ab-main"><span id="app-text"></span><span id="app-progress" class="ab-prog" hidden><i id="app-fill"></i></span></span>
       <button id="app-button" class="btn btn-pine" type="button">تنزيل التطبيق</button>
     </div>
 
@@ -3718,9 +3724,62 @@ EMBEDDED_PAGE = r'''<!doctype html>
       if (data.available && !appButton.disabled) {
         appText.textContent = "نسخة جديدة من التطبيق " + data.version + (data.installed ? " (عندك " + data.installed + ")" : "");
         appButton.textContent = "تنزيل التطبيق" + (data.size_text ? " · " + data.size_text : "");
+        if (!appWatch) document.getElementById("app-progress").hidden = true;
       }
       appBar.hidden = !data.available;
     } catch (_) {}
+  }
+  // The download's progress, as the app passes the file on to Android's downloads (also shown in the phone's
+  // notifications). A cut one goes on by itself when the network is back; one that does not start or stays cut
+  // leaves «تنزيل مرة أخرى».
+  const appProgress = document.getElementById("app-progress");
+  const appFill = document.getElementById("app-fill");
+  const megabytes = (bytes) => (bytes / 1048576).toFixed(1);
+  let appWatch = null;
+  function appIdle(text) {
+    clearInterval(appWatch);
+    appWatch = null;
+    if (text) appText.textContent = text;
+    appButton.disabled = false;
+    appButton.textContent = "تنزيل مرة أخرى";
+  }
+  function watchAppDownload(since) {
+    clearInterval(appWatch);
+    let brokenSince = 0;
+    appProgress.hidden = false;
+    appProgress.className = "ab-prog wait";
+    appWatch = setInterval(async () => {
+      let data;
+      try {
+        const response = await fetchWithTimeout(apiRoot + "/app-download/progress", {cache: "no-store"}, 8000);
+        data = await response.json();
+      } catch (_) {
+        return;
+      }
+      const ours = data.started * 1000 >= since - 3000;
+      const total = Number(data.total || 0), sent = Math.min(Number(data.sent || 0), total);
+      if (!ours || data.state === "idle") {
+        if (Date.now() - since > 30000) {
+          appProgress.hidden = true;
+          appIdle("لم يبدأ التنزيل. اسحب شريط الإشعارات لتراه، أو اضغط «تنزيل مرة أخرى».");
+        }
+        return;
+      }
+      const percent = total ? Math.floor(sent * 100 / total) : 0;
+      appProgress.className = "ab-prog" + (data.state === "done" ? " done" : "");
+      appFill.style.width = percent + "%";
+      if (data.state === "done") {
+        appFill.style.width = "100%";
+        appIdle("اكتمل التنزيل ✓ افتح إشعار «اكتمل التنزيل» واضغط «تحديث».");
+      } else if (data.state === "broken") {
+        brokenSince = brokenSince || Date.now();
+        appText.textContent = "انقطع الاتصال عند " + percent + "%… يكمل وحده لما يرجع الإنترنت.";
+        if (Date.now() - brokenSince > 90000) appIdle("توقف التنزيل عند " + percent + "%. اضغط «تنزيل مرة أخرى».");
+      } else {
+        brokenSince = 0;
+        appText.textContent = "يُنزَّل " + percent + "% · " + megabytes(sent) + " من " + megabytes(total) + " ميجابايت";
+      }
+    }, 1000);
   }
   appButton.addEventListener("click", async () => {
     appButton.disabled = true;
@@ -3734,11 +3793,21 @@ EMBEDDED_PAGE = r'''<!doctype html>
       appButton.disabled = false;
       return;
     }
+    const since = Date.now();
     location.href = apiRoot + "/app-download";
     appButton.textContent = "يُنزَّل…";
-    appText.textContent = "يُحفظ في «التنزيلات». لما يكتمل افتح إشعار التنزيل واضغط «تحديث».";
-    setTimeout(() => { appButton.disabled = false; appButton.textContent = "تنزيل مرة أخرى"; }, 20000);
+    appText.textContent = "يبدأ التنزيل…";
+    watchAppDownload(since);
   });
+  // (a download that was going when the page opened again: its bar shows again)
+  fetchWithTimeout(apiRoot + "/app-download/progress", {cache: "no-store"}, 8000).then((response) => response.json()).then((data) => {
+    if ((data.state === "running" || data.state === "broken") && Date.now() - data.at * 1000 < 120000 && !appWatch) {
+      appBar.hidden = false;
+      appButton.disabled = true;
+      appButton.textContent = "يُنزَّل…";
+      watchAppDownload(data.started * 1000);
+    }
+  }).catch(() => {});
   checkAppUpdate();
   setInterval(() => { if (!document.hidden) checkAppUpdate(); }, 30 * 60 * 1000);
 
@@ -14309,15 +14378,35 @@ def app_update_endpoint(access_path: str):
     return jsonify(success=True, size_text=(f"{size / 1048576:.1f} ميجابايت" if size >= 1048576 else ""), **info)
 
 
+# What Android's downloads got of the app so far, for the page's progress bar (the bytes this app passed on to them).
+_app_download_lock = threading.Lock()
+_app_download: dict = {"state": "idle", "sent": 0, "total": 0, "started": 0.0, "at": 0.0}
+
+
+def _app_download_note(**fields) -> None:
+    with _app_download_lock:
+        _app_download.update(fields, at=time.time())
+
+
+@app.get("/<access_path>/app-download/progress")
+def app_download_progress(access_path: str):
+    if not hmac.compare_digest(access_path, ACCESS_PATH):
+        abort(404)
+    with _app_download_lock:
+        return jsonify(success=True, **_app_download)
+
+
 @app.get("/<access_path>/app-download")
 def app_download_endpoint(access_path: str):
     """The APK, streamed from the control server as it comes. The page's own request is cut by the app as soon as
     it sees a file and hands the link to Android's downloads, which asks again and saves it. When it cannot come,
     the page's request gets «nothing» (the page stays as it is) and the downloads' request a failure (no broken file
-    is saved)."""
+    is saved). A download cut on the way (the network went) is taken up again where it stopped, as Android asks."""
     if not hmac.compare_digest(access_path, ACCESS_PATH):
         abort(404)
     from_page = "; wv)" in (request.headers.get("User-Agent") or "")
+    asked = re.fullmatch(r"bytes=(\d+)-", (request.headers.get("Range") or "").strip())
+    start = int(asked.group(1)) if asked and not from_page else 0
     token = _current_token()
     if request.args.get("check"):                  # (the button asks first: can the file come now?)
         try:
@@ -14333,31 +14422,54 @@ def app_download_endpoint(access_path: str):
     try:
         if not token:
             raise RuntimeError("التطبيق غير مُفعّل.")
-        connection, answer = _control_open("app-download", {"token": token})
+        connection, answer = _control_open("app-download", {"token": token, "start": start})
     except RuntimeError:
+        if not from_page:
+            _app_download_note(state="broken")
         return ("", 204) if from_page else ("تعذّر الوصول إلى خادم التحكّم.", 502)
     kind = answer.getheader("Content-Type") or ""
-    if answer.status != 200 or not kind.startswith("application/vnd.android.package-archive"):
+    length = answer.getheader("Content-Length") or ""
+    if answer.status != 200 or not kind.startswith("application/vnd.android.package-archive") or not length.isdigit():
         connection.close()
+        if not from_page:
+            _app_download_note(state="broken")
         return ("", 204) if from_page else ("لا يوجد ملف تطبيق على خادم التحكّم.", 502)
+    fingerprint = answer.getheader("X-App-Sha256") or ""
+    begins = int(answer.getheader("X-App-Start") or 0) if (answer.getheader("X-App-Start") or "0").isdigit() else -1
+    total = int(answer.getheader("X-App-Total") or 0) if (answer.getheader("X-App-Total") or "").isdigit() else int(length)
+    wanted = (request.headers.get("If-Match") or "").strip().strip('"')
+    if start and (begins != start or (wanted and wanted != fingerprint)):
+        connection.close()                         # (an older server, or a newer file meanwhile: start again)
+        _app_download_note(state="broken")
+        return ("", 412)
     match = re.search(r'filename="?([A-Za-z0-9._-]{1,80}\.apk)', answer.getheader("Content-Disposition") or "")
     name = match.group(1) if match else "BOT-GROB.apk"
+    if not from_page:
+        _app_download_note(state="running", sent=start, total=total, **({} if start else {"started": time.time()}))
 
     def stream():
+        sent = start
         try:
             while True:
                 chunk = answer.read(65536)
                 if not chunk:
                     break
                 yield chunk
+                sent += len(chunk)
+                if not from_page:
+                    _app_download_note(sent=sent)
         finally:
             connection.close()
+            if not from_page:
+                _app_download_note(state="done" if sent >= total else "broken", sent=sent)
 
-    headers = {"Content-Disposition": f'attachment; filename="{name}"'}
-    if (answer.getheader("Content-Length") or "").isdigit():
-        headers["Content-Length"] = answer.getheader("Content-Length")
-    return app.response_class(stream(), mimetype="application/vnd.android.package-archive", headers=headers,
-                              direct_passthrough=True)
+    headers = {"Content-Disposition": f'attachment; filename="{name}"', "Content-Length": length, "Accept-Ranges": "bytes"}
+    if fingerprint:
+        headers["ETag"] = f'"{fingerprint}"'
+    if start:
+        headers["Content-Range"] = f"bytes {start}-{total - 1}/{total}"
+    return app.response_class(stream(), status=206 if start else 200, mimetype="application/vnd.android.package-archive",
+                              headers=headers, direct_passthrough=True)
 
 
 # تنبيهات المالك وتعليماته من لوحة خادم التحكّم: تُطلب كل فترة، ويُحفظ آخر رقم وصل فلا يصل التنبيه مرتين.

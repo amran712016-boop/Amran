@@ -4204,7 +4204,9 @@ def api_app_latest():
 
 @app.post(f"/{API}/app-download")
 def api_app_download():
-    """The APK meant for this user, through the app's protected connection."""
+    """The APK meant for this user, through the app's protected connection; from byte «start» on to go on with a cut
+    download. The answer says where it starts, the whole size and the file's fingerprint (a newer file meanwhile is
+    another fingerprint: the app then starts again)."""
     body = request.get_json(silent=True) or {}
     row = code_from_token(body.get("token"))
     if not row:
@@ -4212,7 +4214,31 @@ def api_app_download():
     meta, slot = app_for(row["id"])
     if not meta:
         return api_err("لا يوجد تطبيق منشور على خادم التحكّم.")
-    return send_file(app_path(slot), mimetype=APK_MIME, as_attachment=True, download_name=app_file_name(meta), max_age=0)
+    path = app_path(slot)
+    size = path.stat().st_size
+    try:
+        start = max(0, int(body.get("start") or 0))
+    except (TypeError, ValueError):
+        start = 0
+    if start >= size:
+        return api_err("الجزء المطلوب خارج حجم الملف.")
+    marks = {"X-App-Start": str(start), "X-App-Total": str(size), "X-App-Sha256": meta["sha256"]}
+    if not start:
+        response = send_file(path, mimetype=APK_MIME, as_attachment=True, download_name=app_file_name(meta), max_age=0)
+        response.headers.update(marks)
+        return response
+
+    def rest():
+        with open(path, "rb") as source:
+            source.seek(start)
+            while True:
+                chunk = source.read(1 << 16)
+                if not chunk:
+                    break
+                yield chunk
+
+    return app.response_class(rest(), mimetype=APK_MIME, direct_passthrough=True, headers={
+        **marks, "Content-Length": str(size - start), "Content-Disposition": f'attachment; filename="{app_file_name(meta)}"'})
 
 
 @app.post(f"/{API}/comment")

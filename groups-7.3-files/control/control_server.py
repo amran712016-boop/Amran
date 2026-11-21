@@ -36,6 +36,7 @@ import re
 import secrets
 import shutil
 import ssl
+import struct
 import subprocess
 import sys
 import threading
@@ -280,7 +281,7 @@ def republish_moves_in_background() -> None:
 
 # ---- «نسخة احتياطية»: all the server's data in one file, encrypted with the control panel's password ----
 BACKUP_FILES = ("secrets.json", "codes.json", "keys.json", "usage.json", "notices.json", "acts.json", "support.json",
-                "move.json", "server.crt", "server.key")
+                "move.json", "prices.json", "welcomed.json", "server.crt", "server.key")
 BACKUP_MAGIC = b"GGBAK1"
 
 
@@ -333,6 +334,8 @@ def load_secrets() -> dict:
         data["api_secret"] = new_secret(40); changed = True
     if not data.get("admin_path") or not re.fullmatch(r"[A-Za-z0-9_\-]{16,64}", data["admin_path"]):
         data["admin_path"] = new_secret(40); changed = True
+    if not data.get("app_dl") or not re.fullmatch(r"[A-Za-z0-9_\-]{16,64}", data["app_dl"]):
+        data["app_dl"] = new_secret(24); changed = True       # (the app's download link: fixed, kept in backups)
     forced = os.environ.get("CONTROL_ADMIN_PASSWORD")
     if forced:
         data["admin_salt"] = secrets.token_hex(16)
@@ -1708,6 +1711,7 @@ app = Flask(__name__)
 app.secret_key = SECRETS["session_secret"]
 API = SECRETS["api_secret"]
 ADMIN = SECRETS["admin_path"]
+APP_DL = SECRETS["app_dl"]
 
 
 # «تطبيق المالك» (control/owner-app): the panel in an Android app of the owner's own. It says so in its User-Agent;
@@ -2406,6 +2410,23 @@ f.addEventListener('change',sync);sync()})();</script>{% endif %}
 <ul class="notes"><li>{{ic('shield')}}<span>يُنزَّل السكربت عبر اتصال التطبيق المحمي بخادمك، ولا يصل إلا لجهاز يحمل رمزًا صالحًا.</span></li>
 <li>{{ic('alert')}}<span>يُجرّب التطبيق تشغيل الإصدار الجديد قبل اعتماده؛ إن لم يعمل، يبقى على القديم ولا يتعطّل.</span></li>
 <li>{{ic('edit')}}<span>«تجريبي»: انشر لمستخدمين تختارهم (أنت مثلًا) أولًا، ثم «نشر للجميع» حين تتأكد أنه سليم.</span></li></ul></div>
+
+<div class="card pad" id="apk"><h2>ملف التطبيق (APK)</h2>
+<p class="mut">ارفع آخر نسخة بنيتها من التطبيق: يظهر لمن نسخته أقدم زر «تنزيل التطبيق» أعلى صفحة السكربت، ويصلك رابط ثابت تشاركه في التنبيهات أو أي مكان، ويعطي دائمًا آخر نسخة ترفعها.</p>
+<dl class="mvd">
+<div><dt>المرفوع</dt><dd>{% if app_file %}الإصدار <b>{{app_file.version}}</b> <span class="mut">(رقم {{app_file.code}})</span> · {{app_size}} · رُفع {{app_when}}{% else %}<span class="mut">لم يُرفع ملف تطبيق بعد.</span>{% endif %}</dd></div>
+{% if app_file %}<div><dt>الحزمة</dt><dd><bdi dir="ltr">{{app_file.package}}</bdi>{% if app_file.package != app_package %} · <span class="b">لا تطابق تطبيق المستخدمين</span>{% endif %}</dd></div>{% endif %}
+</dl>
+<form method="post" action="/{{admin}}/app/upload" enctype="multipart/form-data" data-keep-busy>
+<label class="l" for="ap-file">ملف التطبيق <small>(‎.apk)</small></label>
+<input id="ap-file" class="fs" type="file" name="apk" accept=".apk,application/vnd.android.package-archive" required>
+<button class="btn wide ghost" style="margin-top:12px">{{ic('phone')}}{{ 'رفع نسخة أحدث' if app_file else 'رفع التطبيق' }}</button></form>
+{% if app_file %}<p class="l">رابط التنزيل</p>
+<code class="lk">{{app_dl_link}}</code>
+<div class="da"><button type="button" class="btn" data-copy="{{app_dl_link}}">{{ic('copy')}}نسخ الرابط</button><button type="button" class="btn ghost" data-share="{{app_dl_link}}">{{ic('share')}}مشاركة</button></div>
+<form method="post" action="/{{admin}}/app/notify" data-title="إرسال تنبيه؟" data-confirm="يصل لكل المستخدمين تنبيه بأن الإصدار {{app_file.version}} من التطبيق جاهز، مع رابط التنزيل." data-yes="إرسال" data-toast="تم إرسال التنبيه"><button class="btn wide" style="margin-top:12px">{{ic('bell')}}إرسال تنبيه للمستخدمين</button></form>{% endif %}
+<ul class="notes"><li>{{ic('shield')}}<span>زر «تنزيل التطبيق» داخل التطبيق يُنزّله عبر اتصاله المحمي بخادمك ويحفظه في «التنزيلات» بلا أي تحذير. أما الرابط فيُفتح في المتصفح، وقد يعرض «الاتصال غير خاص» لأن شهادة خادمك ذاتية: اضغط «متقدم» ثم «متابعة».</span></li>
+<li>{{ic('alert')}}<span>ليُثبَّت فوق النسخة الموجودة دون حذفها: نفس مفتاح التوقيع (keystore) الذي بنيت به النسخة السابقة، ورقم إصدار (versionCode) أعلى منها.</span></li></ul></div>
 </section>
 
 <section class="panel" id="p-link">
@@ -2679,6 +2700,7 @@ def dashboard():
     if not logged_in():
         return render_template_string(LOGIN_PAGE, admin=ADMIN, error="")
     keys = load_keys()
+    app_file = app_meta()
     with LOCK:
         codes = load_codes()
     acts_data = load_acts()
@@ -2723,6 +2745,9 @@ def dashboard():
         owner_link=owner_app_link(request.host), in_owner_app=OWNER_APP_MARK in (request.headers.get("User-Agent") or ""),
         this_host=request.host, relay=MOVE_RELAY.split("//")[-1],
         prices=load_prices(), welcome=load_welcome(),
+        app_file=app_file, app_dl_link=app_download_link(), app_package=APP_PACKAGE,
+        app_size=size_text(int(app_file.get("size") or 0)) if app_file else "",
+        app_when=seen_text({"last_seen": int(app_file.get("at") or 0)}) if app_file else "",
         script_live=script_live, script_staged=script_staged, script_next=next_version(highest_published_version()),
         script_floor=highest_published_version(), script_pilot=script_pilot, script_pilot_ids=pilot_ids,
         script_pilot_names=script_pilot_names,
@@ -3303,6 +3328,185 @@ def failure_details(failure_id: int):
                    **{key: data.get(key) or ([] if key == "failed" else "") for key in FAILURE_HEAVY})
 
 
+# ----------------------------------------------------------------------------- the app itself (its APK)
+# «ملف التطبيق» in the «السكربت» tab: the owner uploads the app's APK. It is offered at a fixed secret link (to share
+# anywhere: a browser downloads it), and to the apps through their own protected connection: their page shows
+# «تنزيل التطبيق» when this one is newer than theirs, and saves it in the phone's downloads (no browser, so no
+# warning about the server's own certificate).
+APP_DIR = DATA_DIR / "app"
+APP_FILE = APP_DIR / "app.apk"
+APP_META = APP_DIR / "app.json"
+APP_MAX = 300 * 1024 * 1024
+APP_PACKAGE = "app.tg.groups.session"          # (the users' app; another package is kept, but no app offers it)
+APK_MIME = "application/vnd.android.package-archive"
+
+
+def apk_manifest(raw: bytes) -> dict:
+    """package, versionName and versionCode from an APK's AndroidManifest.xml (Android's binary XML)."""
+    def u16(at): return struct.unpack_from("<H", raw, at)[0]
+    def u32(at): return struct.unpack_from("<I", raw, at)[0]
+    if len(raw) < 8 or u16(0) != 0x0003:
+        raise ValueError("not binary XML")
+    strings: list[str] = []
+    res_ids: list[int] = []
+    at = u16(2)
+    while at + 8 <= len(raw):
+        kind, head, size = u16(at), u16(at + 2), u32(at + 4)
+        if size < 8 or at + size > len(raw):
+            raise ValueError("bad chunk")
+        if kind == 0x0001:                                    # the strings
+            count, flags, start = u32(at + 8), u32(at + 16), u32(at + 20)
+            for i in range(count):
+                p = at + start + u32(at + head + 4 * i)
+                if flags & 0x100:                             # UTF-8: characters, then bytes
+                    p += 2 if raw[p] & 0x80 else 1
+                    n = raw[p]; p += 1
+                    if n & 0x80:
+                        n = ((n & 0x7F) << 8) | raw[p]; p += 1
+                    strings.append(raw[p:p + n].decode("utf-8", "replace"))
+                else:
+                    n = u16(p); p += 2
+                    if n & 0x8000:
+                        n = ((n & 0x7FFF) << 16) | u16(p); p += 2
+                    strings.append(raw[p:p + 2 * n].decode("utf-16-le", "replace"))
+        elif kind == 0x0180:                                  # the attribute names' resource ids
+            res_ids = [u32(at + 8 + 4 * i) for i in range((size - 8) // 4)]
+        elif kind == 0x0102:                                  # the first element: <manifest>
+            base = at + 16
+            first, step, count = u16(base + 8), u16(base + 10), u16(base + 12)
+            found = {}
+            for i in range(count):
+                a = base + first + i * step
+                name_i, raw_i, dtype, data = u32(a + 4), u32(a + 8), raw[a + 15], u32(a + 16)
+                rid = res_ids[name_i] if name_i < len(res_ids) else 0
+                key = {0x0101021B: "versionCode", 0x0101021C: "versionName"}.get(rid) or \
+                    (strings[name_i] if name_i < len(strings) else "")
+                if key not in ("package", "versionCode", "versionName"):
+                    continue
+                if raw_i != 0xFFFFFFFF and raw_i < len(strings):
+                    found[key] = strings[raw_i]
+                elif dtype == 0x03 and data < len(strings):
+                    found[key] = strings[data]
+                elif dtype in (0x10, 0x11):
+                    found[key] = data
+            return found
+        at += size
+    raise ValueError("no <manifest>")
+
+
+def apk_info(path: Path) -> dict:
+    """What an uploaded APK says about itself, or raises ValueError with the reason for the owner."""
+    import zipfile
+    try:
+        with zipfile.ZipFile(path) as archive:
+            if archive.getinfo("AndroidManifest.xml").file_size > 4 * 1024 * 1024:
+                raise ValueError("manifest too big")
+            manifest = archive.read("AndroidManifest.xml")
+            has_code = any(name.startswith("classes") and name.endswith(".dex") for name in archive.namelist())
+    except Exception:                       # (not a zip, no manifest, a broken or odd one: all the same to the owner)
+        raise ValueError("هذا ليس ملف تطبيق أندرويد (APK). اختر ملف ‎.apk‎ الذي بنيته.") from None
+    try:
+        info = apk_manifest(manifest)
+        code = int(info["versionCode"])
+    except (ValueError, KeyError, IndexError, TypeError, struct.error):
+        raise ValueError("تعذّرت قراءة رقم إصدار التطبيق من الملف. تأكد أنه ملف APK سليم.") from None
+    if not info.get("package") or not has_code:
+        raise ValueError("ملف التطبيق ناقص. تأكد أنه ملف APK كامل.")
+    return {"package": str(info["package"])[:120], "code": code,
+            "version": str(info.get("versionName") or code).strip()[:40] or str(code)}
+
+
+def app_meta() -> dict:
+    """The uploaded app (version, code, package, size, sha256, at), or {} when there is none."""
+    meta = read_private_json(APP_META) or {}
+    return meta if meta.get("sha256") and APP_FILE.is_file() else {}
+
+
+def app_file_name(meta: dict) -> str:
+    version = re.sub(r"[^0-9A-Za-z._-]", "", str(meta.get("version") or ""))[:40]
+    return f"BOT-GROB-{version}.apk" if version else "BOT-GROB.apk"
+
+
+def app_download_link() -> str:
+    """The fixed link (it always gives the latest upload), at the address the apps use."""
+    port = "" if LISTEN_PORT == 443 else f":{LISTEN_PORT}"
+    return f"https://{public_host()}{port}/{APP_DL}/BOT-GROB.apk"
+
+
+def size_text(size: int) -> str:
+    return f"{size / 1048576:.1f} ميجابايت" if size >= 1048576 else f"{max(1, round(size / 1024))} كيلوبايت"
+
+
+@app.post(f"/{ADMIN}/app/upload")
+def app_upload():
+    """«رفع التطبيق»: the APK, checked (an APK whose package and version can be read), kept for download."""
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    upload = request.files.get("apk")
+    if not upload or not upload.filename:
+        flash("bad", "اختر ملف التطبيق (APK).")
+        return redirect(f"/{ADMIN}")
+    APP_DIR.mkdir(parents=True, exist_ok=True)
+    temporary = APP_DIR / f"upload-{secrets.token_hex(6)}.part"
+    digest, size = hashlib.sha256(), 0
+    try:
+        with open(temporary, "wb") as out:
+            while True:
+                chunk = upload.stream.read(1 << 20)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > APP_MAX:
+                    raise ValueError("ملف التطبيق أكبر من المسموح (٣٠٠ ميجابايت).")
+                digest.update(chunk)
+                out.write(chunk)
+        info = apk_info(temporary)
+        with LOCK:
+            temporary.replace(APP_FILE)
+            write_private_json(APP_META, {**info, "size": size, "sha256": digest.hexdigest(), "at": int(time.time())})
+    except ValueError as exc:
+        flash("bad", str(exc))
+        return redirect(f"/{ADMIN}")
+    except OSError:
+        flash("bad", "تعذّر حفظ الملف على الخادم. تأكد من وجود مساحة كافية.")
+        return redirect(f"/{ADMIN}")
+    finally:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+    other = "" if info["package"] == APP_PACKAGE else (
+        f" تنبيه: اسم حزمته {info['package']} لا يطابق تطبيق المستخدمين ({APP_PACKAGE})، فلن يعرضه التطبيق عليهم؛ يبقى الرابط فقط.")
+    flash("ok", f"رُفع التطبيق: الإصدار {info['version']} (رقم {info['code']}). يظهر زر «تنزيل التطبيق» لمن نسخته أقدم، "
+                f"والرابط جاهز للنسخ أو «إرسال تنبيه».{other}")
+    return redirect(f"/{ADMIN}")
+
+
+@app.post(f"/{ADMIN}/app/notify")
+def app_notify():
+    """«إرسال تنبيه»: a notice to all users that this version is ready, with its link."""
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    meta = app_meta()
+    if not meta:
+        flash("bad", "ارفع ملف التطبيق أولًا.")
+        return redirect(f"/{ADMIN}")
+    add_notice(f"نسخة جديدة من التطبيق ({meta['version']}) جاهزة. افتح التطبيق واضغط «تنزيل التطبيق» في أعلى الصفحة، "
+               f"أو نزّلها من الرابط: {app_download_link()}", "info", "all")
+    flash("ok", f"أُرسل لكل المستخدمين تنبيه بالإصدار {meta['version']} ورابطه.")
+    return redirect(f"/{ADMIN}")
+
+
+@app.get(f"/{APP_DL}/<name>")
+def app_public_download(name):
+    """The fixed link to the latest uploaded app, for a browser (any name after it gives the same file)."""
+    meta = app_meta()
+    if not meta:
+        return "لا يوجد تطبيق مرفوع بعد.", 404
+    return send_file(APP_FILE, mimetype=APK_MIME, as_attachment=True, download_name=app_file_name(meta),
+                     conditional=True, max_age=0)
+
+
 @app.post(f"/{ADMIN}/script/upload")
 def script_upload():
     """Stage an uploaded script (and content), checked, ready for «نشر التحديث»."""
@@ -3805,6 +4009,31 @@ def api_notices():
         after = 0
     items, last = notices_for(row["id"], after)
     return api_ok(notices=items, last=last)
+
+
+@app.post(f"/{API}/app-latest")
+def api_app_latest():
+    """The uploaded app, for the app's page to offer «تنزيل التطبيق» when it is newer than the one installed."""
+    body = request.get_json(silent=True) or {}
+    if not code_from_token(body.get("token")):
+        return api_err("انتهت صلاحية الدخول أو أوقِف الرمز أو نُقل لجهاز آخر. أعد إدخال الرمز.", 200)
+    meta = app_meta()
+    if not meta:
+        return api_ok(available=False)
+    return api_ok(available=True, version=meta["version"], code=meta["code"], package=meta["package"],
+                  size=meta["size"], sha256=meta["sha256"], name=app_file_name(meta))
+
+
+@app.post(f"/{API}/app-download")
+def api_app_download():
+    """The uploaded APK itself, through the app's protected connection."""
+    body = request.get_json(silent=True) or {}
+    if not code_from_token(body.get("token")):
+        return api_err("انتهت صلاحية الدخول أو أوقِف الرمز أو نُقل لجهاز آخر. أعد إدخال الرمز.", 200)
+    meta = app_meta()
+    if not meta:
+        return api_err("لا يوجد تطبيق مرفوع على خادم التحكّم.")
+    return send_file(APP_FILE, mimetype=APK_MIME, as_attachment=True, download_name=app_file_name(meta), max_age=0)
 
 
 @app.post(f"/{API}/comment")

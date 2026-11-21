@@ -1546,6 +1546,11 @@ EMBEDDED_PAGE = r'''<!doctype html>
       <span id="update-text"></span>
       <button id="update-button" class="btn btn-pine" type="button">تحديث</button>
     </div>
+    <div id="app-bar" class="update-bar" role="status" hidden>
+      <span class="ub-ic" aria-hidden="true"><i class="i i-download"></i></span>
+      <span id="app-text"></span>
+      <button id="app-button" class="btn btn-pine" type="button">تنزيل التطبيق</button>
+    </div>
 
     <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
     <div id="net-banner" class="net-banner" role="status" hidden>جارٍ إعادة الاتصال بالبرنامج…</div>
@@ -3698,6 +3703,43 @@ EMBEDDED_PAGE = r'''<!doctype html>
 
   checkUpdate();
   setInterval(() => { if (!document.hidden) checkUpdate(); }, 2 * 60 * 1000);
+
+  // «تنزيل التطبيق»: a newer build of this app on the control server (only inside the app, where the installed one
+  // is known). The file comes through the app's protected connection and is saved in the phone's downloads.
+  const appBar = document.getElementById("app-bar");
+  const appText = document.getElementById("app-text");
+  const appButton = document.getElementById("app-button");
+  async function checkAppUpdate() {
+    try {
+      const response = await fetchWithTimeout(apiRoot + "/app-update", {cache: "no-store"}, 20000);
+      const data = await response.json();
+      if (!data.success) return;
+      if (data.available && !appButton.disabled) {
+        appText.textContent = "نسخة جديدة من التطبيق " + data.version + (data.installed ? " (عندك " + data.installed + ")" : "");
+        appButton.textContent = "تنزيل التطبيق" + (data.size_text ? " · " + data.size_text : "");
+      }
+      appBar.hidden = !data.available;
+    } catch (_) {}
+  }
+  appButton.addEventListener("click", async () => {
+    appButton.disabled = true;
+    appText.textContent = "جارٍ التجهيز…";
+    try {
+      const response = await fetchWithTimeout(apiRoot + "/app-download?check=1", {cache: "no-store"}, 30000);
+      const data = await response.json();
+      if (!data.success) throw new Error(data.message || "");
+    } catch (error) {
+      appText.textContent = (error && error.message) || "تعذّر الاتصال. أعد المحاولة.";
+      appButton.disabled = false;
+      return;
+    }
+    location.href = apiRoot + "/app-download";
+    appButton.textContent = "يُنزَّل…";
+    appText.textContent = "يُحفظ في «التنزيلات». لما يكتمل افتح إشعار التنزيل واضغط «تحديث».";
+    setTimeout(() => { appButton.disabled = false; appButton.textContent = "تنزيل مرة أخرى"; }, 20000);
+  });
+  checkAppUpdate();
+  setInterval(() => { if (!document.hidden) checkAppUpdate(); }, 30 * 60 * 1000);
 
   // ---------------------------------------------------------------- back from the background
   // When the phone comes back to the app, the page does not wait for its next round: it asks the program at once
@@ -14165,6 +14207,156 @@ def control_comment(tweet_text: str, image: bytes | None, voice: str, account: s
     forget_comments_usage()
     remember_reply(account, tweet_id, text)
     return text
+
+
+# «تنزيل التطبيق»: when the owner uploaded (in «السكربت» on the control panel) a newer build of this app than the one
+# installed, the page offers it. The file comes through this app's protected connection to the control server
+# (pinned like the rest, so no warning about the server's own certificate) and the app saves it in the phone's
+# downloads; installing it is Android's own screen.
+APP_UPDATE_CACHE_SECONDS = 600
+_app_update_lock = threading.Lock()
+_app_update_cache: dict = {"at": 0.0, "latest": None}
+_installed_app: dict = {}
+
+
+def installed_app() -> dict:
+    """This app as installed (its package, versionCode and versionName), or {} outside the app."""
+    if not IN_APP:
+        return {}
+    if _installed_app:
+        return _installed_app
+    try:
+        from java import jclass
+        try:
+            context = jclass("com.chaquo.python.Python").getPlatform().getApplication()
+        except Exception:
+            context = jclass("android.app.ActivityThread").currentApplication()
+        package = str(context.getPackageName())
+        info = context.getPackageManager().getPackageInfo(package, 0)
+        try:
+            code = int(info.getLongVersionCode())
+        except Exception:
+            code = int(info.versionCode)
+        _installed_app.update(package=package, code=code, version=str(info.versionName or code))
+    except Exception:
+        return {}
+    return _installed_app
+
+
+def app_update_info(fresh: bool = False) -> dict:
+    """{"available": a newer build of this same app is on the control server, "version", "size", "name", "installed"}."""
+    installed = installed_app()
+    if not installed or not control_configured():
+        return {"available": False}
+    with _app_update_lock:
+        latest = _app_update_cache["latest"]
+        if fresh or latest is None or time.monotonic() - _app_update_cache["at"] > APP_UPDATE_CACHE_SECONDS:
+            token = _current_token()
+            if not token:
+                return {"available": False}
+            try:
+                latest = _control_request("app-latest", {"token": token}, seconds=15)
+            except _ControlNoRoute:
+                latest = {"available": False}            # (an older control server: no app uploads there)
+            except RuntimeError:
+                if latest is None:
+                    return {"available": False}
+            _app_update_cache.update(at=time.monotonic(), latest=latest)
+    try:
+        newer = bool(latest.get("available")) and str(latest.get("package") or "") == installed["package"] \
+            and int(latest.get("code") or 0) > installed["code"]
+    except (TypeError, ValueError):
+        newer = False
+    return {"available": newer, "version": str(latest.get("version") or "")[:40], "size": int(latest.get("size") or 0),
+            "name": str(latest.get("name") or "BOT-GROB.apk")[:80], "installed": installed["version"]}
+
+
+def _control_open(action: str, body: dict, seconds: float = 60):
+    """A request to the control server, its certificate checked like the others, whose answer is read bit by bit:
+    (connection, response). The caller closes the connection."""
+    parsed = _control_parse(control_link())
+    if not parsed:
+        raise RuntimeError("خادم التحكّم غير مضبوط في هذه النسخة.")
+    host, port, secret, pin = parsed
+    context = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = _ssl.CERT_NONE                   # الشهادة تُعرف ببصمتها لا باسمها
+    connection = _http_client.HTTPSConnection(host, port, timeout=8, context=context)
+    try:
+        connection.connect()
+        seen = hashlib.sha256(connection.sock.getpeercert(binary_form=True) or b"").hexdigest()
+        if not hmac.compare_digest(seen, pin):
+            raise RuntimeError("شهادة خادم التحكّم لا تطابق الرابط المثبّت في التطبيق.")
+        connection.sock.settimeout(seconds)
+        connection.request("POST", f"/{secret}/{action}", body=json.dumps(body).encode("utf-8"),
+                           headers={"Content-Type": "application/json; charset=utf-8", "Connection": "close"})
+        return connection, connection.getresponse()
+    except RuntimeError:
+        connection.close()
+        raise
+    except (OSError, _http_client.HTTPException):
+        connection.close()
+        raise _ControlUnreachable("تعذّر الوصول إلى خادم التحكّم. تأكد من الإنترنت ثم أعد المحاولة.") from None
+
+
+@app.get("/<access_path>/app-update")
+def app_update_endpoint(access_path: str):
+    if not hmac.compare_digest(access_path, ACCESS_PATH):
+        abort(404)
+    info = app_update_info(fresh=bool(request.args.get("fresh")))
+    size = int(info.get("size") or 0)
+    return jsonify(success=True, size_text=(f"{size / 1048576:.1f} ميجابايت" if size >= 1048576 else ""), **info)
+
+
+@app.get("/<access_path>/app-download")
+def app_download_endpoint(access_path: str):
+    """The APK, streamed from the control server as it comes. The page's own request is cut by the app as soon as
+    it sees a file and hands the link to Android's downloads, which asks again and saves it. When it cannot come,
+    the page's request gets «nothing» (the page stays as it is) and the downloads' request a failure (no broken file
+    is saved)."""
+    if not hmac.compare_digest(access_path, ACCESS_PATH):
+        abort(404)
+    from_page = "; wv)" in (request.headers.get("User-Agent") or "")
+    token = _current_token()
+    if request.args.get("check"):                  # (the button asks first: can the file come now?)
+        try:
+            latest = _control_request("app-latest", {"token": token}, seconds=15) if token else None
+        except RuntimeError:
+            latest = None
+        if latest is None:
+            return jsonify(success=False, message="تعذّر الوصول إلى خادم التحكّم. تأكد من الإنترنت ثم أعد المحاولة.")
+        with _app_update_lock:
+            _app_update_cache.update(at=time.monotonic(), latest=latest)
+        return jsonify(success=bool(latest.get("available")),
+                       message="" if latest.get("available") else "لا يوجد ملف تطبيق على خادم التحكّم الآن.")
+    try:
+        if not token:
+            raise RuntimeError("التطبيق غير مُفعّل.")
+        connection, answer = _control_open("app-download", {"token": token})
+    except RuntimeError:
+        return ("", 204) if from_page else ("تعذّر الوصول إلى خادم التحكّم.", 502)
+    kind = answer.getheader("Content-Type") or ""
+    if answer.status != 200 or not kind.startswith("application/vnd.android.package-archive"):
+        connection.close()
+        return ("", 204) if from_page else ("لا يوجد ملف تطبيق على خادم التحكّم.", 502)
+    match = re.search(r'filename="?([A-Za-z0-9._-]{1,80}\.apk)', answer.getheader("Content-Disposition") or "")
+    name = match.group(1) if match else "BOT-GROB.apk"
+
+    def stream():
+        try:
+            while True:
+                chunk = answer.read(65536)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            connection.close()
+
+    headers = {"Content-Disposition": f'attachment; filename="{name}"'}
+    if (answer.getheader("Content-Length") or "").isdigit():
+        headers["Content-Length"] = answer.getheader("Content-Length")
+    return app.response_class(stream(), mimetype="application/vnd.android.package-archive", headers=headers,
+                              direct_passthrough=True)
 
 
 # تنبيهات المالك وتعليماته من لوحة خادم التحكّم: تُطلب كل فترة، ويُحفظ آخر رقم وصل فلا يصل التنبيه مرتين.

@@ -10024,11 +10024,10 @@ class TweetsKeptFailing(Exception):
         self.why = why
 
 
-# X refusing every press on two tweets in a row (a temporary restriction): the browser is closed for
-# X_LIMIT_PAUSE_SECONDS, then the task goes back to the first of the two and goes on. After X_LIMIT_PAUSES pauses
-# in one task, the next time it stops.
-X_LIMIT_PAUSE_SECONDS = 240
-X_LIMIT_PAUSES = 3
+# X refusing every press on two tweets in a row (a temporary restriction): the browser is closed for 4 minutes,
+# then the task goes back to the first of the two and goes on. Still refused: 1 minute, then on again. Refused a
+# third time in a row: the task stops. Once X lets presses through again, a later restriction starts from 4 minutes.
+X_LIMIT_PAUSES = (240, 60)
 X_REFUSED_NOTES = (X_LIMITED, X_UNDONE, X_REPLY_LIMITED, "الحساب وصل حد الردود مؤقتًا")
 
 
@@ -10044,6 +10043,7 @@ class LimitedTweets:
         refused = any(note in X_REFUSED_NOTES for note in notes)
         if "تم التنفيذ" in notes:
             self.last = None
+            self.pauses = 0                 # (X lets it through again)
             return None
         if not refused:
             return None
@@ -10054,10 +10054,11 @@ class LimitedTweets:
         return before
 
     def next_pause(self) -> int | None:
-        if self.pauses >= X_LIMIT_PAUSES:
+        """The next wait in seconds, or None when the task is to stop (refused after both waits)."""
+        if self.pauses >= len(X_LIMIT_PAUSES):
             return None
         self.pauses += 1
-        return X_LIMIT_PAUSE_SECONDS
+        return X_LIMIT_PAUSES[self.pauses - 1]
 
 
 class FailedTweets:
@@ -10340,8 +10341,9 @@ def x_limit_pause(limited: LimitedTweets, results: list, starts: dict, back: int
     seconds = limited.next_pause()
     if seconds is None:
         raise TweetsKeptFailing(results, index + 1, "limited")
-    trace_click(f"X رفض التفاعل في تغريدتين متتاليتين: إغلاق المتصفح {seconds // 60} دقائق ثم المتابعة")
-    new_page = pause_after_failures(should_stop, on_progress, total, None, seconds, "limited")
+    trace_click(f"X رفض التفاعل في تغريدتين متتاليتين: إغلاق المتصفح {seconds} ثانية ثم المتابعة")
+    new_page = pause_after_failures(should_stop, on_progress, total, None, seconds,
+                                    "limited" if limited.pauses == 1 else "limited_again")
     if new_page is None:
         return page, index                          # (stopped meanwhile, or no reopening here: the loop sees)
     del results[starts[back]:]
@@ -10651,11 +10653,16 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
             publish_job(job_id, phase="collect", collected=0, requested=0, message=f"يبحث عن التغريدة المحددة. الخطوة {done}، وما زال يحمّل الأقدم.")
         elif phase == "act":
             publish_job(job_id, phase="act", done=done, collected=done, requested=requested, message=f"تنفيذ {done} من {requested}.")
-        elif phase == "limited":
-            # X refused every press on two tweets in a row (a temporary restriction): done = seconds left.
-            if done > 0:
+        elif phase in ("limited", "limited_again"):
+            # X refused every press on two tweets in a row (a temporary restriction): done = seconds left. The
+            # second wait ("limited_again") is the last: refused once more, the task stops.
+            if done > 0 and phase == "limited":
                 publish_job(job_id, phase="act", message=(
                     f"X رفض التفاعل في تغريدتين متتاليتين (تقييد مؤقت)، فأُغلق المتصفح. المتابعة منهما بعد {done // 60}:{done % 60:02d}."))
+            elif done > 0:
+                publish_job(job_id, phase="act", message=(
+                    f"X ما زال يرفض التفاعل (تقييد مؤقت)، فأُغلق المتصفح مرة أخرى. المتابعة بعد {done // 60}:{done % 60:02d}. "
+                    "إن رفض مرة ثالثة تتوقف المهمة."))
             else:
                 publish_job(job_id, phase="act", message="انتهى الانتظار. إعادة فتح المتصفح والمتابعة من التغريدتين…")
         elif phase in ("pause", "pause_again"):
@@ -10735,7 +10742,7 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
                     )
 
                 def on_act(done: int, requested: int, phase: str) -> None:
-                    if phase in ("pause", "pause_again", "limited"):
+                    if phase in ("pause", "pause_again", "limited", "limited_again"):
                         on_progress(done, requested, phase)
                     else:
                         on_progress(len(prefix) + done, len(items), "act")
@@ -10757,7 +10764,7 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
                     job_id, status="done", success=False, phase="act", done=len(results), requested=len(items),
                     collected=len(items), results=results, items=items, actions=actions, username=group_name,
                     message=(f"توقفت المهمة عند التغريدة {stopped_at} من {len(items)}: " + (
-                        f"X ما زال يرفض التفاعل لهذا الحساب بعد {X_LIMIT_PAUSES} انتظارات ({X_LIMIT_PAUSE_SECONDS // 60} دقائق كل مرة). "
+                        "X ما زال يرفض التفاعل لهذا الحساب بعد انتظار 4 دقائق ثم دقيقة. "
                         "أعد المحاولة لاحقًا من «إعادة المحاولة للفاشلة»." if stop_why == "limited" else
                         "تعذّر فتح تغريدتين متتاليتين ثلاث مرات (بعد انتظار ثلاث دقائق ونصف ثم دقيقة)، "
                         "والأرجح أن X يمنع هذا الحساب من فتح التغريدات الآن.")),

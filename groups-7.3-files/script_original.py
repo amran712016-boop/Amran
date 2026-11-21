@@ -5182,6 +5182,20 @@ def press_action_button(page, path: str, status_id: str, action: str) -> str:
 UNCONFIRMED = "أُرسل الطلب لكن تعذر تأكيد الحالة"
 
 
+def buttons_when_loaded(page, status_id: str, actions: list[str], seconds: float = 8.0) -> dict | None:
+    """The tweet's buttons as soon as every one asked for is there (on, or off with its place to press); after
+    `seconds`, whatever was read last. None when the tweet is not on the page."""
+    deadline = time.monotonic() + seconds
+    while True:
+        state = read_action_state(page, status_id, actions)
+        rows = [state.get(action) for action in actions if action in ACTION_CONTROLS] if state else []
+        if state and all(isinstance(row, dict) and (row.get("on") or row.get("box")) for row in rows):
+            return state
+        if time.monotonic() >= deadline:
+            return state
+        page.wait_for_timeout(150)
+
+
 def apply_actions_on_path(page, path: str, actions: list[str]) -> dict[str, str]:
     """Click only inactive controls. Already-on actions are left untouched. One pressed but not seen to turn on is
     tried once more, quietly (see the end)."""
@@ -5190,7 +5204,11 @@ def apply_actions_on_path(page, path: str, actions: list[str]) -> dict[str, str]
     if match:
         status_id = match.group(1)
     try:
-        state = read_action_state(page, status_id, actions)
+        state = buttons_when_loaded(page, status_id, actions)
+        if state and any(not (state.get(action) or {}).get("on") for action in actions if action in ACTION_CONTROLS):
+            # The tweet has loaded: a moment (the panel's «بعد تحميل التغريدة»), then its buttons as they are now.
+            page.wait_for_timeout(pace_ms("settle"))
+            state = read_action_state(page, status_id, actions) or state
     except Exception as exc:
         if browser_closed_error(exc):
             raise BrowserClosed() from exc
@@ -6270,10 +6288,10 @@ def open_reply_composer(page, path: str) -> None:
 
 
 # «سرعة التنفيذ» (set in the control panel, given with each task's start): how long typing the whole comment takes,
-# and the wait between one button press and the next, in seconds, each time at random between the two. These are
-# used when no control server says otherwise.
-PACE_DEFAULTS = {"typing": (3.0, 8.0), "gap": (0.3, 1.0)}
-PACE_LIMITS = {"typing": 60.0, "gap": 10.0}
+# the wait between one button press and the next, and the wait once a tweet has loaded before its first press, in
+# seconds, each time at random between the two. These are used when no control server says otherwise.
+PACE_DEFAULTS = {"typing": (3.0, 8.0), "gap": (0.3, 1.0), "settle": (0.6, 1.5)}
+PACE_LIMITS = {"typing": 60.0, "gap": 10.0, "settle": 10.0}
 _pace = dict(PACE_DEFAULTS)
 
 
@@ -6758,7 +6776,9 @@ def _execute_comment_actions(page, items: list[dict], task_actions: list[str], a
                     result["actions"]["comment"] = "لم يُرجع النموذج تعليقًا صالحًا"
                 else:
                     result["comment"] = comment
-                    page.wait_for_timeout(pace_ms("gap"))         # (before the reply button)
+                    # (before the reply button: the gap after another button, else the wait after the tweet loaded)
+                    pressed_before = any(str(note) in ("تم التنفيذ", UNCONFIRMED) for note in result["actions"].values())
+                    page.wait_for_timeout(pace_ms("gap" if pressed_before else "settle"))
                     posted, detail = publish_reply(page, comment, target_path)
                     result["actions"]["comment"] = "تم التنفيذ" if posted else (detail or "أُرسل الطلب لكن تعذر تأكيد الحالة")
         except RuntimeError as exc:

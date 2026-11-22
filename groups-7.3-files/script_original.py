@@ -9628,12 +9628,12 @@ def tweet_flags_from_api(data, status_id: str) -> dict | None:
 # quicker, and lighter on the phone. It goes on only once the tweet before has left the page and the new one is
 # there, so nothing is ever pressed on the one before. When the new one does not come in time, it is loaded in
 # full as before; two misses in a row and the task loads each tweet in full from then on (its next task tries again).
-# Every
-# IN_PAGE_FULL_EVERY tweets one is loaded in full anyway, so a page kept for hours does not grow heavy.
+# After IN_PAGE_FULL_EVERY tweets opened inside the page (a number between the two, picked anew each time) the next
+# one is loaded in full, as before: the page starts fresh again. Any tweet loaded in full starts the count again.
 IN_PAGE_MOVES = True
 IN_PAGE_WAIT_SECONDS = 7
-IN_PAGE_FULL_EVERY = 30
-_in_page: dict[int, dict] = {}              # id(page) -> {"since_full", "missed", "off"}
+IN_PAGE_FULL_EVERY = (5, 8)
+_in_page: dict[int, dict] = {}              # id(page) -> {"since_full", "full_at", "missed", "off"}
 
 MOVE_IN_PAGE_JS = r"""
 ({path, statusId}) => {
@@ -9667,18 +9667,31 @@ def move_in_page(page, status_id: str, canonical: str) -> bool:
     """Start opening this tweet inside the page now on X (True), or say it is to be loaded in full (False)."""
     if not IN_PAGE_MOVES or not status_id:
         return False
-    state = _in_page.setdefault(id(page), {"since_full": 0, "missed": 0, "off": False})
-    if state["off"]:
-        return False
-    if state["since_full"] >= IN_PAGE_FULL_EVERY:
-        state["since_full"] = 0                     # (this one in full: the page starts light again)
-        return False
+    state = _in_page_state(page)
+    if state["off"] or state["since_full"] >= state["full_at"]:
+        return False                                # (in full; once loaded, the count starts again)
     path = canonical if re.fullmatch(r"/[A-Za-z0-9_]{1,15}/status/\d{6,25}", canonical or "") \
         else f"/i/web/status/{status_id}"
     try:
         return page.evaluate(MOVE_IN_PAGE_JS, {"path": path, "statusId": status_id}) == "ok"
     except Exception:
         return False
+
+
+def _in_page_full_at() -> int:
+    low, high = sorted(int(value) for value in IN_PAGE_FULL_EVERY)
+    return random.randint(max(1, low), max(1, high))
+
+
+def _in_page_state(page) -> dict:
+    return _in_page.setdefault(id(page), {"since_full": 0, "full_at": _in_page_full_at(), "missed": 0, "off": False})
+
+
+def in_page_loaded(page) -> None:
+    """The page was just loaded in full: the next tweets open inside it again, until the next full one is due."""
+    state = _in_page_state(page)
+    state["since_full"] = 0
+    state["full_at"] = _in_page_full_at()
 
 
 def in_page_fresh(page) -> None:
@@ -9688,7 +9701,7 @@ def in_page_fresh(page) -> None:
 
 
 def in_page_moved(page, shown: bool) -> None:
-    state = _in_page.setdefault(id(page), {"since_full": 0, "missed": 0, "off": False})
+    state = _in_page_state(page)
     if shown:
         state["since_full"] += 1
         state["missed"] = 0
@@ -9780,6 +9793,7 @@ def _open_status_page(page, url: str, skip_if_on, note: dict) -> tuple[str | Non
                 page.goto(target, wait_until="commit" if quick else "domcontentloaded", timeout=20_000)
             except Exception:
                 return None, "fail"
+            in_page_loaded(page)
         revealed = False
         deadline = time.monotonic() + (12 if quick else 8)
         while time.monotonic() < deadline:

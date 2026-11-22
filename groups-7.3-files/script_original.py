@@ -937,7 +937,22 @@ EMBEDDED_PAGE = r'''<!doctype html>
     .claude-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
 
     /* ------------------------------------------------------------------ tasks, progress */
-    #task-list { display: grid; gap: 8px; margin-top: 10px; }
+    /* many tasks: the list scrolls inside its own box, so the page does not grow; a faded edge says there is more */
+    #task-list {
+      display: grid;
+      gap: 8px;
+      margin-top: 10px;
+      max-height: clamp(300px, 60vh, 500px);
+      overflow-y: auto;
+      scrollbar-width: thin;
+      border-radius: 14px;
+    }
+    #task-list.fade-top { -webkit-mask-image: linear-gradient(to bottom, transparent, #000 24px); mask-image: linear-gradient(to bottom, transparent, #000 24px); }
+    #task-list.fade-bottom { -webkit-mask-image: linear-gradient(to top, transparent, #000 32px); mask-image: linear-gradient(to top, transparent, #000 32px); }
+    #task-list.fade-top.fade-bottom {
+      -webkit-mask-image: linear-gradient(to bottom, transparent, #000 24px, #000 calc(100% - 32px), transparent);
+      mask-image: linear-gradient(to bottom, transparent, #000 24px, #000 calc(100% - 32px), transparent);
+    }
     .task-card {
       position: relative;
       overflow: hidden;
@@ -1965,6 +1980,16 @@ EMBEDDED_PAGE = r'''<!doctype html>
   const progressPanel = document.getElementById("progress-panel");
   const taskBoard = document.getElementById("task-board");
   const taskList = document.getElementById("task-list");
+  // The task list scrolls inside its own box: its top or bottom edge fades while there is more that way.
+  const fadeTaskList = () => {
+    const room = taskList.scrollHeight - taskList.clientHeight;
+    taskList.classList.toggle("fade-top", room > 2 && taskList.scrollTop > 2);
+    taskList.classList.toggle("fade-bottom", room > 2 && taskList.scrollTop < room - 2);
+  };
+  taskList.addEventListener("scroll", fadeTaskList, {passive: true});
+  taskList.addEventListener("animationend", fadeTaskList);   // (a new card slides in from a little lower)
+  const taskListSizes = "ResizeObserver" in window ? new ResizeObserver(fadeTaskList) : null;
+  if (taskListSizes) taskListSizes.observe(taskList);
   const liveTasks = new Map();
   const progressTitle = document.getElementById("progress-title");
   const progressMessage = document.getElementById("progress-message");
@@ -2193,6 +2218,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
       }
     });
     taskList.prepend(card);
+    taskList.scrollTop = 0;                      // (a new task shows at the top of the list)
+    if (taskListSizes) taskListSizes.observe(card);
     filterTaskCards();
     const paint = (data) => {
       const phase = data.phase || "collect";
@@ -2218,6 +2245,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
       if (Array.isArray(data.items) && data.items.length) links = data.items.map((item) => item && item.url).filter(Boolean);
       if (!links.length && linksWanted && phase === "act") loadLinks();
       copyButton.hidden = !links.length;
+      if (!taskListSizes) fadeTaskList();
     };
     const watch = async () => {
       try {
@@ -2535,6 +2563,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
       if (show) shown += 1;
     });
     taskBoard.hidden = shown === 0;
+    fadeTaskList();
   }
   // Older call sites still call renderSessions(); point it at the accounts bar.
   function renderSessions() { renderAccounts(); }
@@ -3589,7 +3618,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
 
   async function restoreScreen() {
     // The saved tasks start showing their progress at once, without waiting for the rest.
-    readTasks().forEach((task) => followTask(task));
+    readTasks().reverse().forEach((task) => followTask(task));
     let runningJobs = [];
     let screenJob = null;
     for (let attempt = 0; attempt < 2 && !screenJob; attempt += 1) {
@@ -5180,6 +5209,7 @@ def press_action_button(page, path: str, status_id: str, action: str) -> str:
 
 
 UNCONFIRMED = "أُرسل الطلب لكن تعذر تأكيد الحالة"
+COVERED = "تعذر النقر: الزر مغطى بـ "          # + whatever covered it (the button was never pressed)
 
 
 # X's own answer to each press. When X refuses (a temporary restriction after many actions), its page still turns the
@@ -5345,9 +5375,66 @@ def apply_actions_on_path(page, path: str, actions: list[str]) -> dict[str, str]
 
     answers = XAnswers(page)
     try:
-        return _press_actions(page, path, status_id, actions, state, press, answers)
+        outcome = _press_actions(page, path, status_id, actions, state, press, answers)
+        covered = [action for action in actions if str(outcome.get(action) or "").startswith(COVERED)]
+        if covered and status_id:
+            _press_covered_again(page, path, status_id, covered, outcome, press, answers)
+        return outcome
     finally:
         answers.close()
+
+
+def _press_covered_again(page, path: str, status_id: str, covered: list[str], outcome: dict[str, str], press,
+                         answers: XAnswers) -> None:
+    """Something covered these buttons, so they were never pressed: once more, with nothing shown to the user. The
+    tweet is opened again in full (whatever covered them goes with the old page), and only these buttons are
+    pressed, after the tweet has loaded and the usual wait. One that shows on by then is left alone (these buttons
+    switch: a press would undo it). Pressed or not, the result is what this second try finds; a button still
+    covered keeps its failure, for «إعادة المحاولة للفاشلة»."""
+    trace_click(f"إعادة صامتة للتغريدة {status_id}: زر مغطى ({', '.join(covered)})")
+    target = "https://x.com" + path if re.fullmatch(r"/[A-Za-z0-9_]{1,15}/status/\d{6,25}", path or "") \
+        else f"https://x.com/i/web/status/{status_id}"
+    try:
+        page.goto(target, wait_until="domcontentloaded", timeout=20_000)
+        in_page_loaded(page)
+        state = buttons_when_loaded(page, status_id, covered)
+        if state:
+            page.wait_for_timeout(pace_ms("settle"))
+            state = read_action_state(page, status_id, covered) or state
+    except Exception as exc:
+        if browser_closed_error(exc):
+            raise BrowserClosed() from exc
+        trace_click(f"إعادة صامتة: تعذر فتح التغريدة من جديد ({type(exc).__name__})")
+        return
+    if not state:
+        trace_click("إعادة صامتة: لم تظهر التغريدة بعد فتحها من جديد")
+        return
+    pressed = 0
+    for action in covered:
+        row = state.get(action) if isinstance(state.get(action), dict) else {}
+        if row.get("on"):
+            outcome[action] = "مفعّل مسبقًا — تم التجاوز"
+            trace_click(f"{action} إعادة صامتة: الزر مفعّل، لم يُضغط")
+            continue
+        if pressed:
+            page.wait_for_timeout(pace_ms("gap"))
+        pressed += 1
+        try:
+            since = answers.mark()
+            blocker = press(action)
+            if blocker:
+                if blocker != "missing":
+                    outcome[action] = COVERED + blocker
+                trace_click(f"{action} إعادة صامتة: لم يُضغط ({blocker})")
+                continue
+            outcome[action] = confirm_press(page, answers, since, action, status_id)
+            if outcome[action] == "تم التنفيذ":
+                service_used(action)
+            trace_click(f"{action} إعادة صامتة: {outcome[action]}")
+        except Exception as exc:
+            if browser_closed_error(exc):
+                raise BrowserClosed() from exc
+            trace_click(f"{action} إعادة صامتة: استثناء {type(exc).__name__}")
 
 
 def _press_actions(page, path: str, status_id: str, actions: list[str], state: dict, press, answers: XAnswers) -> dict[str, str]:
@@ -5368,7 +5455,7 @@ def _press_actions(page, path: str, status_id: str, actions: list[str], state: d
                 outcome[action] = "زر الإجراء غير متاح — تم التجاوز"
                 continue
             if blocker:
-                outcome[action] = f"تعذر النقر: الزر مغطى بـ {blocker}"
+                outcome[action] = COVERED + blocker
                 continue
             outcome[action] = confirm_press(page, answers, since, action, status_id)
             if outcome[action] == "تم التنفيذ":

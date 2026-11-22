@@ -5210,6 +5210,7 @@ def press_action_button(page, path: str, status_id: str, action: str) -> str:
 
 UNCONFIRMED = "أُرسل الطلب لكن تعذر تأكيد الحالة"
 COVERED = "تعذر النقر: الزر مغطى بـ "          # + whatever covered it (the button was never pressed)
+X_ERROR = "تعذر التنفيذ: رفضه X"                 # (X answered the press with an error)
 
 
 # X's own answer to each press. When X refuses (a temporary restriction after many actions), its page still turns the
@@ -5310,7 +5311,7 @@ def confirm_press(page, answers: XAnswers, since: int, action: str, status_id: s
     while True:
         said = answers.answer(action, since)
         if said:
-            return {"ok": "تم التنفيذ", "already": "تم التنفيذ", "limited": X_LIMITED}.get(said, "تعذر التنفيذ: رفضه X")
+            return {"ok": "تم التنفيذ", "already": "تم التنفيذ", "limited": X_LIMITED}.get(said, X_ERROR)
         row = (read_action_state(page, status_id, [action]) or {}).get(action) or {}
         now = time.monotonic()
         if row.get("on"):
@@ -7025,6 +7026,7 @@ def _execute_comment_actions(page, items: list[dict], task_actions: list[str], a
             on_snapshot(list(results))
         if on_progress:
             on_progress(index + 1, total, "act")
+        in_page_after(page, result["actions"])
         back = limited.seen(index, result["actions"])
         if back is not None:
             page, index = x_limit_pause(limited, results, starts, back, index, should_stop, on_progress, on_snapshot, total, page)
@@ -7662,7 +7664,7 @@ def _run_on_account_browser(auth_token: str, work):
     slot_name = acquire_profile_slot(folder)
     same_browser = signed_by_hand
     try:
-        state = {"context": None, "playwright": None}
+        state = {"context": None, "playwright": None, "page": None}
 
         def keep(page) -> None:
             with _task_browsers_lock:
@@ -7694,8 +7696,10 @@ def _run_on_account_browser(auth_token: str, work):
                 return None
             if state["playwright"] is None:
                 state["playwright"] = sync_playwright().start()
+            refused = in_page_refused(state["page"])        # (X refused earlier in this task: still each in full)
             state["context"], new_page = open_saved(state["playwright"])
-            in_page_fresh(new_page)
+            in_page_fresh(new_page, refused)
+            state["page"] = new_page
             try:
                 new_page.goto("https://www.google.com/", wait_until="domcontentloaded", timeout=60_000)
                 new_page.wait_for_timeout(2000)
@@ -7719,12 +7723,14 @@ def _run_on_account_browser(auth_token: str, work):
                 trace_click("المهمة على صفحة متصفح هذا الحساب المفتوحة")
                 state["context"] = kept.get("context")
                 state["playwright"] = kept.get("playwright")
+                state["page"] = kept["page"]
                 in_page_fresh(kept["page"])
                 return work(kept["page"])
             state["playwright"] = sync_playwright().start()
             state["context"], page = open_saved(state["playwright"])
             if same_browser:
                 keep(page)
+            state["page"] = page
             in_page_fresh(page)
             return work(page)
         finally:
@@ -9717,10 +9723,12 @@ def tweet_flags_from_api(data, status_id: str) -> dict | None:
 # full as before; two misses in a row and the task loads each tweet in full from then on (its next task tries again).
 # After IN_PAGE_FULL_EVERY tweets opened inside the page (a number between the two, picked anew each time) the next
 # one is loaded in full, as before: the page starts fresh again. Any tweet loaded in full starts the count again.
+# Once X refuses anything in a task (see in_page_after), every tweet after it is loaded in full, as before, until
+# the task ends, the browser closed and reopened for a pause included.
 IN_PAGE_MOVES = True
 IN_PAGE_WAIT_SECONDS = 7
 IN_PAGE_FULL_EVERY = (5, 8)
-_in_page: dict[int, dict] = {}              # id(page) -> {"since_full", "full_at", "missed", "off"}
+_in_page: dict[int, dict] = {}              # id(page) -> {"since_full", "full_at", "missed", "off", "refused"}
 
 MOVE_IN_PAGE_JS = r"""
 ({path, statusId}) => {
@@ -9781,10 +9789,31 @@ def in_page_loaded(page) -> None:
     state["full_at"] = _in_page_full_at()
 
 
-def in_page_fresh(page) -> None:
+def in_page_fresh(page, refused: bool = False) -> None:
     """A task starts on this page (a new one, or an account's page kept open from its last task): the in-page move
-    is tried again, whatever the task before found."""
+    is tried again, whatever the task before found. refused: the browser was reopened inside a task X has refused
+    in already, so this page goes on loading each tweet in full."""
     _in_page.pop(id(page), None)
+    if refused:
+        state = _in_page_state(page)
+        state["off"] = state["refused"] = True
+
+
+def in_page_refused(page) -> bool:
+    return page is not None and bool((_in_page.get(id(page)) or {}).get("refused"))
+
+
+def in_page_after(page, notes: dict) -> None:
+    """After each tweet. X refused something on it (a press it undid or refused, a reply it refused, its error
+    answer): from the next tweet on, each one is loaded in full, as before the in-page move, for the rest of the
+    task."""
+    said = [str(note) for note in (notes or {}).values()]
+    if not any(note in X_REFUSED_NOTES or note == X_ERROR for note in said):
+        return
+    state = _in_page_state(page)
+    if not state.get("refused"):
+        state["off"] = state["refused"] = True
+        trace_click("رفض X التفاعل: كل تغريدة تُحمَّل كاملة في باقي المهمة (الطريقة السابقة)")
 
 
 def in_page_moved(page, shown: bool) -> None:
@@ -10568,6 +10597,7 @@ def visit_and_apply(page, items: list[dict], task_actions: list[str], on_progres
             on_snapshot(list(results))
         if on_progress:
             on_progress(index + 1, total, "act")
+        in_page_after(page, result["actions"])
         back = limited.seen(index, result["actions"])
         if back is not None:
             page, index = x_limit_pause(limited, results, starts, back, index, should_stop, on_progress, on_snapshot, total, page)

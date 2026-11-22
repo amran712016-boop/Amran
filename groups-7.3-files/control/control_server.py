@@ -890,7 +890,9 @@ def history_add(grown: dict) -> None:
 
 
 def save_acts_of(code_id: str, accounts: list) -> None:
-    """The app's numbers now, for each of its X accounts: they replace what it sent before."""
+    """The app's numbers now, for each of its X accounts: they replace what it sent before. What the app no longer
+    has (it was deleted and set up again, or its data cleared: an account gone from its numbers, or one counting
+    again from zero) is kept here ("kept"), so the panel's numbers never go down because of the phone."""
     clean = {}
     for row in accounts[:ACT_MAX_ACCOUNTS]:
         if not isinstance(row, dict):
@@ -910,17 +912,31 @@ def save_acts_of(code_id: str, accounts: list) -> None:
         clean[key] = dict(counts, name=name)
     with LOCK:
         data = load_acts()
-        before = (data.get(code_id) or {}).get("accounts") or {}
+        before_row = data.get(code_id) or {}
+        before = before_row.get("accounts") or {}
+        kept = before_row.get("kept") if isinstance(before_row.get("kept"), dict) else {}
         grown = {name: 0 for name in ("repost", "like", "bookmark")}
-        for key, counts in clean.items():
-            old = before.get(key)
+        for key, old in before.items():
             if not isinstance(old, dict):
-                continue                    # (an account seen for the first time: its numbers are from before)
+                continue
+            new = clean.get(key)
+            if new is None or any(new[act] < int(old.get(act) or 0) for act in ACT_NAMES):
+                # Gone from the app, or counting again from zero (its numbers never go down otherwise): what it
+                # had is kept, and what it shows now is new.
+                slot = kept.setdefault(key, dict({act: 0 for act in ACT_NAMES}, name=""))
+                for act in ACT_NAMES:
+                    slot[act] = int(slot.get(act) or 0) + int(old.get(act) or 0)
+                slot["name"] = old.get("name") or slot.get("name") or ""
+                if new is not None:
+                    for name in grown:
+                        grown[name] += min(new[name], 100_000)
+                continue
             for name in grown:
-                step = counts[name] - int(old.get(name) or 0)
-                if 0 < step < 100_000:      # (a count that went down: the app started counting again)
+                step = new[name] - int(old.get(name) or 0)
+                if 0 < step < 100_000:
                     grown[name] += step
-        data[code_id] = {"at": int(time.time()), "accounts": clean}
+        # (an account seen for the first time adds nothing to the chart: its numbers are from before)
+        data[code_id] = {"at": int(time.time()), "accounts": clean, **({"kept": kept} if kept else {})}
         write_private_json(ACTS_PATH, data)
         history_add(grown)
 
@@ -930,7 +946,9 @@ def acts_of(code_id: str, data: dict | None = None) -> dict:
     last sent them (0: never)."""
     row = (data if data is not None else load_acts()).get(code_id) or {}
     merged: dict[str, dict] = {}
-    for key, value in (row.get("accounts") or {}).items():
+    # (what each account shows in the app now, and what was kept of it when the app lost it: the same @name adds up)
+    parts = list((row.get("accounts") or {}).items()) + list((row.get("kept") or {}).items())
+    for key, value in parts:
         if not isinstance(value, dict):
             continue
         name = str(value.get("name") or "")

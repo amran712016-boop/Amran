@@ -14610,6 +14610,25 @@ def device_id() -> str:
         return got
 
 
+def hardware_id() -> str:
+    """This phone as Android knows it for this app (ANDROID_ID): the same after the app is deleted and installed again,
+    or its data cleared (only a factory reset changes it), unlike device_id(), which is made by the install. Sent
+    hashed, only so the control server gives one account and one trial balance per phone. "" outside the app."""
+    try:
+        from java import jclass
+        try:
+            context = jclass("com.chaquo.python.Python").getPlatform().getApplication()
+        except Exception:
+            context = jclass("android.app.ActivityThread").currentApplication()
+        secure = jclass("android.provider.Settings$Secure")
+        value = str(secure.getString(context.getContentResolver(), secure.ANDROID_ID) or "").strip().lower()
+    except Exception:
+        return ""
+    if not re.fullmatch(r"[0-9a-f]{8,32}", value) or value == "9774d56d682e549c":
+        return ""                                   # (none, or the one value some very old phones all share)
+    return hashlib.sha256(("bot-grob-hw|" + value).encode("utf-8")).hexdigest()[:32]
+
+
 def _control_parse(link: str):
     match = _CONTROL_RE.fullmatch(link or "")
     if not match:
@@ -14726,14 +14745,14 @@ def _keep_session(data: dict, code: str = "", user: str = "") -> str:
 
 def control_activate(code: str) -> str:
     """يُفعّل بالرمز عبر الخادم (مربوطًا بجهاز هذا التطبيق)، ويحفظ رمز الجلسة. يعيد اسم المحرّك، أو يرفع خطأ."""
-    return _keep_session(_control_request("activate", {"code": code, "device": device_id()}), code=code)
+    return _keep_session(_control_request("activate", {"code": code, "device": device_id(), "hw": hardware_id()}), code=code)
 
 
 def control_sign_in(kind: str, name: str, password: str) -> str:
     """«تسجيل الدخول» (login) أو «حساب جديد» (register) باسم مستخدم وكلمة سر، مربوطًا بجهاز هذا التطبيق كالرمز."""
     if kind not in ("login", "register"):
         raise RuntimeError("طلب غير معروف.")
-    data = _control_request(kind, {"user": name, "password": password, "device": device_id()})
+    data = _control_request(kind, {"user": name, "password": password, "device": device_id(), "hw": hardware_id()})
     return _keep_session(data, user=name)
 
 
@@ -14796,6 +14815,32 @@ def billing_update(answer: dict) -> None:
                 except (TypeError, ValueError):
                     continue
             _billing["prices"] = clean
+
+
+WELCOME_CLAIM_PATH = DATA_DIR / "welcome-claim.json"
+
+
+def claim_welcome() -> None:
+    """An account made on the first-run page of an older app could not say which phone it was on, so the control
+    server holds its trial balance: asked for here once, with the phone's id (see hardware_id)."""
+    if not IN_APP or not control_configured():
+        return
+    token, phone = _current_token(), hardware_id()
+    if not token or not phone:
+        return
+    asked = hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+    if (read_private_json(WELCOME_CLAIM_PATH) or {}).get("asked") == asked:
+        return
+    try:
+        answer = _control_request("welcome-claim", {"token": token, "hw": phone}, seconds=15)
+    except _ControlNoRoute:
+        answer = {}                                 # (an older control server: nothing to claim there)
+    except RuntimeError:
+        return                                      # (out of reach: next time the program starts)
+    write_private_json(WELCOME_CLAIM_PATH, {"asked": asked})
+    if float(answer.get("gift") or 0) > 0:
+        print(f"أُضيف الرصيد التجريبي: ${float(answer['gift']):g}", flush=True)
+        billing_refresh()
 
 
 def billing_refresh() -> None:
@@ -15776,4 +15821,5 @@ if __name__ == "__main__":
     except Exception as exc:
         print(f"التحديث التلقائي: {type(exc).__name__}: {exc}", flush=True)
     threading.Thread(target=auto_update_loop, name="auto-update", daemon=True).start()
+    threading.Thread(target=lambda: (time.sleep(5), claim_welcome()), name="welcome-claim", daemon=True).start()
     app.run(host=bind_host, port=port, debug=False, threaded=True)

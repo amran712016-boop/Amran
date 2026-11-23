@@ -82,6 +82,25 @@ def device_id() -> str:
     return got
 
 
+def hardware_id() -> str:
+    """This phone as Android knows it for this app (ANDROID_ID): the same after the app is deleted and installed again,
+    or its data cleared (only a factory reset changes it), unlike device_id(), which is made by the install. Sent
+    hashed, only so the control server gives one account and one trial balance per phone. "" outside the app."""
+    try:
+        from java import jclass
+        try:
+            context = jclass("com.chaquo.python.Python").getPlatform().getApplication()
+        except Exception:
+            context = jclass("android.app.ActivityThread").currentApplication()
+        secure = jclass("android.provider.Settings$Secure")
+        value = str(secure.getString(context.getContentResolver(), secure.ANDROID_ID) or "").strip().lower()
+    except Exception:
+        return ""
+    if not re.fullmatch(r"[0-9a-f]{8,32}", value) or value == "9774d56d682e549c":
+        return ""                                   # (none, or the one value some very old phones all share)
+    return hashlib.sha256(("bot-grob-hw|" + value).encode("utf-8")).hexdigest()[:32]
+
+
 def _control_request(action: str, body: dict, seconds: float = 30, max_read: int = 1 << 20) -> dict:
     """Pinned POST to the control server (the certificate is trusted by the fingerprint in the link)."""
     parsed = _control_parse(control_link())
@@ -173,14 +192,14 @@ def _get_engine(data: dict, code: str = "", user: str = "") -> None:
 
 def fetch_engine(code: str) -> None:
     """Activate the code, then download and save the script. Raises RuntimeError with a message for the user."""
-    _get_engine(_control_request("activate", {"code": code, "device": device_id()}), code=code)
+    _get_engine(_control_request("activate", {"code": code, "device": device_id(), "hw": hardware_id()}), code=code)
 
 
 def fetch_engine_with_account(kind: str, name: str, password: str) -> None:
     """Sign in («login») or make a new account («register»), then download and save the script."""
     if kind not in ("login", "register"):
         raise RuntimeError("طلب غير معروف.")
-    _get_engine(_control_request(kind, {"user": name, "password": password, "device": device_id()}), user=name)
+    _get_engine(_control_request(kind, {"user": name, "password": password, "device": device_id(), "hw": hardware_id()}), user=name)
 
 
 def resume() -> bool:

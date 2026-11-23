@@ -536,17 +536,34 @@ def add_device(row: dict, device: str) -> None:
     row["devices"] = (others + [device])[-DEVICES_KEPT:]
 
 
-def take_welcome(codes: list, device: str) -> float:
-    """(Under LOCK, as an account is made on this phone.) Its trial balance, or 0 when this phone had it already."""
+def phone_of(body: dict) -> str:
+    """The phone as Android knows it for the app (its ANDROID_ID, hashed by the app): the same after the app is deleted
+    and installed again, or its data cleared. "" from an app too old to send it."""
+    value = str(body.get("hw") or "").strip().lower()
+    return value if re.fullmatch(r"[0-9a-f]{32}", value) else ""
+
+
+def account_made_on(codes: list, phone: str) -> dict | None:
+    """The account already made on this phone (one per phone), if it is still there."""
+    if not phone:
+        return None
+    return next((row for row in codes if row.get("account") and row.get("hw") == phone), None)
+
+
+def take_welcome(codes: list, device: str, phone: str = "") -> float:
+    """(Under LOCK, as an account is made on this phone.) Its trial balance, or 0: an app too old to say which phone it
+    is on (it could be deleted and installed again for another), or a phone that had it already or signed in before."""
     amount = load_welcome()
-    if amount <= 0 or any(device in devices_of(row) for row in codes):
+    if amount <= 0 or not phone or any(device in devices_of(row) for row in codes):
         return 0.0
-    key = hashlib.sha256(("welcome|" + device).encode("utf-8")).hexdigest()[:32]
+    keys = [hashlib.sha256(("welcome-phone|" + phone).encode("utf-8")).hexdigest()[:32]]
+    if device:
+        keys.append(hashlib.sha256(("welcome|" + device).encode("utf-8")).hexdigest()[:32])
     data = read_private_json(WELCOMED_PATH) or {}
     phones = data.get("devices") if isinstance(data.get("devices"), list) else []
-    if key in phones:
+    if any(key in phones for key in keys):
         return 0.0
-    phones.append(key)
+    phones.extend(keys)
     write_private_json(WELCOMED_PATH, {"devices": phones[-100000:]})
     return amount
 
@@ -3227,6 +3244,7 @@ def dashboard():
         r["device_count"] = n
         r["devices_text"] = ("غير مربوط", "جهاز مربوط", "جهازان")[n] if n < 3 else f"{n} {'أجهزة' if n <= 10 else 'جهازًا'}"
         r.pop("devices", None)                       # (the phones' ids stay out of the page)
+        r.pop("hw", None)
     stats = {"users": len(rows), "active": sum(1 for r in rows if r.get("active")),
              "bound": sum(r["device_count"] for r in rows),
              "comments": sum(r["usage"]["total"] for r in rows),
@@ -4532,9 +4550,11 @@ def _device_of(body: dict) -> str:
 
 @app.post(f"/{API}/register")
 def api_register():
-    """A new account made in the app: a user like any other, bound to this phone, paying in advance («مسبق»)."""
+    """A new account made in the app: a user like any other, bound to this phone, paying in advance («مسبق»). One account
+    per phone: a phone that made one (still there) is told to sign in with it."""
     body = request.get_json(silent=True) or {}
     device = _device_of(body)
+    phone = phone_of(body)
     name = str(body.get("user") or "").strip()
     password = str(body.get("password") or "")
     if not device:
@@ -4544,7 +4564,12 @@ def api_register():
     if not 6 <= len(password) <= 128:
         return api_err("كلمة السر 6 أحرف على الأقل.")
     with LOCK:
-        taken = account_row(load_codes(), name) is not None
+        codes = load_codes()
+        taken = account_row(codes, name) is not None
+        made = account_made_on(codes, phone)
+    if made:
+        return api_err(f"أُنشئ على هذا الجوال حساب من قبل باسم «{(made.get('account') or {}).get('user') or made.get('label')}». "
+                       "سجّل الدخول به. لكل جوال حساب واحد.")
     if taken:
         return api_err("اسم المستخدم مأخوذ. اختر اسمًا آخر.")
     if not signup_allowed():
@@ -4554,12 +4579,16 @@ def api_register():
         codes = load_codes()
         if account_row(codes, name) is not None:
             return api_err("اسم المستخدم مأخوذ. اختر اسمًا آخر.")
+        if account_made_on(codes, phone):
+            return api_err("أُنشئ على هذا الجوال حساب من قبل. سجّل الدخول به. لكل جوال حساب واحد.")
         now = int(time.time())
-        gift = take_welcome(codes, device)
+        gift = take_welcome(codes, device, phone)
+        waits = not phone and load_welcome() > 0 and not any(device in devices_of(row) for row in codes)
         row = {"id": secrets.token_hex(8), "code": make_code(), "label": name, "active": True, "created": now,
                "last_seen": now, "bound_device": device, "pay": PAY_PREPAID, "balance": gift,
                "ledger": [{"at": now, "amount": gift, "note": WELCOME_NOTE, "after": gift}] if gift else [],
-               "account": {"user": name, "pw": stored, "at": now}}
+               "account": {"user": name, "pw": stored, "at": now}, **({"hw": phone} if phone else {}),
+               **({"welcome_pending": now} if waits else {})}
         codes.insert(0, row)
         save_codes(codes)
     return signed_in(row, device)
@@ -4597,6 +4626,41 @@ def api_login():
         target["last_seen"] = int(time.time())
         save_codes(codes)
     return signed_in(target, device)
+
+
+WELCOME_CLAIM_DAYS = 3
+
+
+@app.post(f"/{API}/welcome-claim")
+def api_welcome_claim():
+    """An account made on the first-run page of an older app (it could not say which phone it was on): its script,
+    which can, names the phone now, once. It gets the trial balance only as a new account would: the first account
+    made on that phone, on a phone that never had it, within WELCOME_CLAIM_DAYS of being made."""
+    body = request.get_json(silent=True) or {}
+    row = code_from_token(body.get("token"))
+    if not row:
+        return api_err("انتهت صلاحية الدخول أو أوقِف الرمز أو نُقل لجهاز آخر. أعد إدخال الرمز.", 200)
+    phone = phone_of(body)
+    gift = 0.0
+    with LOCK:
+        codes = load_codes()
+        target = next((item for item in codes if item.get("id") == row["id"]), None)
+        pending = int((target or {}).get("welcome_pending") or 0)
+        if target is None or not pending or not phone:
+            return api_ok(gift=0)
+        target.pop("welcome_pending", None)
+        others = [item for item in codes if item is not target]
+        if time.time() - pending <= WELCOME_CLAIM_DAYS * 86400 and not account_made_on(others, phone):
+            target["hw"] = phone                     # (this phone's one account)
+            gift = take_welcome(others, target.get("bound_device") or "", phone)
+            if gift:
+                target["balance"] = round(balance_of(target) + gift, 4)
+                ledger = target.get("ledger") if isinstance(target.get("ledger"), list) else []
+                ledger.insert(0, {"at": int(time.time()), "amount": gift, "note": WELCOME_NOTE, "after": round(target["balance"], 2)})
+                target["ledger"] = ledger[:LEDGER_KEEP]
+        save_codes(codes)
+        balance = round(balance_of(target), 4)
+    return api_ok(gift=gift, balance=balance)
 
 
 @app.post(f"/{API}/check")

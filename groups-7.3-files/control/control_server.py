@@ -1542,6 +1542,85 @@ def prompt_from_form(form) -> tuple[dict, str]:
             "max_chars": 0 if max_chars == REPLY_MAX_CHARS else max_chars}, ""
 
 
+# «جرّب» with a tweet's link: the tweet is read from FxTwitter, as the app reads it before writing a comment: its text,
+# the post it quotes, and its picture only when its own text is too short to say what it is about.
+FX_STATUS_URL = "https://api.fxtwitter.com/status/{}"
+TWEET_LINK = re.compile(r"^(?:https?://)?(?:www\.|mobile\.)?(?:x|twitter|fxtwitter|vxtwitter|fixupx)\.com/"
+                        r"(?:[A-Za-z0-9_]{1,15}|i(?:/web)?)/status(?:es)?/(\d{5,25})(?:[/?#]\S*)?$", re.I)
+TWEET_PICTURE = re.compile(r"https://pbs\.twimg\.com/[A-Za-z0-9_./-]{1,200}(?:\?[A-Za-z0-9_=&.-]{1,80})?")
+COMMENT_PICTURE_LETTERS = 60
+COMMENT_PICTURE_MAX_BYTES = 3_000_000
+
+
+def fetch_tweet(status_id: str) -> tuple[dict, str]:
+    """(FxTwitter's tweet, why not)."""
+    asking = urllib.request.Request(FX_STATUS_URL.format(status_id), headers={
+        "User-Agent": "x-group-tool/1.0", "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(asking, timeout=20) as response:
+            data = json.loads(response.read(4 * 1024 * 1024).decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code in (401, 404, 410):
+            return {}, "التغريدة غير موجودة: محذوفة أو من حساب خاص."
+        if exc.code in (403, 429, 503):
+            return {}, "خدمة قراءة التغريدات لا تجيب الآن. أعد المحاولة بعد قليل، أو الصق نص التغريدة."
+        return {}, f"تعذّر جلب التغريدة (HTTP {exc.code}). الصق نصها بدلًا من الرابط."
+    except Exception:
+        return {}, "تعذّر الاتصال بخدمة قراءة التغريدات. الصق نص التغريدة بدلًا من الرابط."
+    tweet = data.get("tweet") if isinstance(data, dict) else None
+    if not isinstance(tweet, dict):
+        return {}, "التغريدة غير موجودة: محذوفة أو من حساب خاص."
+    return tweet, ""
+
+
+def tweet_material(tweet: dict) -> tuple[str, str]:
+    """(the text a reply is written from, the address of the picture to send with it or "") — as the app makes them."""
+    body = re.sub(r"[ \t\u00a0]+", " ", str(tweet.get("text") or "")[:2000]).strip()
+    quoted = tweet.get("quote") if isinstance(tweet.get("quote"), dict) else {}
+    lines = [body] if body else []
+    quote_body = re.sub(r"\s+", " ", str(quoted.get("text") or "")[:1000]).strip()
+    if quote_body:
+        author = quoted.get("author") if isinstance(quoted.get("author"), dict) else {}
+        by = str(author.get("screen_name") or "")
+        by = by if re.fullmatch(r"[A-Za-z0-9_]{1,30}", by) else ""
+        lines.append(f"[The post it quotes{' (by @' + by + ')' if by else ''}: {quote_body[:600]}]")
+    picture = ""
+    if len(re.sub(r"[\W_]+", "", re.sub(r"https?://\S+", "", body))) < COMMENT_PICTURE_LETTERS:
+        for source in (tweet, quoted):
+            media = source.get("media") if isinstance(source.get("media"), dict) else {}
+            for item in media.get("all") or []:
+                if not isinstance(item, dict):
+                    continue
+                address = item.get("url") if item.get("type") == "photo" else (
+                    item.get("thumbnail_url") if item.get("type") in ("video", "gif") else "")
+                if isinstance(address, str) and TWEET_PICTURE.fullmatch(address):
+                    picture = address
+                    break
+            if picture:
+                break
+    if picture:
+        lines.append("[The picture sent with it is the tweet's own picture]")
+    return "\n".join(lines).strip(), picture
+
+
+def tweet_picture(address: str) -> bytes | None:
+    """A tweet's picture, small (X's picture server only, as JPEG); None when it cannot be had."""
+    if not address or not TWEET_PICTURE.fullmatch(address):
+        return None
+    base = address.split("?", 1)[0]
+    stem = re.sub(r"\.(?:jpe?g|png|webp|gif)$", "", base, flags=re.I)
+    for url in (stem + "?format=jpg&name=small", base):
+        try:
+            asking = urllib.request.Request(url, headers={"User-Agent": "x-group-tool/1.0", "Accept": "image/jpeg"})
+            with urllib.request.urlopen(asking, timeout=12) as response:
+                data = response.read(COMMENT_PICTURE_MAX_BYTES + 1)
+        except Exception:
+            continue
+        if len(data) <= COMMENT_PICTURE_MAX_BYTES and data[:3] == b"\xff\xd8\xff":
+            return data
+    return None
+
+
 def reply_settings() -> dict:
     return getattr(_prompt_trial, "settings", None) or load_prompt()
 
@@ -2224,7 +2303,7 @@ html.loading .ldpill{display:flex}
 .prc-s{order:2;display:flex;flex-wrap:wrap;gap:4px 10px;font-size:12.5px;color:var(--mut);flex-basis:100%;margin-top:-6px;padding-bottom:12px}.prc form{padding-bottom:16px}.prc .mut{margin:0 0 4px;font-size:13px}
 .pr-ta{min-height:300px;font-size:14px;line-height:1.75}.pm{display:inline-block;font:12px/1.6 ui-monospace,Menlo,Consolas,monospace;padding:0 6px;border-radius:6px;background:var(--soft);border:1px solid var(--line);color:var(--ink)}
 .prt{margin:2px 0 14px;padding:14px;border:1px dashed var(--line);border-radius:14px}.prt .l{margin-top:0}.prt-r{display:flex;gap:8px;margin-top:8px}.prt-r .fs{flex:1;height:44px}.prt-r .btn{flex:none;min-width:96px}
-.prt-o{margin:10px 0 0;padding:12px 14px;border-radius:12px;background:var(--soft);border:1px solid var(--line);font-size:15px;line-height:1.75;overflow-wrap:anywhere}.prt-o small{display:block;margin-top:4px;color:var(--mut);font-size:12px}.prt-o.bad{color:var(--bad);background:var(--badsoft);border-color:transparent}
+.prt-o{margin:10px 0 0;padding:12px 14px;border-radius:12px;background:var(--soft);border:1px solid var(--line);font-size:15px;line-height:1.75;overflow-wrap:anywhere}.prt-o small{display:block;margin-top:4px;color:var(--mut);font-size:12px}.prt-t{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;margin-bottom:8px;padding-bottom:8px;border-bottom:1px dashed var(--line);font-size:13px;line-height:1.6;color:var(--mut)}.prt-o.bad{color:var(--bad);background:var(--badsoft);border-color:transparent}
 .prg{display:grid;grid-template-columns:1fr 1fr;gap:10px}.prw{margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}.prc .prh{margin:6px 0 0;font-size:12px}.prf{display:grid;gap:6px;font-size:13px;font-weight:500;color:var(--mut)}.prf .fs{height:44px;font-variant-numeric:tabular-nums}
 .tg{display:inline-block;margin-inline-start:6px;padding:1px 7px;border-radius:99px;font-size:11px;font-weight:600;vertical-align:2px;background:var(--soft);color:var(--mut);border:1px solid var(--line)}
 .tg.pp{background:var(--prisoft);color:var(--pri);border-color:transparent}
@@ -2467,17 +2546,19 @@ main{padding-bottom:56px}
 <p class="mut prh">من 60 إلى 280، وعدد الكلمات المطلوب يتبعه تلقائيًا. الخانة الفارغة تعني الافتراضي.</p>
 <button class="btn wide" style="margin-top:14px">حفظ البرومبت</button></form>
 <div class="prt"><p class="l">جرّب قبل الحفظ</p>
-<textarea id="pr-tweet" class="ta" rows="3" dir="auto" maxlength="4000" placeholder="الصق نص تغريدة…" aria-label="نص تغريدة للتجربة"></textarea>
+<textarea id="pr-tweet" class="ta" rows="3" dir="auto" maxlength="4000" placeholder="الصق رابط التغريدة أو نصها…" aria-label="رابط تغريدة أو نصها للتجربة"></textarea>
 <div class="prt-r"><select id="pr-voice" class="fs" aria-label="صيغة الرد"><option value="male">مذكر</option><option value="female">مؤنث</option><option value="neutral">محايد</option></select><button type="button" class="btn ghost" id="pr-go">جرّب</button></div>
 <p id="pr-out" class="prt-o" aria-live="polite" hidden></p>
-<p class="mut prh">يكتب تعليقًا واحدًا بما هو مكتوب أعلاه ولو لم تحفظه، بمفتاحك الحالي، ولا يُحسب على أي مستخدم.</p></div>
+<p class="mut prh">يكتب تعليقًا واحدًا بما هو مكتوب أعلاه ولو لم تحفظه، بمفتاحك الحالي، ولا يُحسب على أي مستخدم. ومن الرابط يقرأ التغريدة كما يقرأها التطبيق: نصها، والتغريدة التي تقتبسها، وصورتها إن كان نصها قصيرًا.</p></div>
 {% if prompt.custom %}<form method="post" action="/{{admin}}/prompt/reset" data-title="استعادة البرومبت الافتراضي؟" data-confirm="تُمسح تعديلاتك على التعليمات والزوايا والأساليب والطول، ويعود كل شيء كما كان في البداية." data-yes="استعادة الافتراضي" data-kind="danger" data-toast="عاد البرومبت الافتراضي"><button class="btn ghost wide" style="margin:0 0 16px">استعادة الافتراضي</button></form>{% endif %}
 <script>(function(){var f=document.getElementById('pr-form'),go=document.getElementById('pr-go'),out=document.getElementById('pr-out');if(!f||!go)return;
-function show(text,bad,note){out.hidden=false;out.className='prt-o'+(bad?' bad':'');out.textContent=text;if(note){var s=document.createElement('small');s.textContent=note;out.appendChild(s)}}
-go.addEventListener('click',function(){var tw=document.getElementById('pr-tweet').value.trim();if(!tw){show('الصق نص تغريدة أولًا.',true);return}
+function show(text,bad,note,tweet){out.hidden=false;out.className='prt-o'+(bad?' bad':'');out.textContent='';
+if(tweet){var t=document.createElement('span');t.className='prt-t';t.textContent=(tweet.by?'\u2066@'+tweet.by+'\u2069: ':'')+(tweet.text||'')+(tweet.picture?' (مع صورتها)':'');out.appendChild(t)}
+out.appendChild(document.createTextNode(text));if(note){var s=document.createElement('small');s.textContent=note;out.appendChild(s)}}
+go.addEventListener('click',function(){var tw=document.getElementById('pr-tweet').value.trim();if(!tw){show('الصق رابط تغريدة أو نصها أولًا.',true);return}
 var d=new FormData(f);d.append('tweet',tw);d.append('voice',document.getElementById('pr-voice').value);go.disabled=true;show('يكتب تعليقًا…');
 fetch('/{{admin}}/prompt/try',{method:'POST',body:d,credentials:'same-origin'}).then(function(r){return r.json()}).then(function(j){
-if(j.ok){show(j.comment,false,'\u2066'+j.chars+' / '+j.limit+'\u2069 حرف')}else{show(j.error||'تعذّرت التجربة.',true)}}).catch(function(){show('تعذّر الاتصال بالخادم.',true)}).then(function(){go.disabled=false})})})();</script>
+if(j.ok){show(j.comment,false,'\u2066'+j.chars+' / '+j.limit+'\u2069 حرف',j.tweet)}else{show(j.error||'تعذّرت التجربة.',true)}}).catch(function(){show('تعذّر الاتصال بالخادم.',true)}).then(function(){go.disabled=false})})})();</script>
 </details>
 <div class="tb">
 <label class="search">{{ic('search')}}<input id="q" type="search" placeholder="ابحث بالاسم أو الرمز" aria-label="ابحث بالاسم أو الرمز" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search"><button type="button" class="qx" id="qx" aria-label="مسح البحث" hidden>{{ic('x')}}</button></label>
@@ -3486,19 +3567,34 @@ def prompt_try():
     saved, problem = prompt_from_form(request.form)
     if problem:
         return jsonify(ok=False, error=problem)
-    tweet = str(request.form.get("tweet") or "").strip()[:4000]
-    if not tweet:
-        return jsonify(ok=False, error="الصق نص تغريدة أولًا.")
+    given = str(request.form.get("tweet") or "").strip()
+    if not given:
+        return jsonify(ok=False, error="الصق رابط تغريدة أو نصها أولًا.")
+    link = TWEET_LINK.match(given)
+    image, shown = None, None
+    if link:                                    # (a link: the tweet as the app reads it)
+        tweet, problem = fetch_tweet(link.group(1))
+        if problem:
+            return jsonify(ok=False, error=problem)
+        text, picture = tweet_material(tweet)
+        image = tweet_picture(picture) if picture else None
+        if not text and not image:
+            return jsonify(ok=False, error="لا نص ولا صورة في هذه التغريدة.")
+        author = tweet.get("author") if isinstance(tweet.get("author"), dict) else {}
+        shown = {"by": str(author.get("screen_name") or "")[:30], "text": str(tweet.get("text") or "")[:400],
+                 "picture": bool(image)}
+    else:
+        text = given[:4000]
     voice = request.form.get("voice") if request.form.get("voice") in REPLY_VOICES else DEFAULT_REPLY_VOICE
     settings = prompt_settings(saved)
     _prompt_trial.settings = settings
     try:
-        comment = write_reply(tweet, None, voice, random.randrange(len(settings["manners"])), [])
+        comment = write_reply(text, image, voice, random.randrange(len(settings["manners"])), [])
     except RuntimeError as exc:
         return jsonify(ok=False, error=str(exc))
     finally:
         _prompt_trial.settings = None
-    return jsonify(ok=True, comment=comment, chars=len(comment), limit=settings["max_chars"])
+    return jsonify(ok=True, comment=comment, chars=len(comment), limit=settings["max_chars"], tweet=shown)
 
 
 @app.post(f"/{ADMIN}/code/pay")

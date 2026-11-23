@@ -1000,6 +1000,31 @@ EMBEDDED_PAGE = r'''<!doctype html>
     .task-card[data-status="failed"] .task-phase { color: var(--bad); background: var(--bad-soft); }
     .task-card[data-status="stopped"] .task-phase, .task-card[data-status="interrupted"] .task-phase { color: var(--warn); background: var(--warn-soft); }
     .task-msg { margin-top: 5px; font-size: 12px; line-height: 1.55; color: var(--text-3); }
+    .task-fails {
+      display: inline-flex;
+      align-items: flex-start;
+      gap: 6px;
+      max-width: 100%;
+      margin-top: 6px;
+      padding: 4px 9px;
+      border: 1px solid var(--warn-line);
+      border-radius: 9px;
+      background: var(--warn-soft);
+      color: var(--warn);
+      font: inherit;
+      font-size: 12px;
+      font-weight: 500;
+      line-height: 1.55;
+      text-align: start;
+      cursor: pointer;
+    }
+    .task-fails[hidden] { display: none; }
+    .task-fails.ic::before { width: 13px; height: 13px; margin-top: 2px; flex: none; }
+    .fails-list { display: grid; gap: 8px; margin: 10px 0 4px; padding: 0; list-style: none; }
+    .fails-list li { padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-2); }
+    .fails-list a { display: block; margin-bottom: 4px; font-size: 12.5px; color: var(--brand-2); overflow-wrap: anywhere; text-align: left; }
+    .fails-list p { margin: 2px 0 0; font-size: 12.5px; line-height: 1.6; color: var(--text-2); }
+    .fails-list b { font-weight: 600; color: var(--text); }
     .task-count {
       flex: none;
       direction: ltr;
@@ -1786,6 +1811,19 @@ EMBEDDED_PAGE = r'''<!doctype html>
     </div>
   </div>
 </div>{% endif %}
+<div id="fails-box" class="pc-backdrop" hidden>
+  <div class="usage-sheet" role="dialog" aria-modal="true" aria-labelledby="fails-title">
+    <div class="usage-head">
+      <b id="fails-title">ما لم يُنفَّذ</b>
+      <button id="fails-close" class="usage-x" type="button" aria-label="إغلاق">×</button>
+    </div>
+    <p id="fails-note" class="usage-note"></p>
+    <ol id="fails-list" class="fails-list"></ol>
+    <div class="usage-foot">
+      <button id="fails-done" class="btn btn-pine" type="button">إغلاق</button>
+    </div>
+  </div>
+</div>
 <div id="usage-box" class="pc-backdrop" hidden>
   <div class="usage-sheet" role="dialog" aria-modal="true" aria-labelledby="usage-title">
     <div class="usage-head">
@@ -2130,12 +2168,14 @@ EMBEDDED_PAGE = r'''<!doctype html>
     const card = document.createElement("article");
     card.className = "task-card";
     card.dataset.token = task.token || "";
-    card.innerHTML = '<div class="progress-top"><div><h3></h3><p class="task-phase"></p><p class="task-msg"></p></div><b class="task-count">0</b></div><div class="meter is-indeterminate"><span class="task-bar"></span></div><div class="task-actions"><button class="btn btn-ghost task-stop ic i-stop" type="button">إيقاف هذه المهمة</button><button class="btn btn-ghost task-copy ic i-copy" type="button" hidden>نسخ التغريدات</button><button class="btn task-retry ic i-rotate" type="button" hidden>إعادة المحاولة</button><button class="btn task-retry-failed ic i-rotate" type="button" hidden>إعادة المحاولة للفاشلة</button></div>';
+    card.innerHTML = '<div class="progress-top"><div><h3></h3><p class="task-phase"></p><p class="task-msg"></p><button class="task-fails ic i-alert" type="button" hidden></button></div><b class="task-count">0</b></div><div class="meter is-indeterminate"><span class="task-bar"></span></div><div class="task-actions"><button class="btn btn-ghost task-stop ic i-stop" type="button">إيقاف هذه المهمة</button><button class="btn btn-ghost task-copy ic i-copy" type="button" hidden>نسخ التغريدات</button><button class="btn task-retry ic i-rotate" type="button" hidden>إعادة المحاولة</button><button class="btn task-retry-failed ic i-rotate" type="button" hidden>إعادة المحاولة للفاشلة</button></div>';
     card.querySelector("h3").textContent = task.title || "مهمة";
     const stopButton = card.querySelector(".task-stop");
     const retryButton = card.querySelector(".task-retry");
     const copyButton = card.querySelector(".task-copy");
     const retryFailedButton = card.querySelector(".task-retry-failed");
+    const failsButton = card.querySelector(".task-fails");
+    failsButton.addEventListener("click", () => openFails(task));
     let links = [];
     let linksWanted = true;
     copyButton.addEventListener("click", async () => {
@@ -2242,6 +2282,11 @@ EMBEDDED_PAGE = r'''<!doctype html>
       const failedCount = data.status !== "running" ? Number(data.retry_failed || 0) : 0;
       retryFailedButton.hidden = !failedCount;
       if (failedCount) retryFailedButton.textContent = "إعادة المحاولة للفاشلة (" + failedCount + ")";
+      const missed = FAIL_ORDER.filter((key) => data.failed && data.failed[key] > 0);
+      failsButton.hidden = !missed.length;
+      if (missed.length) {
+        failsButton.textContent = "لم يُنفَّذ: " + missed.map((key) => FAIL_NAMES[key] + " في " + tweetsCount(data.failed[key])).join(" · ");
+      }
       if (Array.isArray(data.items) && data.items.length) links = data.items.map((item) => item && item.url).filter(Boolean);
       if (!links.length && linksWanted && phase === "act") loadLinks();
       copyButton.hidden = !links.length;
@@ -2803,6 +2848,66 @@ EMBEDDED_PAGE = r'''<!doctype html>
   function shortPath(url) {
     try { return new URL(url).pathname; } catch (_) { return url; }
   }
+
+  // «ما لم يُنفَّذ»: a task card's line, and the sheet with its tweets whose actions were not done, and why.
+  const FAIL_ORDER = ["like", "repost", "bookmark", "comment"];
+  const FAIL_NAMES = {like: "إعجاب", repost: "إعادة نشر", bookmark: "مرجعية", comment: "رد"};
+  const failsBox = document.getElementById("fails-box");
+  const failsList = document.getElementById("fails-list");
+  const failsNote = document.getElementById("fails-note");
+  function tweetsCount(n) {
+    if (n === 1) return "تغريدة واحدة";
+    if (n === 2) return "تغريدتين";
+    return n + (n >= 3 && n <= 10 ? " تغريدات" : " تغريدة");
+  }
+  function closeFails() { failsBox.hidden = true; }
+  async function openFails(task) {
+    failsList.textContent = "";
+    failsNote.textContent = "جارٍ التحميل…";
+    document.getElementById("fails-title").textContent = "ما لم يُنفَّذ" + (task.title ? " · " + task.title : "");
+    failsBox.hidden = false;
+    let data;
+    try {
+      const response = await fetchWithTimeout(apiRoot + "/jobs/" + encodeURIComponent(task.id) + "/failed", {
+        headers: {"X-CSRF-Token": csrf, "X-Job-Key": task.key || "", "X-Client-Id": clientId()},
+        cache: "no-store"
+      });
+      data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || "");
+    } catch (error) {
+      failsNote.textContent = error.message || "تعذّر تحميل التفاصيل.";
+      return;
+    }
+    const items = data.items || [];
+    failsNote.textContent = items.length
+      ? (data.total > items.length ? "آخر " + items.length + " من " + data.total + " تغريدة. " : "")
+        + "«إعادة المحاولة للفاشلة» تعيدها بعد انتهاء المهمة."
+      : "لا شيء لم يُنفَّذ.";
+    items.slice().reverse().forEach((row) => {
+      const item = document.createElement("li");
+      const link = document.createElement("a");
+      link.href = row.url;
+      link.target = "_blank";
+      link.rel = "noopener";
+      link.dir = "ltr";
+      link.textContent = shortPath(row.url);
+      item.appendChild(link);
+      FAIL_ORDER.concat(Object.keys(row.actions || {}).filter((key) => !FAIL_ORDER.includes(key))).forEach((key) => {
+        if (!row.actions || !(key in row.actions)) return;
+        const line = document.createElement("p");
+        const name = document.createElement("b");
+        name.textContent = (FAIL_NAMES[key] || key) + ": ";
+        line.appendChild(name);
+        line.appendChild(document.createTextNode(row.actions[key]));
+        item.appendChild(line);
+      });
+      failsList.appendChild(item);
+    });
+  }
+  document.getElementById("fails-close").addEventListener("click", closeFails);
+  document.getElementById("fails-done").addEventListener("click", closeFails);
+  failsBox.addEventListener("click", (event) => { if (event.target === failsBox) closeFails(); });
+  document.addEventListener("keydown", (event) => { if (event.key === "Escape" && !failsBox.hidden) closeFails(); });
 
   function stat(value, label) {
     const box = document.createElement("div");
@@ -6309,11 +6414,12 @@ class CommentsAhead:
     about to open and for the one after it, so the next reply is being written while the task is still
     on the tweet before."""
 
-    def __init__(self, write, account: str, actions: list[str], should_stop=None):
+    def __init__(self, write, account: str, actions: list[str], should_stop=None, refused=None):
         self.write = write                  # (tweet_text, image, tweet_id) -> reply
         self.account = account
         self.actions = list(actions)
         self.should_stop = should_stop
+        self.refused = refused              # (RefusedButtons: once X refuses the replies, none is written)
         self.lock = threading.Lock()
         self.asked: dict[str, dict] = {}
         self.closed = False
@@ -6325,6 +6431,8 @@ class CommentsAhead:
             return
         if "comment" not in item_actions(item or {}, self.actions):
             return                          # (a retry of the failed: this tweet's comment is not asked again)
+        if self.refused is not None and self.refused.is_off("comment"):
+            return
         if (already_done_recently(self.account, status_id, self.actions)
                 or already_done_recently(self.account, status_id, ["comment"]) or tweet_is_ignored(url)):
             return                          # it is skipped: no reply is needed
@@ -6887,25 +6995,27 @@ def execute_comment_actions(page, items: list[dict], actions: list[str], api_key
     (FxTwitter), asked before the tweet is opened (CommentsAhead): the page's pictures are not needed, so
     this browser keeps not loading them."""
     ahead = None
+    refused = RefusedButtons()
     if "comment" in actions:
         ahead = CommentsAhead(
             lambda text, image, tweet_id: reply_for(api_key, model, image, text, voice, account, tweet_id),
-            account, actions, should_stop,
+            account, actions, should_stop, refused,
         )
     try:
         return _execute_comment_actions(page, items, actions, api_key, model, on_progress, should_stop, on_snapshot,
-                                        account, voice, ahead)
+                                        account, voice, ahead, refused)
     finally:
         if ahead is not None:
             ahead.close()
 
 
 def _execute_comment_actions(page, items: list[dict], task_actions: list[str], api_key: str, model: str, on_progress,
-                             should_stop, on_snapshot, account: str, voice: str, ahead) -> list[dict]:
+                             should_stop, on_snapshot, account: str, voice: str, ahead, refused=None) -> list[dict]:
     results: list[dict] = []
     total = len(items)
     failures = FailedTweets()
     limited = LimitedTweets()
+    refused = refused if refused is not None else RefusedButtons()
     # Where each tweet's result starts in results: going back after a pause drops them from there on.
     starts: dict[int, int] = {}
     if on_progress:
@@ -6916,11 +7026,21 @@ def _execute_comment_actions(page, items: list[dict], task_actions: list[str], a
         index += 1
         item = items[index]
         actions = item_actions(item, task_actions)      # (all the task's, or only those that failed on it before)
-        plain = [action for action in actions if action != "comment"]
+        off = [action for action in actions if refused.is_off(action)]
+        plain = [action for action in actions if action != "comment" and action not in off]
         if should_stop and should_stop():
             break
         starts[index] = len(results)
         result = {"url": item.get("url", ""), "text": item.get("text", ""), "actions": {}, "comment": ""}
+        if off and len(off) == len(actions):
+            # Every button asked here is one X kept refusing in this task: the tweet is not opened.
+            result["actions"] = {key: BUTTON_OFF for key in actions}
+            results.append(result)
+            if on_snapshot:
+                on_snapshot(list(results))
+            if on_progress:
+                on_progress(index + 1, total, "act")
+            continue
         path = normalize_status_path(str(item.get("url") or ""))
         if not path:
             result["actions"] = {key: "تعذر العثور على المنشور" for key in actions}
@@ -6985,6 +7105,7 @@ def _execute_comment_actions(page, items: list[dict], task_actions: list[str], a
                 if on_progress:
                     on_progress(back, total, "act")
                 index = back - 1
+                refused.fresh()
                 continue
         if not opened:
             note = "محذوفة — تم التخطي" if reason == "gone" else "تعذر فتح التغريدة"
@@ -7013,10 +7134,13 @@ def _execute_comment_actions(page, items: list[dict], task_actions: list[str], a
                 except Exception:
                     pass
             page.wait_for_timeout(300)
+            result["actions"].update({key: BUTTON_OFF for key in off if key != "comment"})
             if left:
                 result["actions"].update(apply_actions_on_path(page, target_path, left))
             if replied_before or ("comment" in actions and already_done_recently(account, tweet_status_id(target_path), ["comment"])):
                 result["actions"]["comment"] = "سبق الرد خلال ٨ ساعات — تم التخطي"
+            elif "comment" in off:
+                result["actions"]["comment"] = BUTTON_OFF
             elif "comment" in actions:
                 reply_to = tweet_status_id(target_path)
                 comment, content = ahead.take(reply_to) if ahead is not None else ("", None)
@@ -7055,9 +7179,10 @@ def _execute_comment_actions(page, items: list[dict], task_actions: list[str], a
         if on_progress:
             on_progress(index + 1, total, "act")
         in_page_after(page, result["actions"])
-        back = limited.seen(index, result["actions"])
+        back = None if buttons_after(refused, limited, result["actions"]) else limited.seen(index, result["actions"])
         if back is not None:
             page, index = x_limit_pause(limited, results, starts, back, index, should_stop, on_progress, on_snapshot, total, page)
+            refused.fresh()
             continue
         page.wait_for_timeout(600)
     return results
@@ -10223,6 +10348,61 @@ class LimitedTweets:
         return X_LIMIT_PAUSES[self.pauses - 1]
 
 
+# A button X keeps refusing while it lets another of the task's buttons through (it restricts that one only: the
+# bookmark, say, while the like goes through): refused on two tweets in a row, and it is not pressed again in this
+# task. The tweets after that say BUTTON_OFF for it (a failure, which «إعادة المحاولة للفاشلة» redoes later), and a
+# tweet with nothing else to do is not opened. When X refuses every button, LimitedTweets pauses the task, as before.
+BUTTON_OFF = "لم يُضغط: رفضه X مرتين متتاليتين في هذه المهمة"
+BUTTON_OFF_AFTER = 2
+
+
+def refused_by_x(note: str) -> bool:
+    return note in X_REFUSED_NOTES or note == X_ERROR
+
+
+class RefusedButtons:
+    def __init__(self):
+        self.streak: dict[str, int] = {}        # button -> refusals in a row
+        self.others: dict[str, bool] = {}       # button -> another button went through meanwhile
+        self.off: set[str] = set()
+
+    def is_off(self, action: str) -> bool:
+        return action in self.off
+
+    def seen(self, notes: dict) -> list[str]:
+        """This tweet's outcome. Returns the buttons it turns off for the rest of the task."""
+        notes = {str(key): str(value) for key, value in (notes or {}).items()}
+        done = {key for key, value in notes.items() if value == "تم التنفيذ"}
+        refused = {key for key, value in notes.items() if key not in self.off and refused_by_x(value)}
+        for action in done:
+            self.streak[action] = 0
+            self.others[action] = False
+        for action in refused:
+            self.streak[action] = self.streak.get(action, 0) + 1
+        for action, count in self.streak.items():
+            if count and done - {action}:
+                self.others[action] = True
+        turned = sorted(action for action in refused if self.streak[action] >= BUTTON_OFF_AFTER and self.others.get(action))
+        self.off.update(turned)
+        return turned
+
+    def fresh(self) -> None:
+        """After a pause (X may let things through again): the counts start again; a button turned off stays off."""
+        self.streak.clear()
+        self.others.clear()
+
+
+def buttons_after(refused: RefusedButtons, limited: LimitedTweets, notes: dict) -> bool:
+    """After each tweet. True when a button was turned off by it (then the tweet is not counted as one X refused:
+    that button is the trouble, and it is dealt with)."""
+    turned = refused.seen(notes)
+    for action in turned:
+        trace_click(f"{action}: رفضه X في تغريدتين متتاليتين، فلا يُضغط في باقي المهمة")
+    if turned:
+        limited.last = None
+    return bool(turned)
+
+
 class FailedTweets:
     """The tweets of a task that would not open (a deleted one does not count). Two in a row that would
     not open close the browser for a pause, then the task goes back to the first of them: the first
@@ -10443,7 +10623,7 @@ def apply_actions_immediately(page, url: str, actions: list[str]) -> dict[str, s
 COMMENT_RETRY_SAFE = (
     "تعذر فتح التغريدة", "تعذر العثور على المنشور", "لم يُرجع النموذج تعليقًا صالحًا", "لم يظهر مربع كتابة الرد",
     "زر النشر بقي معطّلًا", "لم تُفتح التغريدة في الوقت المناسب", "الحساب وصل حد الردود مؤقتًا",
-    "رفض X الرد (تقييد مؤقت)",
+    "رفض X الرد (تقييد مؤقت)", "لم يُضغط: رفضه X مرتين متتاليتين في هذه المهمة",
 )
 
 
@@ -10489,6 +10669,31 @@ def failed_retry_items(job: dict) -> list[dict]:
     return out
 
 
+FAILED_SHOWN = 500                  # tweets listed in a task card's «ما لم يُنفَّذ» (the newest first beyond it)
+
+
+def failed_rows(job: dict) -> list[dict]:
+    """The task's tweets with an action not done (as the page counts it), each with those actions and why."""
+    rows = []
+    for row in job.get("results") or []:
+        if not isinstance(row, dict):
+            continue
+        missed = {str(action): str(note) for action, note in (row.get("actions") or {}).items()
+                  if action in ALLOWED_ACTIONS and action_failed(note)}
+        if missed:
+            rows.append({"url": str(row.get("url") or ""), "actions": missed})
+    return rows
+
+
+def failed_summary(job: dict) -> dict:
+    """How many tweets each action was not done on: {"like": 12, "bookmark": 30}."""
+    counts: dict[str, int] = {}
+    for row in failed_rows(job):
+        for action in row["actions"]:
+            counts[action] = counts.get(action, 0) + 1
+    return counts
+
+
 def failed_retry_count(job: dict) -> int:
     if job.get("status") != "done" or job.get("retried_by") or (job.get("kind") or "") != "execute":
         return 0
@@ -10521,6 +10726,7 @@ def visit_and_apply(page, items: list[dict], task_actions: list[str], on_progres
     total = len(items)
     failures = FailedTweets()
     limited = LimitedTweets()
+    refused = RefusedButtons()
     # Where each tweet's result starts in results: going back after a pause drops them from there on.
     starts: dict[int, int] = {}
     if on_progress:
@@ -10531,10 +10737,21 @@ def visit_and_apply(page, items: list[dict], task_actions: list[str], on_progres
         index += 1
         item = items[index]
         actions = item_actions(item, task_actions)      # (all the task's, or only those that failed on it before)
+        off = [action for action in actions if refused.is_off(action)]
+        press = [action for action in actions if action not in off]
         if should_stop and should_stop():
             break
         starts[index] = len(results)
         result = {"url": item.get("url", ""), "text": item.get("text", ""), "actions": {}}
+        if off and not press:
+            # Every button asked here is one X kept refusing in this task: the tweet is not opened.
+            result["actions"] = {key: BUTTON_OFF for key in actions}
+            results.append(result)
+            if on_snapshot:
+                on_snapshot(list(results))
+            if on_progress:
+                on_progress(index + 1, total, "act")
+            continue
         status_id = tweet_status_id(str(item.get("url") or ""))
         if already_done_recently(account, status_id, actions):
             # Done by this account in the last 8 hours: skip without opening the tweet.
@@ -10551,7 +10768,7 @@ def visit_and_apply(page, items: list[dict], task_actions: list[str], on_progres
                 break
         acted = True
         try:
-            opened, reason = open_task_tweet(page, str(item.get("url") or ""), actions)
+            opened, reason = open_task_tweet(page, str(item.get("url") or ""), press)
         except Exception as exc:
             if browser_closed_error(exc):
                 if on_snapshot and results:
@@ -10583,6 +10800,7 @@ def visit_and_apply(page, items: list[dict], task_actions: list[str], on_progres
                 if on_progress:
                     on_progress(back, total, "act")
                 index = back - 1
+                refused.fresh()
                 continue
         if not opened:
             note = "محذوفة — تم التخطي" if reason == "gone" else "تعذر فتح التغريدة"
@@ -10601,13 +10819,13 @@ def visit_and_apply(page, items: list[dict], task_actions: list[str], on_progres
             continue
         result["url"] = "https://x.com" + opened
         try:
-            already_on = reason == "already_on" or all_actions_already_on(page, opened, actions)
+            already_on = reason == "already_on" or all_actions_already_on(page, opened, press)
         except Exception as exc:
             if browser_closed_error(exc):
                 raise BrowserClosed() from exc
             already_on = False
         if already_on:
-            result["actions"] = {key: "مفعّل مسبقًا — تم التجاوز" for key in actions}
+            result["actions"] = {key: (BUTTON_OFF if key in off else "مفعّل مسبقًا — تم التجاوز") for key in actions}
             remember_done(account, status_id or tweet_status_id(opened), result["actions"])
             results.append(result)
             if on_snapshot:
@@ -10617,11 +10835,12 @@ def visit_and_apply(page, items: list[dict], task_actions: list[str], on_progres
             continue
         close_popups(page)
         try:
-            result["actions"] = apply_actions_on_path(page, opened, actions)
+            pressed = apply_actions_on_path(page, opened, press)
         except Exception as exc:
             if browser_closed_error(exc):
                 raise BrowserClosed() from exc
-            result["actions"] = {key: "تعذر تنفيذ الإجراء بعد فتح التغريدة" for key in actions}
+            pressed = {key: "تعذر تنفيذ الإجراء بعد فتح التغريدة" for key in press}
+        result["actions"] = {key: (BUTTON_OFF if key in off else pressed.get(key, "تعذر التنفيذ")) for key in actions}
         remember_done(account, status_id or tweet_status_id(opened), result["actions"])
         count_successes(result["actions"], account)
         results.append(result)
@@ -10630,9 +10849,10 @@ def visit_and_apply(page, items: list[dict], task_actions: list[str], on_progres
         if on_progress:
             on_progress(index + 1, total, "act")
         in_page_after(page, result["actions"])
-        back = limited.seen(index, result["actions"])
+        back = None if buttons_after(refused, limited, result["actions"]) else limited.seen(index, result["actions"])
         if back is not None:
             page, index = x_limit_pause(limited, results, starts, back, index, should_stop, on_progress, on_snapshot, total, page)
+            refused.fresh()
     return results
 
 
@@ -12386,6 +12606,7 @@ def public_job(job: dict, light: bool = False, links: bool = False) -> dict:
         "results": job.get("results") or [],
         "resumable": bool(job.get("resumable")) and job.get("status") == "done",
         "retry_failed": failed_retry_count(job),
+        "failed": failed_summary(job) if (job.get("kind") or "") == "execute" else {},
     }
     if light and job["status"] == "running":
         payload["items"] = []
@@ -12990,6 +13211,24 @@ def job_status(access_path: str, job_id: str):
         if not owner_ok:
             return jsonify(success=False, message="لا توجد عملية بهذا المعرّف."), 404
         return jsonify(public_job(job, light=light, links=links))
+
+
+@app.get("/<access_path>/jobs/<job_id>/failed")
+def job_failed(access_path: str, job_id: str):
+    """«ما لم يُنفَّذ» in a task card: its tweets with an action not done, and why (the same keys as the task)."""
+    if not hmac.compare_digest(access_path, ACCESS_PATH):
+        abort(404)
+    with jobs_lock:
+        job = jobs.get(job_id)
+        if not job:
+            return jsonify(success=False, message="لا توجد عملية بهذا المعرّف."), 404
+        if not job_key_matches(job, request.headers.get("X-Job-Key", "")):
+            if not csrf_matches(request.headers.get("X-CSRF-Token", "")):
+                return jsonify(success=False, message="انتهت صلاحية الصفحة. أعد تحميلها ثم حاول مجددًا."), 400
+            if not (bool(job.get("owner")) and job.get("owner") == session.get("csrf_token", "")):
+                return jsonify(success=False, message="لا توجد عملية بهذا المعرّف."), 404
+        rows = failed_rows(job)
+    return jsonify(success=True, total=len(rows), items=rows[-FAILED_SHOWN:])
 
 
 @app.get("/<access_path>/sessions")

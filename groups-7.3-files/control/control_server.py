@@ -281,7 +281,8 @@ def republish_moves_in_background() -> None:
 
 # ---- «نسخة احتياطية»: all the server's data in one file, encrypted with the control panel's password ----
 BACKUP_FILES = ("secrets.json", "codes.json", "keys.json", "usage.json", "notices.json", "acts.json", "support.json",
-                "move.json", "prices.json", "welcomed.json", "lifetime.json", "pace.json", "history.json", "server.crt", "server.key")
+                "move.json", "prices.json", "welcomed.json", "lifetime.json", "pace.json", "history.json", "prompt.json",
+                "server.crt", "server.key")
 BACKUP_MAGIC = b"GGBAK1"
 
 
@@ -1436,7 +1437,7 @@ def fit_comment(text: str, limit: int = REPLY_MAX_CHARS) -> str:
 def comment_is_complete(text: str) -> bool:
     text = re.sub(r"[\s\u200d\ufe0f\u2600-\u27bf\U0001f000-\U0001faff]+$", "", text or "")
     words = [word for word in text.split() if word]
-    if len(words) < 6:
+    if len(words) < (6 if reply_settings()["max_chars"] >= 90 else 4):
         return False
     if re.search(r"[،,؛;:\uff1a\-\u2013\u2014/\\*]$", text.strip()):
         return False
@@ -1444,37 +1445,119 @@ def comment_is_complete(text: str) -> bool:
     return len(last) > 2
 
 
+# «برومبت التعليقات» in the panel: what the model is told for each reply. text is the instructions, where {angle},
+# {manner}, {words}, {max_chars} and {voice} are put in for each reply; angles: one drawn for each reply; manners: one
+# for each account (always the same one); max_chars: the longest a reply may be. A field left empty (or nothing saved)
+# is the built-in one. Users' comments are written here, so a change applies from the next comment, with no update.
+PROMPT_PATH = DATA_DIR / "prompt.json"
+PROMPT_TEXT_MAX = 8000
+PROMPT_LIST_MAX = 40
+PROMPT_LINE_MAX = 300
+REPLY_CHARS_RANGE = (60, 280)
+PROMPT_MARKS = ("{angle}", "{manner}", "{words}", "{max_chars}", "{voice}")
+DEFAULT_PROMPT_TEXT = (
+    "Write one public reply to this tweet, as an ordinary person scrolling X who comments on what it says. "
+    "Read the whole tweet first and answer what it really says (its point, and its ending when it tells a story); "
+    "do not guess beyond it.\n"
+    "Not personal: the reply is about the tweet's topic, not about you. No stories or experiences of yours, "
+    "nothing that happened to you, your family or your friends, and nothing about your own life (nothing like: "
+    "صار معي، جربت، شفت بنفسي، أخوي، عندنا في البيت، أتذكر لما، لو كنت مكانه).\n"
+    "Speak about its topic, not to please its author: do not compliment, thank or flatter the author, do not "
+    "praise the tweet (nothing like: well said, you're right, great post, صدقت، كفو، أبدعت، كلامك ذهب), and do "
+    "not just agree. Honest, never rude: no insults, and do not mock the author.\n"
+    "This time: {angle}. Your manner (always the same): {manner}.\n"
+    "If the tweet is a prayer (دعاء), about religion, a death, an illness or other sad news, leave the angle and "
+    "the manner: reply sincerely and respectfully, with no joke and no disagreement.\n"
+    "At most {max_chars} characters, spaces included (about {words} words). Finish the sentence. "
+    "Never stop mid-word or mid-phrase.\n"
+    "Write in the tweet's own language. An Arabic tweet gets everyday spoken Saudi Arabic (عامية سعودية بيضاء), "
+    "the way people really type on X, never formal Arabic (فصحى): no words like الأولى، ينبغي، لا تثبت، ما زال، "
+    "إذ، لذا، حيث، كما أن. A tweet in another language (English, Turkish…) gets its reply in that language.\n"
+    "Plain letters only: no diacritics (no تشكيل: no fatha, damma, kasra, tanween, shadda or sukun), and no "
+    "commas (، or ,).\n"
+    "{voice}\n"
+    "Sound like a real person, specific and casual, not a teacher, a preacher, a brand or an assistant: no "
+    "advice or lessons to the author or to people (nothing like: الأولى أن، يجب، الأفضل أن، تذكّر، نصيحتي), no "
+    "general wisdom or sayings, no neat conclusion; just make your point about the topic itself.\n"
+    "The image is only a screenshot to read the tweet: never mention it, the picture, the post or the tweet "
+    "(no الصورة، المنشور، التغريدة); react to what is in them.\n"
+    "Do not open with filler (like صراحة، فعلاً، والله) or by repeating the tweet.\n"
+    "No hashtags, no links, no quotes, no labels, no introduction. Return only the finished reply."
+)
+_prompt_trial = threading.local()           # («جرّب»: the settings typed in the panel, not saved yet)
+
+
+def prompt_lines(raw) -> list:
+    """A list typed one per line (or saved as a list): the lines with something in them."""
+    rows = raw if isinstance(raw, list) else str(raw or "").splitlines()
+    return [re.sub(r"\s+", " ", str(row)).strip() for row in rows if str(row).strip()]
+
+
+def prompt_settings(data: dict) -> dict:
+    """What a reply is written with: each saved field when it is usable, else the built-in one."""
+    text = str(data.get("text") or "").strip()
+    angles = prompt_lines(data.get("angles"))
+    manners = prompt_lines(data.get("manners"))
+    try:
+        max_chars = int(data.get("max_chars") or 0)
+    except (TypeError, ValueError):
+        max_chars = 0
+    if not REPLY_CHARS_RANGE[0] <= max_chars <= REPLY_CHARS_RANGE[1]:
+        max_chars = REPLY_MAX_CHARS
+    out = {"text": text or DEFAULT_PROMPT_TEXT, "angles": angles or list(REPLY_ANGLES),
+           "manners": manners or list(REPLY_MANNERS), "max_chars": max_chars}
+    out["custom"] = (out["text"] != DEFAULT_PROMPT_TEXT or out["angles"] != list(REPLY_ANGLES)
+                     or out["manners"] != list(REPLY_MANNERS) or max_chars != REPLY_MAX_CHARS)
+    out["angles_text"], out["manners_text"] = "\n".join(out["angles"]), "\n".join(out["manners"])
+    return out
+
+
+def load_prompt() -> dict:
+    return prompt_settings(read_private_json(PROMPT_PATH) or {})
+
+
+def prompt_from_form(form) -> tuple[dict, str]:
+    """(what to save, why not) from the panel's prompt form. Whatever equals the built-in one is saved empty, so the
+    built-in one (as later versions improve it) is what it stays on."""
+    text = str(form.get("text") or "").replace("\r\n", "\n").strip()
+    if len(text) > PROMPT_TEXT_MAX:
+        return {}, f"التعليمات أطول من {PROMPT_TEXT_MAX} حرف. اختصرها."
+    lists = {}
+    for key, name in (("angles", "زوايا الرد"), ("manners", "أساليب الحسابات")):
+        rows = prompt_lines(form.get(key))
+        if len(rows) > PROMPT_LIST_MAX:
+            return {}, f"{name}: {PROMPT_LIST_MAX} سطرًا على الأكثر."
+        if any(len(row) > PROMPT_LINE_MAX for row in rows):
+            return {}, f"{name}: كل سطر {PROMPT_LINE_MAX} حرف على الأكثر."
+        lists[key] = rows
+    raw = str(form.get("max_chars") or "").strip().translate(str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789"))
+    if raw and not raw.isdigit():
+        return {}, "اكتب أقصى طول للتعليق رقمًا، مثل 100."
+    max_chars = int(raw) if raw else REPLY_MAX_CHARS
+    if not REPLY_CHARS_RANGE[0] <= max_chars <= REPLY_CHARS_RANGE[1]:
+        return {}, f"أقصى طول للتعليق من {REPLY_CHARS_RANGE[0]} إلى {REPLY_CHARS_RANGE[1]} حرفًا."
+    return {"text": "" if text == DEFAULT_PROMPT_TEXT else text,
+            "angles": [] if lists["angles"] == list(REPLY_ANGLES) else lists["angles"],
+            "manners": [] if lists["manners"] == list(REPLY_MANNERS) else lists["manners"],
+            "max_chars": 0 if max_chars == REPLY_MAX_CHARS else max_chars}, ""
+
+
+def reply_settings() -> dict:
+    return getattr(_prompt_trial, "settings", None) or load_prompt()
+
+
 def reply_prompt(voice: str, manner_number: int, before: list) -> str:
-    low, high = random.choice(REPLY_LENGTHS)
-    manner = REPLY_MANNERS[int(manner_number) % len(REPLY_MANNERS)]
-    prompt = (
-        "Write one public reply to this tweet, as an ordinary person scrolling X who comments on what it says. "
-        "Read the whole tweet first and answer what it really says (its point, and its ending when it tells a story); "
-        "do not guess beyond it. "
-        "Not personal: the reply is about the tweet's topic, not about you. No stories or experiences of yours, "
-        "nothing that happened to you, your family or your friends, and nothing about your own life (nothing like: "
-        "صار معي، جربت، شفت بنفسي، أخوي، عندنا في البيت، أتذكر لما، لو كنت مكانه). "
-        "Speak about its topic, not to please its author: do not compliment, thank or flatter the author, do not "
-        "praise the tweet (nothing like: well said, you're right, great post, صدقت، كفو، أبدعت، كلامك ذهب), and do "
-        "not just agree. Honest, never rude: no insults, and do not mock the author. "
-        f"This time: {random.choice(REPLY_ANGLES)}. Your manner (always the same): {manner}. "
-        "If the tweet is a prayer (دعاء), about religion, a death, an illness or other sad news, leave the angle and "
-        "the manner: reply sincerely and respectfully, with no joke and no disagreement. "
-        f"At most {REPLY_MAX_CHARS} characters, spaces included (about {low} to {high} words). Finish the sentence. "
-        "Never stop mid-word or mid-phrase. "
-        "Write in the tweet's own language. An Arabic tweet gets everyday spoken Saudi Arabic (عامية سعودية بيضاء), "
-        "the way people really type on X, never formal Arabic (فصحى): no words like الأولى، ينبغي، لا تثبت، ما زال، "
-        "إذ، لذا، حيث، كما أن. A tweet in another language (English, Turkish…) gets its reply in that language. "
-        "Plain letters only: no diacritics (no تشكيل: no fatha, damma, kasra, tanween, shadda or sukun), and no "
-        "commas (، or ,). " + REPLY_VOICES.get(voice, REPLY_VOICES[DEFAULT_REPLY_VOICE]) + " "
-        "Sound like a real person, specific and casual, not a teacher, a preacher, a brand or an assistant: no "
-        "advice or lessons to the author or to people (nothing like: الأولى أن، يجب، الأفضل أن، تذكّر، نصيحتي), no "
-        "general wisdom or sayings, no neat conclusion; just make your point about the topic itself. "
-        "The image is only a screenshot to read the tweet: never mention it, the picture, the post or the tweet "
-        "(no الصورة، المنشور، التغريدة); react to what is in them. "
-        "Do not open with filler (like صراحة، فعلاً، والله) or by repeating the tweet. "
-        "No hashtags, no links, no quotes, no labels, no introduction. Return only the finished reply."
-    )
+    settings = reply_settings()
+    low, high = random.choice(REPLY_LENGTHS)               # (for 100 characters: as many more or fewer words)
+    scale = settings["max_chars"] / 100
+    low, high = max(3, round(low * scale)), max(4, round(high * scale))
+    manners = settings["manners"]
+    fill = {"{angle}": random.choice(settings["angles"]), "{manner}": manners[int(manner_number) % len(manners)],
+            "{words}": f"{low} to {high}", "{max_chars}": str(settings["max_chars"]),
+            "{voice}": REPLY_VOICES.get(voice, REPLY_VOICES[DEFAULT_REPLY_VOICE])}
+    prompt = settings["text"]
+    for mark, value in fill.items():
+        prompt = prompt.replace(mark, value)
     before = [str(text) for text in (before or []) if str(text).strip()][:12]
     if before:
         prompt += ("\n\nReplies already written (to this tweet, or your own recent ones). Yours must say something "
@@ -1727,8 +1810,9 @@ def write_reply(tweet_text: str, image: bytes | None, voice: str, manner: int, b
     text = polish_comment(writer(key, model, image, tweet_text, voice, manner, before))
     if not text:
         raise RuntimeError("لم يُكتب تعليق. أعد المحاولة.")
-    if len(text) > REPLY_MAX_CHARS:
-        text = fit_comment(text)
+    limit = reply_settings()["max_chars"]
+    if len(text) > limit:
+        text = fit_comment(text, limit)
     return text
 
 
@@ -2095,7 +2179,7 @@ input::placeholder{color:var(--mut);opacity:.8}
 .pad{padding:18px}
 .eng{display:grid;gap:10px;margin-top:14px}
 .opt{position:relative;display:flex;gap:12px;align-items:center;min-height:66px;padding:10px 14px;border:1.5px solid var(--line);border-radius:14px;background:var(--soft);cursor:pointer}
-.opt input{position:absolute;opacity:0;width:1px;height:1px}
+.opt input{position:absolute;opacity:0;width:1px;height:1px}.au{margin-top:12px}.sa{margin:12px 0 2px}
 .opt b{display:block;font-weight:600;line-height:1.45}
 .opt small{display:block;font-size:12.5px;color:var(--mut)}
 .ck{margin-inline-start:auto;width:24px;height:24px;border-radius:50%;border:1.5px solid var(--dash);display:grid;place-items:center;color:transparent;flex:none}
@@ -2138,6 +2222,9 @@ html.loading .ldpill{display:flex}
 .prc summary::-webkit-details-marker{display:none}.prc summary>.i{order:1;margin-inline-start:auto;width:18px;height:18px;color:var(--mut);transition:transform .2s}
 .prc[open] summary>.i{transform:rotate(180deg)}.prc-h{display:flex;gap:8px;align-items:center}.prc-h .i{width:18px;height:18px;color:var(--pri)}
 .prc-s{order:2;display:flex;flex-wrap:wrap;gap:4px 10px;font-size:12.5px;color:var(--mut);flex-basis:100%;margin-top:-6px;padding-bottom:12px}.prc form{padding-bottom:16px}.prc .mut{margin:0 0 4px;font-size:13px}
+.pr-ta{min-height:300px;font-size:14px;line-height:1.75}.pm{display:inline-block;font:12px/1.6 ui-monospace,Menlo,Consolas,monospace;padding:0 6px;border-radius:6px;background:var(--soft);border:1px solid var(--line);color:var(--ink)}
+.prt{margin:2px 0 14px;padding:14px;border:1px dashed var(--line);border-radius:14px}.prt .l{margin-top:0}.prt-r{display:flex;gap:8px;margin-top:8px}.prt-r .fs{flex:1;height:44px}.prt-r .btn{flex:none;min-width:96px}
+.prt-o{margin:10px 0 0;padding:12px 14px;border-radius:12px;background:var(--soft);border:1px solid var(--line);font-size:15px;line-height:1.75;overflow-wrap:anywhere}.prt-o small{display:block;margin-top:4px;color:var(--mut);font-size:12px}.prt-o.bad{color:var(--bad);background:var(--badsoft);border-color:transparent}
 .prg{display:grid;grid-template-columns:1fr 1fr;gap:10px}.prw{margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}.prc .prh{margin:6px 0 0;font-size:12px}.prf{display:grid;gap:6px;font-size:13px;font-weight:500;color:var(--mut)}.prf .fs{height:44px;font-variant-numeric:tabular-nums}
 .tg{display:inline-block;margin-inline-start:6px;padding:1px 7px;border-radius:99px;font-size:11px;font-weight:600;vertical-align:2px;background:var(--soft);color:var(--mut);border:1px solid var(--line)}
 .tg.pp{background:var(--prisoft);color:var(--pri);border-color:transparent}
@@ -2367,6 +2454,31 @@ main{padding-bottom:56px}
 <p class="l">بعد تحميل التغريدة وقبل أول نقرة <small>(لا ينقر قبل أن تظهر أزرار التغريدة)</small></p>
 <div class="prg"><label class="prf"><span>من</span><input class="fs" name="settle_from" dir="ltr" inputmode="decimal" autocomplete="off" value="{{ '%g'|format(pace.settle[0]) }}"></label><label class="prf"><span>إلى</span><input class="fs" name="settle_to" dir="ltr" inputmode="decimal" autocomplete="off" value="{{ '%g'|format(pace.settle[1]) }}"></label></div>
 <button class="btn wide" style="margin-top:14px">حفظ سرعة التنفيذ</button></form></details>
+<details class="card prc" id="pr-card"><summary><span class="prc-h">{{ic('edit')}}<b>برومبت التعليقات</b></span><span class="prc-s"><span>{{ 'مُعدَّل' if prompt.custom else 'الافتراضي' }}</span><span>حتى <bdi dir="ltr">{{prompt.max_chars}}</bdi> حرف</span><span><bdi dir="ltr">{{prompt.angles|length}}</bdi> زاوية · <bdi dir="ltr">{{prompt.manners|length}}</bdi> أسلوب</span></span>{{ic('chev')}}</summary>
+<form method="post" action="/{{admin}}/prompt" data-toast="تم حفظ البرومبت" id="pr-form"><p class="mut">ما يُطلب من الذكاء الاصطناعي في كل تعليق. التعليقات تُكتب على هذا الخادم، فيُطبَّق التعديل على كل المستخدمين من التعليق التالي، بلا تحديث للتطبيق أو السكربت.</p>
+<label class="l" for="pr-text">التعليمات</label>
+<textarea id="pr-text" class="ta pr-ta" name="text" dir="auto" rows="12" maxlength="8000" spellcheck="false">{{prompt.text}}</textarea>
+<p class="mut prh">يوضع في كل تعليق مكان: <bdi class="pm">{angle}</bdi> زاوية من القائمة · <bdi class="pm">{manner}</bdi> أسلوب الحساب · <bdi class="pm">{words}</bdi> عدد الكلمات · <bdi class="pm">{max_chars}</bdi> أقصى طول · <bdi class="pm">{voice}</bdi> صيغة الرد التي اختارها المستخدم (مذكر، مؤنث، محايد).</p>
+<label class="l" for="pr-angles">زوايا الرد <small>(سطر لكل زاوية، تُختار واحدة عشوائيًا لكل تعليق)</small></label>
+<textarea id="pr-angles" class="ta" name="angles" dir="auto" rows="6" spellcheck="false">{{prompt.angles_text}}</textarea>
+<label class="l" for="pr-manners">أساليب الكتابة <small>(سطر لكل أسلوب، ولكل حساب أسلوب ثابت منها)</small></label>
+<textarea id="pr-manners" class="ta" name="manners" dir="auto" rows="6" spellcheck="false">{{prompt.manners_text}}</textarea>
+<label class="prf prw"><span>أقصى طول للتعليق (حروف مع المسافات)</span><input class="fs" name="max_chars" dir="ltr" inputmode="numeric" autocomplete="off" value="{{prompt.max_chars}}"></label>
+<p class="mut prh">من 60 إلى 280، وعدد الكلمات المطلوب يتبعه تلقائيًا. الخانة الفارغة تعني الافتراضي.</p>
+<button class="btn wide" style="margin-top:14px">حفظ البرومبت</button></form>
+<div class="prt"><p class="l">جرّب قبل الحفظ</p>
+<textarea id="pr-tweet" class="ta" rows="3" dir="auto" maxlength="4000" placeholder="الصق نص تغريدة…" aria-label="نص تغريدة للتجربة"></textarea>
+<div class="prt-r"><select id="pr-voice" class="fs" aria-label="صيغة الرد"><option value="male">مذكر</option><option value="female">مؤنث</option><option value="neutral">محايد</option></select><button type="button" class="btn ghost" id="pr-go">جرّب</button></div>
+<p id="pr-out" class="prt-o" aria-live="polite" hidden></p>
+<p class="mut prh">يكتب تعليقًا واحدًا بما هو مكتوب أعلاه ولو لم تحفظه، بمفتاحك الحالي، ولا يُحسب على أي مستخدم.</p></div>
+{% if prompt.custom %}<form method="post" action="/{{admin}}/prompt/reset" data-title="استعادة البرومبت الافتراضي؟" data-confirm="تُمسح تعديلاتك على التعليمات والزوايا والأساليب والطول، ويعود كل شيء كما كان في البداية." data-yes="استعادة الافتراضي" data-kind="danger" data-toast="عاد البرومبت الافتراضي"><button class="btn ghost wide" style="margin:0 0 16px">استعادة الافتراضي</button></form>{% endif %}
+<script>(function(){var f=document.getElementById('pr-form'),go=document.getElementById('pr-go'),out=document.getElementById('pr-out');if(!f||!go)return;
+function show(text,bad,note){out.hidden=false;out.className='prt-o'+(bad?' bad':'');out.textContent=text;if(note){var s=document.createElement('small');s.textContent=note;out.appendChild(s)}}
+go.addEventListener('click',function(){var tw=document.getElementById('pr-tweet').value.trim();if(!tw){show('الصق نص تغريدة أولًا.',true);return}
+var d=new FormData(f);d.append('tweet',tw);d.append('voice',document.getElementById('pr-voice').value);go.disabled=true;show('يكتب تعليقًا…');
+fetch('/{{admin}}/prompt/try',{method:'POST',body:d,credentials:'same-origin'}).then(function(r){return r.json()}).then(function(j){
+if(j.ok){show(j.comment,false,'\u2066'+j.chars+' / '+j.limit+'\u2069 حرف')}else{show(j.error||'تعذّرت التجربة.',true)}}).catch(function(){show('تعذّر الاتصال بالخادم.',true)}).then(function(){go.disabled=false})})})();</script>
+</details>
 <div class="tb">
 <label class="search">{{ic('search')}}<input id="q" type="search" placeholder="ابحث بالاسم أو الرمز" aria-label="ابحث بالاسم أو الرمز" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search"><button type="button" class="qx" id="qx" aria-label="مسح البحث" hidden>{{ic('x')}}</button></label>
 <button class="btn add" type="button" data-open="nu" aria-label="إضافة مستخدم">{{ic('plus')}}<span>إضافة<span class="wd"> مستخدم</span></span></button>
@@ -2508,13 +2620,15 @@ main{padding-bottom:56px}
 <section class="panel" id="p-script">
 {% if flash %}<div class="note fl-{{flash.kind}}" role="status">{{ic('alert' if flash.kind != 'ok' else 'check')}}<p>{{flash.text}}</p></div>{% endif %}
 <div class="card pad"><h2>سكربت التطبيق</h2>
-<p class="mut">هذا هو برنامج التطبيق. حدّثه من هنا: ارفع الملف المعدّل ثم اضغط «نشر التحديث»، فيظهر للمستخدمين زر «تحديث» داخل التطبيق — دون بناء تطبيق جديد. رقم الإصدار تحدده هنا، ولا حاجة لتعديله داخل الملف.</p>
+<p class="mut">هذا هو برنامج التطبيق. حدّثه من هنا: ارفع الملف المعدّل ثم اضغط «نشر التحديث»، فيظهر للمستخدمين زر «تحديث» داخل التطبيق، أو يُثبَّت عندهم وحده إن اخترت «تثبيت تلقائي» — دون بناء تطبيق جديد. رقم الإصدار تحدده هنا، ولا حاجة لتعديله داخل الملف.</p>
 <dl class="mvd">
-<div><dt>للجميع</dt><dd>{% if script_live.version %}الإصدار <b>{{script_live.version}}</b> · نُشر {{script_live_when}}{% if script_live.has_content %} · مع content.py{% endif %}{% else %}<span class="mut">لا يوجد سكربت منشور بعد. التطبيقات تعمل بالسكربت المدمج فيها.</span>{% endif %}</dd></div>
-{% if script_pilot.version %}<div><dt>تجريبي</dt><dd>الإصدار <b>{{script_pilot.version}}</b> · عند {{script_pilot_names|length}} مستخدم · نُشر {{script_pilot_when}}</dd></div>{% endif %}
+<div><dt>للجميع</dt><dd>{% if script_live.version %}الإصدار <b>{{script_live.version}}</b> · نُشر {{script_live_when}}{% if script_live.has_content %} · مع content.py{% endif %}{% if script_live.auto %} · <span class="b on">تثبيت تلقائي</span>{% endif %}{% else %}<span class="mut">لا يوجد سكربت منشور بعد. التطبيقات تعمل بالسكربت المدمج فيها.</span>{% endif %}</dd></div>
+{% if script_pilot.version %}<div><dt>تجريبي</dt><dd>الإصدار <b>{{script_pilot.version}}</b> · عند {{script_pilot_names|length}} مستخدم · نُشر {{script_pilot_when}}{% if script_pilot.auto %} · <span class="b on">تثبيت تلقائي</span>{% endif %}</dd></div>{% endif %}
 {% if script_staged.version %}<div><dt>المرفوع</dt><dd>الإصدار <b>{{script_staged.version}}</b>{% if script_can_publish %} · <span class="b on">جاهز للنشر</span>{% else %} · <span class="mut">منشور</span>{% endif %}</dd></div>{% endif %}
 </dl>
-<form method="post" action="/{{admin}}/script/upload" enctype="multipart/form-data" data-keep-busy>
+{% if script_live.version %}{% if script_live.auto %}<form method="post" action="/{{admin}}/script/auto" data-toast="أُوقف التثبيت التلقائي"><input type="hidden" name="which" value="live"><input type="hidden" name="auto" value="0"><button class="btn sm ghost sa">{{ic('reset')}}إيقاف التثبيت التلقائي للإصدار {{script_live.version}}</button></form>
+{% else %}<form method="post" action="/{{admin}}/script/auto" data-title="تثبيت تلقائي للإصدار {{script_live.version}}؟" data-confirm="يُثبَّت الإصدار {{script_live.version}} وحده عند كل مستخدم نسخته أقدم، دون زر «تحديث»، فور ألا تكون عنده مهمة جارية." data-yes="تثبيت تلقائي" data-toast="صار التثبيت تلقائيًا"><input type="hidden" name="which" value="live"><input type="hidden" name="auto" value="1"><button class="btn sm ghost sa">{{ic('reset')}}تثبيت الإصدار {{script_live.version}} تلقائيًا عند الجميع</button></form>
+{% endif %}{% endif %}<form method="post" action="/{{admin}}/script/upload" enctype="multipart/form-data" data-keep-busy>
 <label class="l" for="sc-gg">ملف السكربت (script_original.py أو gg.py)</label>
 <input id="sc-gg" class="fs" type="file" name="gg" accept=".py,text/x-python,text/plain" required>
 <label class="l" for="sc-content">ملف content.py <small>(اختياري، إن تغيّر)</small></label>
@@ -2525,21 +2639,23 @@ main{padding-bottom:56px}
 {% if script_can_publish %}<form class="pub" method="post" action="/{{admin}}/script/publish" data-v="{{script_staged.version}}" data-title="نشر التحديث؟" data-confirm="سيصل الإصدار {{script_staged.version}} إلى كل المستخدمين، فيظهر لهم زر «تحديث» في التطبيق. تأكد أنك جرّبت الملف." data-yes="نشر" data-toast="تم نشر التحديث">
 <p class="l">لمن يصل الإصدار {{script_staged.version}}؟</p>
 <div class="eng">
-<label class="opt"><input type="radio" name="target" value="all" checked><span class="pi">{{ic('users')}}</span><span><b>كل المستخدمين</b><small>يظهر زر «تحديث» للجميع</small></span><span class="ck">{{ic('check')}}</span></label>
+<label class="opt"><input type="radio" name="target" value="all" checked><span class="pi">{{ic('users')}}</span><span><b>كل المستخدمين</b><small>يصل إلى كل من نسخته أقدم</small></span><span class="ck">{{ic('check')}}</span></label>
 <label class="opt"><input type="radio" name="target" value="some"><span class="pi">{{ic('edit')}}</span><span><b>مستخدمون أختارهم (تجريبي)</b><small>جرّبه عندهم أولًا؛ الباقون يبقون على الإصدار الحالي</small></span><span class="ck">{{ic('check')}}</span></label>
 </div>
 <div class="pk" role="group" aria-label="من يصله الإصدار التجريبي">{% for c in codes %}<label class="pkr{{ '' if c.active else ' off' }}"><input type="checkbox" name="codes" value="{{c.id}}"><span class="pkn">{{ c.label or 'بدون اسم' }}</span><span class="pkc">{{c.code}}</span></label>{% else %}<p class="pke">لا يوجد مستخدمون بعد.</p>{% endfor %}</div>
+<label class="opt au"><input type="checkbox" name="auto" value="1"><span class="pi">{{ic('reset')}}</span><span><b>تثبيت تلقائي</b><small>يُثبَّت عندهم وحده دون زر «تحديث»، فور ألا تكون عندهم مهمة جارية</small></span><span class="ck">{{ic('check')}}</span></label>
 <button class="btn wide" style="margin-top:12px">{{ic('check')}}نشر التحديث (الإصدار {{script_staged.version}})</button></form>
 <script>(function(){var f=document.querySelector('form.pub');if(!f)return;var v=f.dataset.v;
-function sync(){var some=f.querySelector('input[name=target][value=some]').checked,n=f.querySelectorAll('input[name=codes]:checked').length;
-f.dataset.confirm=some?(n?'سيصل الإصدار '+v+' إلى '+n+' مستخدم فقط، ويظهر لهم زر «تحديث». الباقون يبقون على الإصدار الحالي.':'لم تختر أي مستخدم. اختر من القائمة من يصله الإصدار التجريبي.'):'سيصل الإصدار '+v+' إلى كل المستخدمين، فيظهر لهم زر «تحديث» في التطبيق. تأكد أنك جرّبت الملف.';
+function sync(){var some=f.querySelector('input[name=target][value=some]').checked,n=f.querySelectorAll('input[name=codes]:checked').length,au=f.querySelector('input[name=auto]').checked;
+f.dataset.confirm=some?(n?'سيصل الإصدار '+v+' إلى '+n+' مستخدم فقط، '+(au?'ويُثبَّت عندهم تلقائيًا دون زر «تحديث» (بعد انتهاء مهامهم الجارية)':'ويظهر لهم زر «تحديث»')+'. الباقون يبقون على الإصدار الحالي.':'لم تختر أي مستخدم. اختر من القائمة من يصله الإصدار التجريبي.'):'سيصل الإصدار '+v+' إلى كل المستخدمين، '+(au?'ويُثبَّت عندهم تلقائيًا دون زر «تحديث» (بعد انتهاء مهامهم الجارية)':'فيظهر لهم زر «تحديث» في التطبيق')+'. تأكد أنك جرّبت الملف.';
 f.dataset.yes=some?'نشر تجريبي':'نشر'}
 f.addEventListener('change',sync);sync()})();</script>{% endif %}
 {% if script_pilot.version %}<div class="pil">
 <p class="pil-h">{{ic('edit')}}<span>الإصدار التجريبي <b>{{script_pilot.version}}</b> يصل الآن إلى: {{ script_pilot_names|join('، ') if script_pilot_names else 'لا أحد (حُذف من اخترتهم)' }}</span></p>
 {% if not script_live.version %}<p class="pil-w">{{ic('alert')}}<span>لا يوجد إصدار منشور للجميع بعد، فالمستخدمون الجدد خارج التجربة لا يستطيعون تجهيز التطبيق. انشر للجميع حين تتأكد.</span></p>{% endif %}
 <div class="pil-a">
-<form method="post" action="/{{admin}}/script/pilot/promote" data-title="نشر للجميع؟" data-confirm="سيصل الإصدار {{script_pilot.version}} إلى كل المستخدمين، فيظهر لهم زر «تحديث»." data-yes="نشر للجميع" data-toast="تم النشر للجميع"><button class="btn">{{ic('check')}}نشر للجميع</button></form>
+<form method="post" action="/{{admin}}/script/pilot/promote" data-title="نشر للجميع؟" data-confirm="سيصل الإصدار {{script_pilot.version}} إلى كل المستخدمين، {{ 'ويُثبَّت عندهم تلقائيًا دون زر «تحديث».' if script_pilot.auto else 'فيظهر لهم زر «تحديث».' }}" data-yes="نشر للجميع" data-toast="تم النشر للجميع"><button class="btn">{{ic('check')}}نشر للجميع</button></form>
+<form method="post" action="/{{admin}}/script/auto" data-toast="{{ 'أُوقف التثبيت التلقائي' if script_pilot.auto else 'صار التثبيت تلقائيًا' }}"><input type="hidden" name="which" value="pilot"><input type="hidden" name="auto" value="{{ '0' if script_pilot.auto else '1' }}"><button class="btn ghost">{{ic('reset')}}{{ 'إيقاف التلقائي' if script_pilot.auto else 'تثبيت تلقائي' }}</button></form>
 <form method="post" action="/{{admin}}/script/pilot/cancel" data-title="إلغاء الإصدار التجريبي؟" data-confirm="لن يُعرض الإصدار {{script_pilot.version}} على أحد بعد الآن. من حدّث إليه يبقى على نسخته حتى يُنشر إصدار أعلى للجميع." data-yes="إلغاء التجريبي" data-kind="danger" data-toast="أُلغي الإصدار التجريبي"><button class="btn ghost">إلغاء التجريبي</button></form>
 </div>
 <details class="rs"><summary>تعديل من يصله</summary>
@@ -2549,7 +2665,8 @@ f.addEventListener('change',sync);sync()})();</script>{% endif %}
 </div>{% endif %}
 <ul class="notes"><li>{{ic('shield')}}<span>يُنزَّل السكربت عبر اتصال التطبيق المحمي بخادمك، ولا يصل إلا لجهاز يحمل رمزًا صالحًا.</span></li>
 <li>{{ic('alert')}}<span>يُجرّب التطبيق تشغيل الإصدار الجديد قبل اعتماده؛ إن لم يعمل، يبقى على القديم ولا يتعطّل.</span></li>
-<li>{{ic('edit')}}<span>«تجريبي»: انشر لمستخدمين تختارهم (أنت مثلًا) أولًا، ثم «نشر للجميع» حين تتأكد أنه سليم.</span></li></ul></div>
+<li>{{ic('edit')}}<span>«تجريبي»: انشر لمستخدمين تختارهم (أنت مثلًا) أولًا، ثم «نشر للجميع» حين تتأكد أنه سليم.</span></li>
+<li>{{ic('reset')}}<span>«تثبيت تلقائي»: يسأل التطبيق عن التحديث كل 10 دقائق، ويثبّته وحده حين لا تكون عنده مهمة جارية أو نافذة تسجيل دخول، ثم يعيد تشغيل نفسه. يعمل عند من سكربته فيه هذه الميزة؛ من بقي على إصدار أقدم يظهر له زر «تحديث» هذه المرة فقط.</span></li></ul></div>
 
 <div class="card pad" id="apk"><h2>ملف التطبيق (APK)</h2>
 <p class="mut">ارفع آخر نسخة بنيتها من التطبيق، ثم انشرها للجميع أو لمستخدمين تختارهم (تجريبي): يظهر لمن نسخته أقدم زر «تنزيل التطبيق» أعلى صفحة السكربت. ورابط التنزيل الثابت يعطي دائمًا النسخة المنشورة للجميع.</p>
@@ -2986,7 +3103,7 @@ def dashboard():
         backup_when=seen_text({"last_seen": last_backup}) if last_backup else "",
         owner_link=owner_app_link(request.host), in_owner_app=OWNER_APP_MARK in (request.headers.get("User-Agent") or ""),
         this_host=request.host, relay=MOVE_RELAY.split("//")[-1],
-        prices=load_prices(), welcome=load_welcome(), pace=load_pace(),
+        prices=load_prices(), welcome=load_welcome(), pace=load_pace(), prompt=load_prompt(),
         app_slots=app_panel(codes), app_dl_link=app_download_link(), app_package=APP_PACKAGE,
         script_live=script_live, script_staged=script_staged, script_next=next_version(highest_published_version()),
         script_floor=highest_published_version(), script_pilot=script_pilot, script_pilot_ids=pilot_ids,
@@ -3329,6 +3446,59 @@ def pace_save():
                 f"{pace['gap'][0]:g} إلى {pace['gap'][1]:g}، وبعد تحميل التغريدة من {pace['settle'][0]:g} إلى {pace['settle'][1]:g}. "
                 "تُطبَّق على كل المستخدمين من مهمتهم التالية.")
     return redirect(f"/{ADMIN}")
+
+
+@app.post(f"/{ADMIN}/prompt")
+def prompt_save():
+    """«برومبت التعليقات»: the instructions, the angles, the manners and the longest reply."""
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    saved, problem = prompt_from_form(request.form)
+    if problem:
+        flash("bad", problem + " لم يُحفظ شيء.")
+        return redirect(f"/{ADMIN}")
+    write_private_json(PROMPT_PATH, {"version": 1, **saved, "saved_at": int(time.time())})
+    settings = load_prompt()
+    missing = [mark for mark in PROMPT_MARKS if mark not in settings["text"]]
+    note = (" لاحظ أن التعليمات بلا " + "، ".join(missing) + "، فلا يوضع ما تعنيه.") if missing else ""
+    flash("ok", "حُفظ برومبت التعليقات، ويُطبَّق على كل المستخدمين من التعليق التالي." + note)
+    return redirect(f"/{ADMIN}")
+
+
+@app.post(f"/{ADMIN}/prompt/reset")
+def prompt_reset():
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    try:
+        PROMPT_PATH.unlink()
+    except OSError:
+        pass
+    flash("ok", "عاد برومبت التعليقات إلى الافتراضي.")
+    return redirect(f"/{ADMIN}")
+
+
+@app.post(f"/{ADMIN}/prompt/try")
+def prompt_try():
+    """«جرّب»: one reply to the tweet text typed in the panel, written with the settings as typed there (not saved),
+    with the active key, like any comment (it is not counted)."""
+    if not logged_in():
+        return jsonify(ok=False, error="انتهت الجلسة. أعد تحميل الصفحة وسجّل الدخول."), 401
+    saved, problem = prompt_from_form(request.form)
+    if problem:
+        return jsonify(ok=False, error=problem)
+    tweet = str(request.form.get("tweet") or "").strip()[:4000]
+    if not tweet:
+        return jsonify(ok=False, error="الصق نص تغريدة أولًا.")
+    voice = request.form.get("voice") if request.form.get("voice") in REPLY_VOICES else DEFAULT_REPLY_VOICE
+    settings = prompt_settings(saved)
+    _prompt_trial.settings = settings
+    try:
+        comment = write_reply(tweet, None, voice, random.randrange(len(settings["manners"])), [])
+    except RuntimeError as exc:
+        return jsonify(ok=False, error=str(exc))
+    finally:
+        _prompt_trial.settings = None
+    return jsonify(ok=True, comment=comment, chars=len(comment), limit=settings["max_chars"])
 
 
 @app.post(f"/{ADMIN}/code/pay")
@@ -4011,6 +4181,7 @@ def script_publish():
     if not logged_in():
         return redirect(f"/{ADMIN}")
     some = request.form.get("target") == "some"
+    auto = request.form.get("auto") == "1"            # («تثبيت تلقائي»: no «تحديث» button, it installs itself)
     with LOCK:
         staged = load_script_meta(STAGED_META)
         if not staged.get("version") or not (SCRIPT_DIR / "staged-gg.py").is_file():
@@ -4026,9 +4197,10 @@ def script_publish():
                 shutil.copy2(SCRIPT_DIR / "staged-content.py", SCRIPT_DIR / "pilot-content.py")
             else:
                 remove_script_files("pilot-content.py")
-            write_private_json(SCRIPT_DIR / PILOT_META, dict(staged, published_at=int(time.time()), codes=chosen))
-            flash("ok", f"نُشر الإصدار {staged['version']} تجريبيًا لـ {len(chosen)} مستخدم. يظهر لهم زر «تحديث» خلال "
-                        "دقيقة تقريبًا، والباقون يبقون على الإصدار الحالي.")
+            write_private_json(SCRIPT_DIR / PILOT_META, dict(staged, published_at=int(time.time()), codes=chosen, auto=auto))
+            flash("ok", f"نُشر الإصدار {staged['version']} تجريبيًا لـ {len(chosen)} مستخدم. "
+                        + ("يُثبَّت عندهم تلقائيًا خلال دقائق، بعد انتهاء مهامهم الجارية" if auto else
+                           "يظهر لهم زر «تحديث» خلال دقيقة تقريبًا") + "، والباقون يبقون على الإصدار الحالي.")
             return redirect(f"/{ADMIN}")
         shutil.copy2(SCRIPT_DIR / "staged-gg.py", SCRIPT_DIR / "gg.py")
         if staged.get("has_content") and (SCRIPT_DIR / "staged-content.py").is_file():
@@ -4039,9 +4211,11 @@ def script_publish():
             except OSError:
                 pass
         staged["published_at"] = int(time.time())
+        staged["auto"] = auto
         write_private_json(SCRIPT_DIR / SCRIPT_META, staged)
         remove_script_files("pilot-gg.py", "pilot-content.py", PILOT_META)      # (everyone has a newer one now)
-    flash("ok", f"نُشر الإصدار {staged['version']}. يظهر للمستخدمين زر «تحديث» خلال دقيقة تقريبًا، أو عند فتح الصفحة.")
+    flash("ok", f"نُشر الإصدار {staged['version']}. " + ("يُثبَّت عند المستخدمين تلقائيًا خلال دقائق، بعد انتهاء مهامهم الجارية."
+                                                          if auto else "يظهر للمستخدمين زر «تحديث» خلال دقيقة تقريبًا، أو عند فتح الصفحة."))
     return redirect(f"/{ADMIN}")
 
 
@@ -4064,7 +4238,28 @@ def script_pilot_promote():
         live["published_at"] = int(time.time())
         write_private_json(SCRIPT_DIR / SCRIPT_META, live)
         remove_script_files("pilot-gg.py", "pilot-content.py", PILOT_META)
-    flash("ok", f"نُشر الإصدار {pilot['version']} لكل المستخدمين. يظهر لهم زر «تحديث» خلال دقيقة تقريبًا.")
+    flash("ok", f"نُشر الإصدار {pilot['version']} لكل المستخدمين. " + ("يُثبَّت عندهم تلقائيًا خلال دقائق، بعد انتهاء مهامهم الجارية."
+                                                                        if pilot.get("auto") else "يظهر لهم زر «تحديث» خلال دقيقة تقريبًا."))
+    return redirect(f"/{ADMIN}")
+
+
+@app.post(f"/{ADMIN}/script/auto")
+def script_auto():
+    """«تثبيت تلقائي» on or off for the version published to everyone, or for the trial one."""
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    which = "pilot" if request.form.get("which") == "pilot" else "live"
+    on = request.form.get("auto") == "1"
+    with LOCK:
+        meta = pilot_meta() if which == "pilot" else load_script_meta(SCRIPT_META)
+        if not meta.get("version"):
+            flash("bad", "لا يوجد إصدار منشور بعد.")
+            return redirect(f"/{ADMIN}")
+        meta["auto"] = on
+        write_private_json(SCRIPT_DIR / (PILOT_META if which == "pilot" else SCRIPT_META), meta)
+    who = "من اخترتهم في التجربة" if which == "pilot" else "كل مستخدم نسخته أقدم"
+    flash("ok", f"يُثبَّت الإصدار {meta['version']} الآن تلقائيًا عند {who}، خلال دقائق وبعد انتهاء مهامهم الجارية، دون زر «تحديث»."
+          if on else f"أُوقف التثبيت التلقائي للإصدار {meta['version']}: يظهر زر «تحديث» بدلًا منه.")
     return redirect(f"/{ADMIN}")
 
 
@@ -4415,7 +4610,8 @@ def api_script_latest():
     if not meta.get("version") or not (SCRIPT_DIR / gg_name).is_file():
         return api_ok(version="")
     return api_ok(version=str(meta.get("version") or ""), sha256=script_file_sha(gg_name),
-                  has_content=bool(meta.get("has_content")), content_sha256=script_file_sha(content_name))
+                  has_content=bool(meta.get("has_content")), content_sha256=script_file_sha(content_name),
+                  auto=bool(meta.get("auto")))
 
 
 @app.post(f"/{API}/script-download")

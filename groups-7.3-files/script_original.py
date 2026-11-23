@@ -3699,12 +3699,40 @@ EMBEDDED_PAGE = r'''<!doctype html>
         return;
       }
       updateState.textContent = data.message || "";
+      if (data.available && data.auto) {
+        // It installs itself once no task is running (see the script): no «تحديث» button, only a word as it does.
+        if (!autoWatch) updateBar.hidden = true;
+        watchAutoUpdate(data.latest);
+        return;
+      }
+      updateButton.hidden = false;
       if (data.available && !updateButton.disabled) {
         updateText.textContent = "يتوفر إصدار جديد " + data.latest;
         updateButton.textContent = "تحديث إلى " + data.latest;
       }
       updateBar.hidden = !data.available;
     } catch (_) {}
+  }
+
+  let autoWatch = 0;
+  function watchAutoUpdate(version) {
+    if (autoWatch) return;
+    autoWatch = setInterval(async () => {
+      if (document.hidden) return;
+      try {
+        const response = await fetchWithTimeout(apiRoot + "/update/check?light=1", {cache: "no-store"}, 4000);
+        const data = await response.json();
+        if (data.version === version) {
+          location.reload();
+          return;
+        }
+        if (data.updating) {
+          updateText.textContent = "يُثبَّت التحديث " + version + " تلقائيًا… يُعاد تشغيل البرنامج بعد لحظات.";
+          updateButton.hidden = true;
+          updateBar.hidden = false;
+        }
+      } catch (_) {}                    // (starting again: no answer for a moment)
+    }, 5000);
   }
 
   updateButton.addEventListener("click", async () => {
@@ -7644,9 +7672,13 @@ def run_on_fresh_browser(auth_token: str, work):
     While it works the app keeps working in the background; a browser left open with nothing to do does not."""
     with as_account(profile_key(auth_token)):
         app_task_running(True)
+        with _browser_works_lock:
+            _browser_works["n"] += 1
         try:
             return _run_on_account_browser(auth_token, work)
         finally:
+            with _browser_works_lock:
+                _browser_works["n"] -= 1
             app_task_running(False)
 
 
@@ -11973,10 +12005,13 @@ def restart_program() -> None:
         try:
             from java import jclass
             jclass("app.tg.groups.MainActivity").restartApp()
-            return
         except Exception as exc:
             print("تعذّر إعادة تشغيل التطبيق تلقائيًا:", exc, flush=True)
-            return
+        # (the app ends itself as it starts again; when its page was gone it could not: the program ends here, and
+        # the app opens on the new version next time, instead of staying on the old one, half updated)
+        time.sleep(15)
+        sys.stdout.flush()
+        os._exit(0)
     # Flask's server leaves its listening socket open across exec; close it there so the new
     # program can listen on the same port.
     server_fd = os.environ.pop("WERKZEUG_SERVER_FD", "")
@@ -13247,7 +13282,8 @@ def control_script_latest(fresh: bool = False) -> dict:
     except RuntimeError:
         return _script_latest_cache["answer"] or {}
     result = {"version": str(answer.get("version") or ""), "sha256": str(answer.get("sha256") or ""),
-              "has_content": bool(answer.get("has_content")), "content_sha256": str(answer.get("content_sha256") or "")}
+              "has_content": bool(answer.get("has_content")), "content_sha256": str(answer.get("content_sha256") or ""),
+              "auto": bool(answer.get("auto"))}
     result = result if result["version"] else {}
     _script_latest_cache.update(at=now, answer=result)
     return result
@@ -13288,6 +13324,160 @@ def control_update_problem(body: bytes, want_version: str, want_sha: str) -> str
     return ""
 
 
+def install_control_update(busy) -> tuple[int, str, str]:
+    """Download the version the control server offers this copy, check it and put it in place (the old one is kept for
+    going back). (0, "", version) when installed; else (an HTTP status, why, ""), with nothing changed."""
+    latest = control_script_latest(fresh=True)
+    if not latest.get("version"):
+        return 502, "لا يوجد تحديث منشور على خادم التحكّم.", ""
+    if version_tuple(latest["version"]) <= version_tuple(APP_VERSION):
+        return 409, "هذه النسخة على آخر إصدار.", ""
+    try:
+        got = control_script_download()
+    except RuntimeError as exc:
+        return 502, str(exc) or "تعذّر تنزيل التحديث.", ""
+    body = got["gg"]
+    problem = control_update_problem(body, latest["version"], latest.get("sha256") or "")
+    if problem:
+        return 502, problem, ""
+    if not program_starts(body):
+        return 502, "الإصدار الجديد لا يعمل على هذا الجهاز. لم يتغير شيء.", ""
+    if busy():
+        return 409, "بدأت مهمة أثناء التنزيل. انتظر حتى تنتهي ثم اضغط «تحديث».", ""
+    auto_update_note(trying=latest["version"])
+    try:
+        if got.get("content"):
+            install_content(got["content"])
+        install_program(body)
+    except OSError:
+        auto_update_note(trying="")
+        raise
+    return 0, "", latest["version"]
+
+
+# «تثبيت تلقائي»: a version the owner published to install itself (in «السكربت» on the control panel) is installed
+# here with no «تحديث» button: the copy asks the control server every AUTO_UPDATE_ASK_SECONDS, and once it may (no task
+# running or waiting, no sign-in window open, no browser at work) it installs it and starts again. A version that was
+# put in place but did not start (the app's loader went back to the one before) is not installed by itself again:
+# AUTO_UPDATE_PATH remembers it, and its «تحديث» button shows instead.
+AUTO_UPDATE_PATH = DATA_DIR / "auto-update.json"
+AUTO_UPDATE_FIRST_SECONDS = 60
+AUTO_UPDATE_ASK_SECONDS = 10 * 60
+AUTO_UPDATE_IDLE_SECONDS = 30
+AUTO_UPDATE_RETRY_SECONDS = 60 * 60
+_auto_update_lock = threading.Lock()
+_auto_update_failed: dict[str, float] = {}          # version -> (monotonic) when it may be tried again
+_browser_works = {"n": 0}                           # pieces of browser work under way (a task, the groups' list…)
+_browser_works_lock = threading.Lock()
+
+
+def auto_update_note(trying: str | None = None) -> dict:
+    """The file that remembers an update being put in place ("trying") and those that did not start ("skip")."""
+    with _auto_update_lock:
+        data = read_private_json(AUTO_UPDATE_PATH) or {}
+        if trying is not None:
+            data["trying"] = trying
+            data["at"] = int(time.time())
+            write_private_json(AUTO_UPDATE_PATH, data)
+        return data
+
+
+def auto_update_settle() -> None:
+    """At start: the version that was being put in place is the one running (done), or it is not (it did not start
+    and the loader went back): that one is skipped from now on."""
+    data = auto_update_note()
+    trying = str(data.get("trying") or "")
+    skip = [str(version) for version in (data.get("skip") or []) if version_tuple(str(version)) > version_tuple(APP_VERSION)]
+    if trying and trying != APP_VERSION and version_tuple(trying) > version_tuple(APP_VERSION) and trying not in skip:
+        skip.append(trying)
+        print(f"لم يعمل الإصدار {trying} بعد تثبيته، فلن يُثبَّت تلقائيًا مرة أخرى.", flush=True)
+    if trying or skip != list(data.get("skip") or []):
+        with _auto_update_lock:
+            write_private_json(AUTO_UPDATE_PATH, {"trying": "", "skip": skip[-20:]})
+
+
+def auto_update_skipped(version: str) -> bool:
+    return version in [str(item) for item in (auto_update_note().get("skip") or [])]
+
+
+def auto_update_due() -> dict:
+    """The newer version the control server offers to install itself, unless it is skipped or was just tried; else {}."""
+    if not control_configured() or not _current_token():
+        return {}
+    latest = control_script_latest(fresh=True)
+    version = str(latest.get("version") or "")
+    if not latest.get("auto") or not version or version_tuple(version) <= version_tuple(APP_VERSION):
+        return {}
+    if auto_update_skipped(version) or time.monotonic() < _auto_update_failed.get(version, 0.0):
+        return {}
+    return latest
+
+
+def jobs_running() -> bool:
+    with jobs_lock:
+        return any(job.get("status") == "running" for job in jobs.values())
+
+
+def auto_update_waits() -> str:
+    """Why an automatic update must wait now, or "" when it may go."""
+    if updating.is_set():
+        return "an update is under way"
+    if jobs_running():
+        return "a task is running or waiting"
+    if _login_state.get("page") is not None:
+        return "a sign-in window is open"
+    with _browser_works_lock:
+        if _browser_works["n"] > 0:
+            return "a browser is at work"
+    return ""
+
+
+def auto_update_install(version: str) -> bool:
+    """Put the automatic update in place now and start again. False when it could not (it is tried again later)."""
+    with jobs_lock:
+        if updating.is_set() or any(job.get("status") == "running" for job in jobs.values()):
+            return False
+        updating.set()                                  # (no task starts meanwhile: «يجري تحديث البرنامج»)
+    installed = False
+    try:
+        print(f"تحديث تلقائي إلى الإصدار {version}…", flush=True)
+        status, message, put = install_control_update(jobs_running)
+        if status:
+            if status != 409:                       # (409: a task started meanwhile, or nothing newer: just later)
+                _auto_update_failed[version] = time.monotonic() + AUTO_UPDATE_RETRY_SECONDS
+            print(f"لم يُثبَّت التحديث التلقائي: {message}", flush=True)
+            return False
+        installed = True
+    except OSError as exc:
+        _auto_update_failed[version] = time.monotonic() + AUTO_UPDATE_RETRY_SECONDS
+        print(f"لم يُثبَّت التحديث التلقائي: تعذّر حفظ الملف ({exc}).", flush=True)
+        return False
+    finally:
+        if not installed:
+            updating.clear()
+    print(f"ثُبّت الإصدار {put} تلقائيًا. يُعاد تشغيل البرنامج…", flush=True)
+    restart_program()
+    return True
+
+
+def auto_update_loop() -> None:
+    time.sleep(AUTO_UPDATE_FIRST_SECONDS)
+    while True:
+        try:
+            latest = auto_update_due()
+            asked = time.monotonic()
+            while latest and time.monotonic() - asked < AUTO_UPDATE_ASK_SECONDS:
+                if not auto_update_waits():
+                    auto_update_install(latest["version"])      # (once in place, the program starts again)
+                    break
+                time.sleep(AUTO_UPDATE_IDLE_SECONDS)
+            if latest and time.monotonic() - asked >= AUTO_UPDATE_ASK_SECONDS:
+                continue                                # (still waiting: ask again, a newer one may be there now)
+        except Exception as exc:
+            print(f"التحديث التلقائي: {type(exc).__name__}: {exc}", flush=True)
+        time.sleep(AUTO_UPDATE_ASK_SECONDS)
+
+
 def install_content(body: bytes) -> None:
     """Put a new content.py beside the script, keeping the old one."""
     if not body:
@@ -13315,7 +13505,8 @@ def update_check(access_path: str):
         if not latest.get("version"):
             return jsonify(success=True, owner=False, version=APP_VERSION, message="")
         newer = version_tuple(latest["version"]) > version_tuple(APP_VERSION)
-        return jsonify(success=True, owner=False, version=APP_VERSION, latest=latest["version"], available=newer)
+        auto = newer and bool(latest.get("auto")) and not auto_update_skipped(latest["version"])
+        return jsonify(success=True, owner=False, version=APP_VERSION, latest=latest["version"], available=newer, auto=auto)
     if is_owner_copy():
         return jsonify(success=True, owner=True, version=APP_VERSION, control_url=CONTROL_URL,
                        control_port=CONTROL_PORT if distribution_started.is_set() else 0)
@@ -13357,26 +13548,10 @@ def update_apply(access_path: str):
         if busy():
             return jsonify(success=False, message="انتظر حتى تنتهي المهام الجارية ثم اضغط «تحديث»."), 409
         if control_configured():
-            latest = control_script_latest(fresh=True)
-            if not latest.get("version"):
-                return jsonify(success=False, message="لا يوجد تحديث منشور على خادم التحكّم."), 502
-            if version_tuple(latest["version"]) <= version_tuple(APP_VERSION):
-                return jsonify(success=False, message="هذه النسخة على آخر إصدار."), 409
-            try:
-                got = control_script_download()
-            except RuntimeError as exc:
-                return jsonify(success=False, message=str(exc) or "تعذّر تنزيل التحديث."), 502
-            body = got["gg"]
-            problem = control_update_problem(body, latest["version"], latest.get("sha256") or "")
-            if problem:
-                return jsonify(success=False, message=problem), 502
-            if not program_starts(body):
-                return jsonify(success=False, message="الإصدار الجديد لا يعمل على هذا الجهاز. لم يتغير شيء."), 502
-            if busy():
-                return jsonify(success=False, message="بدأت مهمة أثناء التنزيل. انتظر حتى تنتهي ثم اضغط «تحديث»."), 409
-            if got.get("content"):
-                install_content(got["content"])
-            install_program(body)
+            status, message, version = install_control_update(busy)
+            if status:
+                return jsonify(success=False, message=message), status
+            latest = {"version": version}
             installed = True
         else:
             latest = latest_update()
@@ -15596,4 +15771,9 @@ if __name__ == "__main__":
         print(f"لم تُضف التغريدات الأخيرة إلى التغريدات المجموعة: {type(exc).__name__}: {exc}", flush=True)
     if not is_owner_copy():
         threading.Thread(target=owner_sync_loop, name="owner-sync", daemon=True).start()
+    try:
+        auto_update_settle()
+    except Exception as exc:
+        print(f"التحديث التلقائي: {type(exc).__name__}: {exc}", flush=True)
+    threading.Thread(target=auto_update_loop, name="auto-update", daemon=True).start()
     app.run(host=bind_host, port=port, debug=False, threaded=True)

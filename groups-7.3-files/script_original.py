@@ -7073,7 +7073,7 @@ def _execute_comment_actions(page, items: list[dict], task_actions: list[str], a
             ahead.ask(following)
         left = list(plain)
         try:
-            opened, reason = open_task_tweet(page, str(item.get("url") or ""), None)
+            opened, reason = open_task_tweet(page, str(item.get("url") or ""), None, failures.patience(), should_stop)
         except Exception as exc:
             if browser_closed_error(exc):
                 if on_snapshot and results:
@@ -9985,18 +9985,18 @@ def in_page_moved(page, shown: bool) -> None:
         trace_click("الانتقال داخل الصفحة لم ينجح مرتين متتاليتين: كل تغريدة تُحمَّل كاملة في باقي المهمة")
 
 
-def open_status_page(page, url: str, skip_if_on: list[str] | None = None) -> tuple[str | None, str]:
+def open_status_page(page, url: str, skip_if_on: list[str] | None = None, patience: float = 1.0) -> tuple[str | None, str]:
     """Open a tweet. With skip_if_on, return (path, "already_on") the moment the
     tweet's buttons show every listed action already on, without waiting for the
     rest of the page to load. Inside the page already on X when it can (see move_in_page)."""
     note = {"fell_back": False}
-    opened, reason = _open_status_page(page, url, skip_if_on, note)
+    opened, reason = _open_status_page(page, url, skip_if_on, note, patience)
     if note["fell_back"] and opened:
         in_page_moved(page, False)          # (a miss: the move did not show a tweet that is there; a deleted one is not)
     return opened, reason
 
 
-def _open_status_page(page, url: str, skip_if_on, note: dict) -> tuple[str | None, str]:
+def _open_status_page(page, url: str, skip_if_on, note: dict, patience: float = 1.0) -> tuple[str | None, str]:
     match = re.search(r"status/(\d{6,25})", url or "")
     status_id = match.group(1) if match else ""
     canonical = normalize_status_path(url) or ""
@@ -10041,7 +10041,7 @@ def _open_status_page(page, url: str, skip_if_on, note: dict) -> tuple[str | Non
         if moved:
             # Inside the page: on only once the tweet before has left it and this one is there; else in full.
             shown = ""
-            limit = time.monotonic() + IN_PAGE_WAIT_SECONDS
+            limit = time.monotonic() + IN_PAGE_WAIT_SECONDS * patience
             while time.monotonic() < limit:
                 if quick and status_id:
                     api_flags = read_replies()
@@ -10063,12 +10063,12 @@ def _open_status_page(page, url: str, skip_if_on, note: dict) -> tuple[str | Non
                 note["fell_back"] = True
         if not moved:
             try:
-                page.goto(target, wait_until="commit" if quick else "domcontentloaded", timeout=20_000)
+                page.goto(target, wait_until="commit" if quick else "domcontentloaded", timeout=int(20_000 * patience))
             except Exception:
                 return None, "fail"
             in_page_loaded(page)
         revealed = False
-        deadline = time.monotonic() + (12 if quick else 8)
+        deadline = time.monotonic() + (12 if quick else 8) * patience
         while time.monotonic() < deadline:
             if quick and status_id:
                 api_flags = read_replies()
@@ -10291,11 +10291,29 @@ def remember_done(account: str, status_id: str, outcome: dict[str, str]) -> None
 TWEET_FAIL_PAUSES = (210, 60)
 
 
-def open_task_tweet(page, url: str, skip_if_on):
-    """Open a task's tweet with two tries. Returns (opened path or None, reason)."""
-    opened, reason = open_status_page(page, url, skip_if_on)
+# The tweet after one that would not open (the connection may have dropped for a moment): every wait on it is
+# TWEET_FAIL_PATIENCE times as long, and it is tried again, a few seconds apart, until that many times the usual wait
+# (TWEET_OPEN_SECONDS: X's page, then the tweet on it) has gone by. Back in that time, it opens, and the task goes on
+# with no pause; still not, it is the second in a row, and the pause comes as before.
+TWEET_OPEN_SECONDS = 28
+TWEET_FAIL_PATIENCE = 2
+TWEET_RETRY_GAP_MS = 3000
+
+
+def open_task_tweet(page, url: str, skip_if_on, patience: float = 1.0, should_stop=None):
+    """Open a task's tweet with two tries (more, with patience). Returns (opened path or None, reason)."""
+    began = time.monotonic()
+    if patience > 1:
+        trace_click(f"التغريدة السابقة لم تُفتح: انتظار هذه التغريدة {patience:g} أضعاف المعتاد (قد يكون الإنترنت ضعف لحظيًا)")
+    opened, reason = open_status_page(page, url, skip_if_on, patience)
     if not opened and reason != "gone":
-        opened, reason = open_status_page(page, url, skip_if_on)
+        opened, reason = open_status_page(page, url, skip_if_on, patience)
+    while (patience > 1 and not opened and reason != "gone" and time.monotonic() - began < TWEET_OPEN_SECONDS * patience
+           and not (should_stop and should_stop())):
+        page.wait_for_timeout(TWEET_RETRY_GAP_MS)
+        opened, reason = open_status_page(page, url, skip_if_on, patience)
+    if patience > 1:
+        trace_click(f"التغريدة بعد الانتظار الأطول: {'فُتحت' if opened else 'لم تُفتح'} ({time.monotonic() - began:.0f} ث)")
     return opened, reason
 
 
@@ -10415,6 +10433,10 @@ class FailedTweets:
 
     def opened(self) -> None:
         self.last = None
+
+    def patience(self) -> float:
+        """How much longer than usual the next tweet is waited for: longer right after one that would not open."""
+        return TWEET_FAIL_PATIENCE if self.last is not None else 1
 
     def failed(self, index: int) -> int | None:
         """This tweet would not open. Returns the first of the two in a row that would not (to go back to
@@ -10768,7 +10790,7 @@ def visit_and_apply(page, items: list[dict], task_actions: list[str], on_progres
                 break
         acted = True
         try:
-            opened, reason = open_task_tweet(page, str(item.get("url") or ""), press)
+            opened, reason = open_task_tweet(page, str(item.get("url") or ""), press, failures.patience(), should_stop)
         except Exception as exc:
             if browser_closed_error(exc):
                 if on_snapshot and results:

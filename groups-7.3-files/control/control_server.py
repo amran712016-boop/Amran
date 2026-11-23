@@ -282,7 +282,7 @@ def republish_moves_in_background() -> None:
 # ---- «نسخة احتياطية»: all the server's data in one file, encrypted with the control panel's password ----
 BACKUP_FILES = ("secrets.json", "codes.json", "keys.json", "usage.json", "notices.json", "acts.json", "support.json",
                 "move.json", "prices.json", "welcomed.json", "lifetime.json", "pace.json", "history.json", "prompt.json",
-                "server.crt", "server.key")
+                "devices.json", "server.crt", "server.key")
 BACKUP_MAGIC = b"GGBAK1"
 
 
@@ -498,10 +498,48 @@ def load_welcome() -> float:
     return round(value, 2) if 0 <= value <= 100 else WELCOME_DEFAULT
 
 
+# «الأجهزة»: a user (a code or an account) on any number of phones (each that signs in with it is added to its
+# phones), or on one phone only, the first, until the owner frees it («تحرير الأجهزة»), as it was before.
+DEVICES_PATH = DATA_DIR / "devices.json"
+DEVICES_KEPT = 50                   # the phones remembered after the first (the oldest of them goes beyond this)
+
+
+def one_device() -> bool:
+    data = read_private_json(DEVICES_PATH) or {}
+    return bool(data.get("one_device"))
+
+
+def devices_of(row: dict) -> list:
+    """The phones this user signed in on: the first one, then the others."""
+    found = []
+    for device in [row.get("bound_device") or ""] + list(row.get("devices") or []):
+        if device and device not in found:
+            found.append(device)
+    return found
+
+
+def allowed_devices(row: dict) -> list:
+    """The phones this user may work on now (one only, the first, when «جهاز واحد» is chosen)."""
+    if one_device():
+        return [row["bound_device"]] if row.get("bound_device") else []
+    return devices_of(row)
+
+
+def add_device(row: dict, device: str) -> None:
+    """(Under LOCK.) This phone signs in with this user: its first one, or one more of them."""
+    if not row.get("bound_device"):
+        row["bound_device"] = device
+        return
+    if device == row["bound_device"]:
+        return
+    others = [item for item in (row.get("devices") or []) if item and item != device and item != row["bound_device"]]
+    row["devices"] = (others + [device])[-DEVICES_KEPT:]
+
+
 def take_welcome(codes: list, device: str) -> float:
     """(Under LOCK, as an account is made on this phone.) Its trial balance, or 0 when this phone had it already."""
     amount = load_welcome()
-    if amount <= 0 or any((row.get("bound_device") or "") == device for row in codes):
+    if amount <= 0 or any(device in devices_of(row) for row in codes):
         return 0.0
     key = hashlib.sha256(("welcome|" + device).encode("utf-8")).hexdigest()[:32]
     data = read_private_json(WELCOMED_PATH) or {}
@@ -890,10 +928,15 @@ def history_add(grown: dict) -> None:
     write_private_json(HISTORY_PATH, {"version": 1, "since": int(data.get("since") or time.time()), "hours": hours})
 
 
-def save_acts_of(code_id: str, accounts: list) -> None:
-    """The app's numbers now, for each of its X accounts: they replace what it sent before. What the app no longer
-    has (it was deleted and set up again, or its data cleared: an account gone from its numbers, or one counting
-    again from zero) is kept here ("kept"), so the panel's numbers never go down because of the phone."""
+ACTS_PHONES_KEPT = 60                 # a user's phones whose numbers are kept apart (the oldest is folded into "kept")
+
+
+def save_acts_of(code_id: str, accounts: list, device: str = "", first_device: str = "") -> None:
+    """The app's numbers now, for each of its X accounts: they replace what this phone sent before (each phone of the
+    user has its own: one phone's numbers never replace another's). What the app no longer has (it was deleted and
+    set up again, or its data cleared: an account gone from its numbers, or one counting again from zero) is kept
+    here ("kept"), so the panel's numbers never go down because of the phone. first_device: the user's first phone,
+    whose numbers were all the user's before (kept as that phone's)."""
     clean = {}
     for row in accounts[:ACT_MAX_ACCOUNTS]:
         if not isinstance(row, dict):
@@ -914,7 +957,12 @@ def save_acts_of(code_id: str, accounts: list) -> None:
     with LOCK:
         data = load_acts()
         before_row = data.get(code_id) or {}
-        before = before_row.get("accounts") or {}
+        phones = before_row.get("phones") if isinstance(before_row.get("phones"), dict) else {}
+        if isinstance(before_row.get("accounts"), dict) and before_row["accounts"]:
+            # (from before a user could have several phones: those were the first phone's numbers)
+            phones.setdefault(first_device or device, {"at": int(before_row.get("at") or 0), "accounts": before_row["accounts"]})
+        mine = phones.get(device) if isinstance(phones.get(device), dict) else {}
+        before = mine.get("accounts") if isinstance(mine.get("accounts"), dict) else {}
         kept = before_row.get("kept") if isinstance(before_row.get("kept"), dict) else {}
         grown = {name: 0 for name in ("repost", "like", "bookmark")}
         for key, old in before.items():
@@ -937,7 +985,18 @@ def save_acts_of(code_id: str, accounts: list) -> None:
                 if 0 < step < 100_000:
                     grown[name] += step
         # (an account seen for the first time adds nothing to the chart: its numbers are from before)
-        data[code_id] = {"at": int(time.time()), "accounts": clean, **({"kept": kept} if kept else {})}
+        now = int(time.time())
+        phones.pop(device, None)
+        phones[device] = {"at": now, "accounts": clean}
+        while len(phones) > ACTS_PHONES_KEPT:            # (the phone not heard from the longest: its numbers are kept)
+            oldest = min(phones, key=lambda key: int((phones[key] or {}).get("at") or 0))
+            for key, old in ((phones.pop(oldest) or {}).get("accounts") or {}).items():
+                if isinstance(old, dict):
+                    slot = kept.setdefault(key, dict({act: 0 for act in ACT_NAMES}, name=""))
+                    for act in ACT_NAMES:
+                        slot[act] = int(slot.get(act) or 0) + int(old.get(act) or 0)
+                    slot["name"] = old.get("name") or slot.get("name") or ""
+        data[code_id] = {"at": now, "phones": phones, **({"kept": kept} if kept else {})}
         write_private_json(ACTS_PATH, data)
         history_add(grown)
 
@@ -947,8 +1006,12 @@ def acts_of(code_id: str, data: dict | None = None) -> dict:
     last sent them (0: never)."""
     row = (data if data is not None else load_acts()).get(code_id) or {}
     merged: dict[str, dict] = {}
-    # (what each account shows in the app now, and what was kept of it when the app lost it: the same @name adds up)
+    # (what each account shows in the app now, on each phone, and what was kept of it when an app lost it: the same
+    # @name adds up)
     parts = list((row.get("accounts") or {}).items()) + list((row.get("kept") or {}).items())
+    for phone in (row.get("phones") or {}).values():
+        if isinstance(phone, dict):
+            parts += list((phone.get("accounts") or {}).items())
     for key, value in parts:
         if not isinstance(value, dict):
             continue
@@ -1896,8 +1959,9 @@ def write_reply(tweet_text: str, image: bytes | None, voice: str, manner: int, b
 
 
 # ----------------------------------------------------------------------------- the app's unlock token
-# The token carries the code and the one device it was bound to, signed. A copy of it on another phone is useless:
-# that phone's own device id will not match the device inside the token (and the code is bound to the first device).
+# The token carries the code and the phone it was given to, signed. A copy of it on another phone is useless: that
+# phone's own device id will not match the device inside the token, and only the user's phones are let in (see
+# allowed_devices: any phone that signed in with it, or the first one only when «جهاز واحد» is chosen).
 def make_token(code_id: str, device: str) -> str:
     exp = int(time.time()) + TOKEN_DAYS * 86400
     head = f"{code_id}.{device}.{exp}"
@@ -1924,13 +1988,13 @@ def read_token(token: str) -> tuple[str, str]:
 
 
 def code_from_token(token: str) -> dict | None:
-    """The active code a token belongs to, only when the token's device is the one the code is bound to."""
+    """The active code a token belongs to, only when the token's phone is one the code may work on."""
     code_id, device = read_token(token)
-    if not code_id:
+    if not code_id or not device:
         return None
     with LOCK:
         for row in load_codes():
-            if row.get("id") == code_id and row.get("active") and (row.get("bound_device") or "") == device:
+            if row.get("id") == code_id and row.get("active") and device in allowed_devices(row):
                 return row
     return None
 
@@ -2533,6 +2597,13 @@ main{padding-bottom:56px}
 <p class="l">بعد تحميل التغريدة وقبل أول نقرة <small>(لا ينقر قبل أن تظهر أزرار التغريدة)</small></p>
 <div class="prg"><label class="prf"><span>من</span><input class="fs" name="settle_from" dir="ltr" inputmode="decimal" autocomplete="off" value="{{ '%g'|format(pace.settle[0]) }}"></label><label class="prf"><span>إلى</span><input class="fs" name="settle_to" dir="ltr" inputmode="decimal" autocomplete="off" value="{{ '%g'|format(pace.settle[1]) }}"></label></div>
 <button class="btn wide" style="margin-top:14px">حفظ سرعة التنفيذ</button></form></details>
+<details class="card prc" id="dv-card"><summary><span class="prc-h">{{ic('phone')}}<b>الأجهزة</b></span><span class="prc-s"><span>{{ 'جهاز واحد لكل مستخدم' if one_device else 'عدة أجهزة لكل مستخدم' }}</span><span>الأجوال المسجّلة: <bdi dir="ltr">{{stats.bound}}</bdi></span></span>{{ic('chev')}}</summary>
+<form method="post" action="/{{admin}}/devices" data-toast="تم الحفظ"><p class="mut">على كم جوال يعمل رمز المستخدم أو حسابه. الرصيد والتعليقات والأرقام واحدة له على كل جوالاته.</p>
+<div class="eng">
+<label class="opt"><input type="radio" name="one_device" value="0"{% if not one_device %} checked{% endif %}><span class="pi">{{ic('users')}}</span><span><b>عدة أجهزة</b><small>يدخل برمزه أو حسابه من أي جوال، وتعمل كلها معًا</small></span><span class="ck">{{ic('check')}}</span></label>
+<label class="opt"><input type="radio" name="one_device" value="1"{% if one_device %} checked{% endif %}><span class="pi">{{ic('lock')}}</span><span><b>جهاز واحد</b><small>يعمل على أول جوال دخل به فقط، حتى «تحرير الأجهزة»؛ وأجواله الأخرى تخرج</small></span><span class="ck">{{ic('check')}}</span></label>
+</div>
+<button class="btn wide" style="margin-top:14px">حفظ</button></form></details>
 <details class="card prc" id="pr-card"><summary><span class="prc-h">{{ic('edit')}}<b>برومبت التعليقات</b></span><span class="prc-s"><span>{{ 'مُعدَّل' if prompt.custom else 'الافتراضي' }}</span><span>حتى <bdi dir="ltr">{{prompt.max_chars}}</bdi> حرف</span><span><bdi dir="ltr">{{prompt.angles|length}}</bdi> زاوية · <bdi dir="ltr">{{prompt.manners|length}}</bdi> أسلوب</span></span>{{ic('chev')}}</summary>
 <form method="post" action="/{{admin}}/prompt" data-toast="تم حفظ البرومبت" id="pr-form"><p class="mut">ما يُطلب من الذكاء الاصطناعي في كل تعليق. التعليقات تُكتب على هذا الخادم، فيُطبَّق التعديل على كل المستخدمين من التعليق التالي، بلا تحديث للتطبيق أو السكربت.</p>
 <label class="l" for="pr-text">التعليمات</label>
@@ -2572,12 +2643,12 @@ if(j.ok){show(j.comment,false,'\u2066'+j.chars+' / '+j.limit+'\u2069 حرف',j.t
 
 <div class="list" id="list">
 {% for c in codes %}{% set hue = (c.id[:2]|int(0,16)) * 360 // 256 %}
-<article class="u{{ '' if c.active else ' off' }}" data-id="{{c.id}}" data-s="{{ 'on' if c.active else 'off' }}" data-name="{{c.label}}" data-code="{{c.code}}" data-bound="{{ '1' if c.bound_device else '' }}" data-pay="{{c.pay}}" data-bal="{{ usd(c.balance) }}" data-acct="{{c.account_user}}" data-n="{{c.usage.total}}" data-x="{{ c.acts.repost + c.acts.like + c.acts.bookmark }}" data-seen="{{c.last_seen or 0}}" data-q="{{ (c.label ~ ' ' ~ c.code ~ ' ' ~ c.code|replace('-','') ~ ' ' ~ c.usage.accounts|map(attribute='name')|join(' '))|lower }}">
+<article class="u{{ '' if c.active else ' off' }}" data-id="{{c.id}}" data-s="{{ 'on' if c.active else 'off' }}" data-name="{{c.label}}" data-code="{{c.code}}" data-bound="{{ '1' if c.device_count else '' }}" data-pay="{{c.pay}}" data-bal="{{ usd(c.balance) }}" data-acct="{{c.account_user}}" data-n="{{c.usage.total}}" data-x="{{ c.acts.repost + c.acts.like + c.acts.bookmark }}" data-seen="{{c.last_seen or 0}}" data-q="{{ (c.label ~ ' ' ~ c.code ~ ' ' ~ c.code|replace('-','') ~ ' ' ~ c.usage.accounts|map(attribute='name')|join(' '))|lower }}">
 <div class="who"><div class="av" style="--h:{{hue}}" aria-hidden="true">{{ (c.label or '؟')[:1] }}</div>
 <div class="nm"><h3>{{ c.label or 'بدون اسم' }}{% if c.account_user %}<span class="tg">حساب</span>{% endif %}{% if c.pay == 'prepaid' %}<span class="tg pp">مسبق</span>{% endif %}</h3><p><span class="st">{{ 'يعمل' if c.active else 'موقوف' }}</span><span>{% if c.last_seen %}آخر دخول {{c.last_seen_text}}{% else %}لم يدخل بعد{% endif %}</span></p></div></div>
 <form method="post" action="/{{admin}}/code/toggle" data-toast="{{ 'تم إيقاف الرمز' if c.active else 'تم تشغيل الرمز' }}"><input type="hidden" name="id" value="{{c.id}}"><button class="sw{{ ' on' if c.active else '' }}" role="switch" aria-checked="{{ 'true' if c.active else 'false' }}" aria-label="رمز {{ c.label or 'بدون اسم' }} يعمل"><i></i></button></form>
 <div class="cr"><button type="button" class="code" data-copy="{{c.code}}" aria-label="نسخ الرمز {{c.code}}"><bdi>{{c.code}}</bdi>{{ic('copy')}}</button><button type="button" class="ib" data-more aria-label="خيارات {{ c.label or 'المستخدم' }}">{{ic('more')}}</button></div>
-{% set facts %}{% if c.pay == 'prepaid' %}<span class="bal{{ ' low' if c.balance < 0.05 else '' }}" title="الرصيد المسبق">رصيد <b dir="ltr">{{ usd(c.balance) }}</b></span>{% endif %}<span><b>{{ '{:,}'.format(c.usage.total) }}</b> تعليق</span><span title="التكلفة التقديرية"><b>${{ '%.2f'|format(c.usage.cost) }}</b></span><span class="dev{{ ' on' if c.bound_device else '' }}">{{ic('phone')}}{{ 'جهاز مربوط' if c.bound_device else 'غير مربوط' }}</span>{% endset %}
+{% set facts %}{% if c.pay == 'prepaid' %}<span class="bal{{ ' low' if c.balance < 0.05 else '' }}" title="الرصيد المسبق">رصيد <b dir="ltr">{{ usd(c.balance) }}</b></span>{% endif %}<span><b>{{ '{:,}'.format(c.usage.total) }}</b> تعليق</span><span title="التكلفة التقديرية"><b>${{ '%.2f'|format(c.usage.cost) }}</b></span><span class="dev{{ ' on' if c.device_count else '' }}">{{ic('phone')}}{{c.devices_text}}</span>{% endset %}
 {% if c.usage.accounts %}<details class="acc"><summary class="facts" title="التعليقات حسب حساب X">{{facts}}{{ic('chev')}}</summary>
 <p class="alh">حسابات X ({{c.usage.accounts|length}})</p><ul class="al">
 {% for a in c.usage.accounts %}<li><b><bdi>{{ ('@' ~ a.name) if a.name else ('#' ~ a.id[:8]) }}</bdi></b><span>{{ '{:,}'.format(a.n) }} تعليق</span><span>${{ '%.2f'|format(a.cost) }}</span><div class="pg"><i style="width:{{ ((a.n * 100 / c.usage.total)|round|int) if c.usage.total else 0 }}%"></i></div></li>{% endfor %}
@@ -2839,7 +2910,7 @@ f.addEventListener('change',sync);sync()})();</script>{% endif %}
 <button type="button" id="sh-copy" data-copy="" data-close>{{ic('copy')}}نسخ الرمز</button>
 <button type="button" id="sh-share" data-share="" data-close>{{ic('share')}}مشاركة الرمز</button>
 <button type="button" id="sh-rename">{{ic('edit')}}تعديل الاسم</button>
-<form id="sh-release" method="post" action="/{{admin}}/code/release" data-title="تحرير الجهاز؟" data-confirm="يُفكّ ارتباط الرمز بجواله الحالي ليتمكّن صاحبه من تفعيله على جوال آخر." data-yes="تحرير الجهاز" data-toast="تم تحرير الجهاز"><input type="hidden" name="id"><button>{{ic('phone')}}<span>تحرير الجهاز<small>ليُفعَّل الرمز على جوال آخر</small></span></button></form>
+<form id="sh-release" method="post" action="/{{admin}}/code/release" data-title="تحرير الأجهزة؟" data-confirm="يخرج الرمز من كل جوال دخل به، ويدخل صاحبه من جديد على الجوال الذي يريده." data-yes="تحرير الأجهزة" data-toast="تم تحرير الأجهزة"><input type="hidden" name="id"><button>{{ic('phone')}}<span>تحرير الأجهزة<small>يخرج من كل جوالاته، ليدخل من جديد على ما يريد</small></span></button></form>
 <form id="sh-pay" method="post" action="/{{admin}}/code/pay" data-toast="تم تغيير نوع الدفع"><input type="hidden" name="id"><input type="hidden" name="pay" value="prepaid"><button>{{ic('key')}}<span id="sh-pay-t">تحويل إلى دفع مسبق</span></button></form>
 <button type="button" id="sh-bal">{{ic('plus')}}<span>إضافة رصيد<small>تجريبي أو شحن، ويُخصم حسب أسعار الخدمات</small></span></button>
 <button type="button" id="sh-pw">{{ic('lock')}}<span>تعيين كلمة سر جديدة<small>لصاحب حساب نسي كلمة سره</small></span></button>
@@ -3152,8 +3223,12 @@ def dashboard():
                        for e in (r.get("ledger") if isinstance(r.get("ledger"), list) else [])[:6] if isinstance(e, dict)]
         r.pop("account", None)                       # (no password hash goes into the page)
         r["acts_text"] = ("الآن" if time.time() - r["acts"]["at"] < 60 else seen_text({"last_seen": r["acts"]["at"]})) if r["acts"]["at"] else ""
+        n = len(devices_of(r))
+        r["device_count"] = n
+        r["devices_text"] = ("غير مربوط", "جهاز مربوط", "جهازان")[n] if n < 3 else f"{n} {'أجهزة' if n <= 10 else 'جهازًا'}"
+        r.pop("devices", None)                       # (the phones' ids stay out of the page)
     stats = {"users": len(rows), "active": sum(1 for r in rows if r.get("active")),
-             "bound": sum(1 for r in rows if r.get("bound_device")),
+             "bound": sum(r["device_count"] for r in rows),
              "comments": sum(r["usage"]["total"] for r in rows),
              "cost": round(sum(r["usage"]["cost"] for r in rows), 2),
              "repost": sum(r["acts"]["repost"] for r in rows), "like": sum(r["acts"]["like"] for r in rows),
@@ -3184,7 +3259,7 @@ def dashboard():
         backup_when=seen_text({"last_seen": last_backup}) if last_backup else "",
         owner_link=owner_app_link(request.host), in_owner_app=OWNER_APP_MARK in (request.headers.get("User-Agent") or ""),
         this_host=request.host, relay=MOVE_RELAY.split("//")[-1],
-        prices=load_prices(), welcome=load_welcome(), pace=load_pace(), prompt=load_prompt(),
+        prices=load_prices(), welcome=load_welcome(), pace=load_pace(), prompt=load_prompt(), one_device=one_device(),
         app_slots=app_panel(codes), app_dl_link=app_download_link(), app_package=APP_PACKAGE,
         script_live=script_live, script_staged=script_staged, script_next=next_version(highest_published_version()),
         script_floor=highest_published_version(), script_pilot=script_pilot, script_pilot_ids=pilot_ids,
@@ -3427,7 +3502,7 @@ def code_delete():
 
 @app.post(f"/{ADMIN}/code/release")
 def code_release():
-    """Unbind a code from its phone, so the user can sign in on a new one with the same code."""
+    """Unbind a code from its phones: each is signed out, and the user signs in again on the phone (or phones) wanted."""
     if not logged_in():
         return redirect(f"/{ADMIN}")
     code_id = request.form.get("id")
@@ -3436,7 +3511,27 @@ def code_release():
         for row in codes:
             if row.get("id") == code_id:
                 row["bound_device"] = ""
+                row.pop("devices", None)
         save_codes(codes)
+    return redirect(f"/{ADMIN}")
+
+
+@app.post(f"/{ADMIN}/devices")
+def devices_save():
+    """«الأجهزة»: each user on any number of phones, or on one only (the first)."""
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    one = request.form.get("one_device") == "1"
+    with LOCK:
+        write_private_json(DEVICES_PATH, {"version": 1, "one_device": one})
+        if one:                                     # (the other phones are signed out, and stay out if it is undone)
+            codes = load_codes()
+            if any(row.get("devices") for row in codes):
+                for row in codes:
+                    row.pop("devices", None)
+                save_codes(codes)
+    flash("ok", "صار كل مستخدم على جهاز واحد: يبقى أول جوال دخل به، وتخرج أجواله الأخرى."
+          if one else "صار كل مستخدم يدخل برمزه أو حسابه من أي عدد من الأجوال، وتعمل كلها معًا.")
     return redirect(f"/{ADMIN}")
 
 
@@ -4415,10 +4510,9 @@ def api_activate():
         target = next((item for item in codes if item.get("id") == row["id"]), None)
         if target is None:
             return api_err("الرمز غير معروف.")
-        bound = target.get("bound_device") or ""
-        if bound and bound != device:
+        if one_device() and target.get("bound_device") and target["bound_device"] != device:
             return api_err("هذا الرمز مُستخدم على جهاز آخر. اطلب من صاحب البرنامج تحريره أو رمزًا جديدًا.")
-        target["bound_device"] = device
+        add_device(target, device)
         target["last_seen"] = int(time.time())
         save_codes(codes)
     engine, _, _, _ = active_engine()
@@ -4497,10 +4591,9 @@ def api_login():
         target = next((item for item in codes if item.get("id") == row["id"]), None)
         if target is None:
             return api_err("الحساب غير موجود.")
-        bound = target.get("bound_device") or ""
-        if bound and bound != device:
+        if one_device() and target.get("bound_device") and target["bound_device"] != device:
             return api_err("هذا الحساب مُستخدم على جهاز آخر. اطلب من صاحب البرنامج تحرير الجهاز.")
-        target["bound_device"] = device
+        add_device(target, device)
         target["last_seen"] = int(time.time())
         save_codes(codes)
     return signed_in(target, device)
@@ -4572,7 +4665,7 @@ def api_stats():
     accounts = body.get("accounts")
     if not isinstance(accounts, list):
         return api_err("لم تصل الأرقام.")
-    save_acts_of(row["id"], accounts)
+    save_acts_of(row["id"], accounts, read_token(body.get("token"))[1], row.get("bound_device") or "")
     return api_ok()
 
 

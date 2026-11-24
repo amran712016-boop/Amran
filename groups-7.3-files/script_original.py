@@ -6885,7 +6885,11 @@ COMPOSER_TEXT_JS = r"""
   const box = boxes.find((node) => active && (node === active || node.contains(active)))
     || boxes.filter((node) => node.getClientRects().length).pop()
     || document.querySelector('[role="dialog"] [data-testid="tweetTextarea_0"]') || boxes[0];
-  return box ? (box.innerText || "") : "";
+  // its text: a text field's value (X's newer reply box is a text field: innerText does not hold what is typed)
+  const textOf = (node) => !node ? "" : (/^(TEXTAREA|INPUT)$/.test(node.tagName) ? (node.value || "") : (node.innerText || ""));
+  if (!box) return active && (/^(TEXTAREA|INPUT)$/.test(active.tagName) || active.isContentEditable) ? textOf(active) : "";
+  const field = (active && box.contains(active) && active) || box.querySelector("textarea, input, [contenteditable='true']") || box;
+  return textOf(field) || textOf(box);
 }
 """
 
@@ -6907,8 +6911,9 @@ def type_like_a_person(page, text: str) -> bool:
         if browser_closed_error(exc):
             raise
         seen = ""
-    if same_text(seen, text) and reply_button_ready(page):
-        trace_click(f"reply كُتب النص حرفًا حرفًا ({len(steps)} ضغطة)")
+    if reply_button_ready(page) and (same_text(seen, text) or not str(seen or "").strip()):
+        trace_click(f"reply كُتب النص حرفًا حرفًا ({len(steps)} ضغطة)"
+                    + ("" if str(seen or "").strip() else "؛ نص المربع لا يُقرأ هنا، وزر النشر مفعّل"))
         return True
     trace_click(f"reply الكتابة حرفًا حرفًا لم تترك النص كما هو ({str(seen or '')[:40]!r}): يُكتب دفعة واحدة")
     return False
@@ -6958,7 +6963,7 @@ def insert_reply_text(page, text: str) -> None:
         page.keyboard.insert_text(text)
         page.wait_for_timeout(400)
         seen = page.evaluate(COMPOSER_TEXT_JS)
-        if same_text(seen, text) and reply_button_ready(page):
+        if reply_button_ready(page) and (same_text(seen, text) or not str(seen or "").strip()):
             trace_click("reply كُتب النص دفعة واحدة من لوحة المفاتيح")
             return
         trace_click(f"reply النص في المربع ليس التعليق ({str(seen or '')[:40]!r})")

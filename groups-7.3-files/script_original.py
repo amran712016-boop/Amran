@@ -5289,11 +5289,58 @@ async ({statusId, testid}) => {
 """
 
 
-def press_action_button(page, path: str, status_id: str, action: str) -> str:
+# «لمسة على الزر» (in the app): a button is pressed by a touch at it, through the screen's input, as a person presses
+# it (only once nothing covers it). Then the page is watched for what the press does at once: the button turns on,
+# the repost menu opens, the reply box opens, the reply goes (or X answers it). When nothing of it shows, the button
+# is pressed through the page instead, as before, so a touch that did not take never loses a press. A press that
+# did take is never sent again: what it does shows in the page well within the wait.
+TOUCH_BUTTONS = True
+TOUCH_TAKE_SECONDS = 1.5
+SEND_SELECTOR = '[data-testid="tweetButtonInline"]:not([aria-disabled="true"]), [data-testid="tweetButton"]:not([aria-disabled="true"])'
+TOUCH_TARGET_JS = r"""
+(selector) => {
+  const nodes = [...document.querySelectorAll(selector)].filter((node) => node.getClientRects().length);
+  const el = nodes[nodes.length - 1];
+  if (!el) return null;
+  const r = el.getBoundingClientRect();
+  if (r.width < 2 || r.height < 2) return null;
+  const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+  return {box: {x: r.x, y: r.y, width: r.width, height: r.height}, ok: !!hit && (hit === el || el.contains(hit)),
+          inView: r.top > 8 && r.bottom < window.innerHeight - 8};
+}
+"""
+
+
+def touch_took(page, box: dict, took, label: str, seconds: float = TOUCH_TAKE_SECONDS) -> bool:
+    """Touch the button in box. True once took() says it did what it should (within seconds), else False."""
+    try:
+        click_box(page, box)
+    except Exception as exc:
+        if browser_closed_error(exc):
+            raise
+        trace_click(f"{label}: اللمسة لم تُرسل ({type(exc).__name__})")
+        return False
+    end = time.monotonic() + seconds
+    while True:
+        try:
+            if took():
+                trace_click(f"{label}: لمسة على الزر")
+                return True
+        except Exception as exc:
+            if browser_closed_error(exc):
+                raise
+        if time.monotonic() >= end:
+            trace_click(f"{label}: اللمسة لم يظهر أثرها، الضغط عبر الصفحة")
+            return False
+        page.wait_for_timeout(120)
+
+
+def press_action_button(page, path: str, status_id: str, action: str, heard=None) -> str:
     """Scroll the button into view, make sure nothing covers it, then click it.
 
     Returns "" after a click reached the button, "missing" when the button is
-    not on the page, or the name of whatever was covering the button.
+    not on the page, or the name of whatever was covering the button. heard: whether X has answered this press
+    already (in the app, one sign that the touch took).
     """
     testid = ACTION_CONTROLS[action][1]
     blocker = ""
@@ -5317,6 +5364,15 @@ def press_action_button(page, path: str, status_id: str, action: str) -> str:
             info = probe(False)
         if info and info.get("ok") and info.get("inView") and info.get("box"):
             if IN_APP:
+                def moved() -> bool:
+                    if heard is not None and heard():
+                        return True
+                    if action == "repost" and page.evaluate(
+                            """() => !!document.querySelector('[data-testid="retweetConfirm"], [data-testid="confirmationSheetConfirm"]')"""):
+                        return True
+                    return bool(((read_action_state(page, status_id, [action]) or {}).get(action) or {}).get("on"))
+                if TOUCH_BUTTONS and touch_took(page, info["box"], moved, action):
+                    return ""
                 try:
                     pressed = page.evaluate(PRESS_PAGE_JS, {"statusId": status_id, "testid": testid})
                 except Exception as exc:
@@ -5495,7 +5551,8 @@ def apply_actions_on_path(page, path: str, actions: list[str]) -> dict[str, str]
 
     def press(action: str) -> str:
         """Press the action's button (and the repost's confirm). "" when pressed, else why not."""
-        blocker = press_action_button(page, path, status_id, action)
+        mark = answers.mark()
+        blocker = press_action_button(page, path, status_id, action, lambda: answers.answer(action, mark) != "")
         if blocker:
             return blocker
         if action == "repost":
@@ -6578,6 +6635,23 @@ def open_reply_composer(page, path: str) -> None:
     match = re.search(r"status/(\d{6,25})", path or "")
     status_id = match.group(1) if match else ""
     if IN_APP:
+        if TOUCH_BUTTONS and status_id and not composer_visible(page):
+            info = None
+            for scroll in (False, True, False):
+                try:
+                    info = page.evaluate(ACTION_BUTTON_PROBE_JS, {"statusId": status_id, "testid": "reply", "scroll": scroll})
+                except Exception as exc:
+                    if browser_closed_error(exc):
+                        raise
+                    info = None
+                if scroll:
+                    page.wait_for_timeout(450)
+                elif info and info.get("box") and info.get("inView"):
+                    break
+            if info and info.get("ok") and info.get("inView") and info.get("box"):
+                if touch_took(page, info["box"], lambda: composer_visible(page), "reply", seconds=3.0):
+                    trace_click("reply ظهر مربع الكتابة")
+                    return
         for _ in range(3):
             if composer_visible(page):
                 trace_click("reply مربع الكتابة ظاهر")
@@ -6867,14 +6941,24 @@ PRESS_SEND_JS = r"""
 """
 
 
-def click_reply_send(page) -> None:
-    enabled = page.locator(
-        '[data-testid="tweetButtonInline"]:not([aria-disabled="true"]), '
-        '[data-testid="tweetButton"]:not([aria-disabled="true"])'
-    )
+def click_reply_send(page, heard=None) -> None:
+    enabled = page.locator(SEND_SELECTOR)
     if enabled.count() == 0:
         raise PlaywrightTimeoutError("reply button stayed disabled")
     if IN_APP:
+        if TOUCH_BUTTONS:
+            try:
+                target = page.evaluate(TOUCH_TARGET_JS, SEND_SELECTOR)
+            except Exception as exc:
+                if browser_closed_error(exc):
+                    raise
+                target = None
+            # (gone: X turns the button off as it sends, or closes the box; or X has answered it)
+            went = lambda: (heard is not None and heard()) or enabled.count() == 0
+            if target and target.get("ok") and target.get("box") and touch_took(page, target["box"], went, "reply نشر", seconds=2.5):
+                return
+            if went():
+                return
         sent = page.evaluate(PRESS_SEND_JS)
         trace_click(f"reply نشر {sent}")
         if not isinstance(sent, dict) or sent.get("how") not in ("react", "fiber"):
@@ -6901,7 +6985,7 @@ def publish_reply(page, text: str, path: str) -> tuple[bool, str]:
     answers = XAnswers(page)
     try:
         since = answers.mark()
-        click_reply_send(page)
+        click_reply_send(page, lambda: answers.answer("comment", since) != "")
         snippet = text[:24]
         deadline = time.monotonic() + 12
         while True:

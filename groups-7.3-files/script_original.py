@@ -6831,6 +6831,12 @@ def pace_update(answer) -> None:
             continue
         if 0 <= low <= high <= limit:
             _pace[key] = (low, high)
+    try:                                        # (how many tweets inside the page before a full load: whole numbers)
+        low, high = (int(float(value)) for value in pace.get("in_page"))
+        if 1 <= low <= high <= IN_PAGE_FULL_MOST:
+            _pace["in_page"] = (low, high)
+    except (TypeError, ValueError):
+        pass
 
 
 def pace_ms(key: str) -> int:
@@ -10029,7 +10035,8 @@ def tweet_flags_from_api(data, status_id: str) -> dict | None:
 # the task ends, the browser closed and reopened for a pause included.
 IN_PAGE_MOVES = True
 IN_PAGE_WAIT_SECONDS = 7
-IN_PAGE_FULL_EVERY = (1, 3)
+IN_PAGE_FULL_EVERY = (1, 3)                 # (unless the panel's «سرعة التنفيذ» says otherwise: _pace["in_page"])
+IN_PAGE_FULL_MOST = 50
 _in_page: dict[int, dict] = {}              # id(page) -> {"since_full", "full_at", "missed", "off", "refused"}
 
 MOVE_IN_PAGE_JS = r"""
@@ -10076,7 +10083,7 @@ def move_in_page(page, status_id: str, canonical: str) -> bool:
 
 
 def _in_page_full_at() -> int:
-    low, high = sorted(int(value) for value in IN_PAGE_FULL_EVERY)
+    low, high = sorted(int(value) for value in (_pace.get("in_page") or IN_PAGE_FULL_EVERY))
     return random.randint(max(1, low), max(1, high))
 
 

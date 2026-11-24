@@ -573,8 +573,10 @@ def take_welcome(codes: list, device: str, phone: str = "") -> float:
 # and «إلى»). Set in the users tab, given to every
 # app with each task's start, so every user's next task goes at it.
 PACE_PATH = DATA_DIR / "pace.json"
-PACE_DEFAULTS = {"typing": (3.0, 8.0), "gap": (0.3, 1.0), "settle": (0.6, 1.5)}
-PACE_LIMITS = {"typing": 60.0, "gap": 10.0, "settle": 10.0}
+PACE_DEFAULTS = {"typing": (3.0, 8.0), "gap": (0.3, 1.0), "settle": (0.6, 1.5), "in_page": (1, 3)}
+PACE_LIMITS = {"typing": 60.0, "gap": 10.0, "settle": 10.0, "in_page": 50}
+# ("in_page": how many tweets the app opens inside the same X page, without loading it in full, before the next
+# one is loaded in full: whole numbers, from 1)
 
 
 def load_pace() -> dict:
@@ -585,7 +587,9 @@ def load_pace() -> dict:
             low, high = (round(float(value), 2) for value in data.get(key))
         except (TypeError, ValueError):
             low, high = default
-        out[key] = [low, high] if 0 <= low <= high <= PACE_LIMITS[key] else list(default)
+        if key == "in_page":
+            low, high = int(low), int(high)
+        out[key] = [low, high] if (1 if key == "in_page" else 0) <= low <= high <= PACE_LIMITS[key] else list(default)
     return out
 
 
@@ -2605,7 +2609,7 @@ main{padding-bottom:56px}
 <label class="prf prw"><span>رصيد الحساب الجديد</span><input class="fs" name="welcome" dir="ltr" inputmode="decimal" autocomplete="off" value="{{ '%g'|format(welcome) }}"></label>
 <p class="mut prh">يُضاف تلقائيًا لكل من ينشئ حسابًا جديدًا في التطبيق، مرة واحدة لكل جوال. و0 يوقفه.</p>
 <button class="btn wide" style="margin-top:14px">حفظ الأسعار</button></form></details>
-<details class="card prc"><summary><span class="prc-h">{{ic('sort')}}<b>سرعة التنفيذ</b></span><span class="prc-s"><span>كتابة التعليق <bdi dir="ltr">{{ '%g'|format(pace.typing[0]) }}–{{ '%g'|format(pace.typing[1]) }}</bdi> ث</span><span>بين الأزرار <bdi dir="ltr">{{ '%g'|format(pace.gap[0]) }}–{{ '%g'|format(pace.gap[1]) }}</bdi> ث</span><span>بعد التحميل <bdi dir="ltr">{{ '%g'|format(pace.settle[0]) }}–{{ '%g'|format(pace.settle[1]) }}</bdi> ث</span></span>{{ic('chev')}}</summary>
+<details class="card prc"><summary><span class="prc-h">{{ic('sort')}}<b>سرعة التنفيذ</b></span><span class="prc-s"><span>كتابة التعليق <bdi dir="ltr">{{ '%g'|format(pace.typing[0]) }}–{{ '%g'|format(pace.typing[1]) }}</bdi> ث</span><span>بين الأزرار <bdi dir="ltr">{{ '%g'|format(pace.gap[0]) }}–{{ '%g'|format(pace.gap[1]) }}</bdi> ث</span><span>بعد التحميل <bdi dir="ltr">{{ '%g'|format(pace.settle[0]) }}–{{ '%g'|format(pace.settle[1]) }}</bdi> ث</span><span>بدون تحميل كامل <bdi dir="ltr">{{ pace.in_page[0] }}–{{ pace.in_page[1] }}</bdi> تغريدات</span></span>{{ic('chev')}}</summary>
 <form method="post" action="/{{admin}}/pace" data-toast="تم حفظ سرعة التنفيذ"><p class="mut">بالثواني، ويختار التطبيق كل مرة رقمًا عشوائيًا بين «من» و«إلى». تُطبَّق على كل المستخدمين من مهمتهم التالية.</p>
 <p class="l">مدة كتابة التعليق كله</p>
 <div class="prg"><label class="prf"><span>من</span><input class="fs" name="typing_from" dir="ltr" inputmode="decimal" autocomplete="off" value="{{ '%g'|format(pace.typing[0]) }}"></label><label class="prf"><span>إلى</span><input class="fs" name="typing_to" dir="ltr" inputmode="decimal" autocomplete="off" value="{{ '%g'|format(pace.typing[1]) }}"></label></div>
@@ -2613,6 +2617,8 @@ main{padding-bottom:56px}
 <div class="prg"><label class="prf"><span>من</span><input class="fs" name="gap_from" dir="ltr" inputmode="decimal" autocomplete="off" value="{{ '%g'|format(pace.gap[0]) }}"></label><label class="prf"><span>إلى</span><input class="fs" name="gap_to" dir="ltr" inputmode="decimal" autocomplete="off" value="{{ '%g'|format(pace.gap[1]) }}"></label></div>
 <p class="l">بعد تحميل التغريدة وقبل أول نقرة <small>(لا ينقر قبل أن تظهر أزرار التغريدة)</small></p>
 <div class="prg"><label class="prf"><span>من</span><input class="fs" name="settle_from" dir="ltr" inputmode="decimal" autocomplete="off" value="{{ '%g'|format(pace.settle[0]) }}"></label><label class="prf"><span>إلى</span><input class="fs" name="settle_to" dir="ltr" inputmode="decimal" autocomplete="off" value="{{ '%g'|format(pace.settle[1]) }}"></label></div>
+<p class="l">عدد التغريدات التي تُفتح بدون تحميل الصفحة كاملة <small>(عدد صحيح، وبعدها تُحمَّل التغريدة التالية كاملة)</small></p>
+<div class="prg"><label class="prf"><span>من</span><input class="fs" name="in_page_from" dir="ltr" inputmode="numeric" autocomplete="off" value="{{ pace.in_page[0] }}"></label><label class="prf"><span>إلى</span><input class="fs" name="in_page_to" dir="ltr" inputmode="numeric" autocomplete="off" value="{{ pace.in_page[1] }}"></label></div>
 <button class="btn wide" style="margin-top:14px">حفظ سرعة التنفيذ</button></form></details>
 <details class="card prc" id="dv-card"><summary><span class="prc-h">{{ic('phone')}}<b>الأجهزة</b></span><span class="prc-s"><span>{{ 'جهاز واحد لكل مستخدم' if one_device else 'عدة أجهزة لكل مستخدم' }}</span><span>الأجوال المسجّلة: <bdi dir="ltr">{{stats.bound}}</bdi></span></span>{{ic('chev')}}</summary>
 <form method="post" action="/{{admin}}/devices" data-toast="تم الحفظ"><p class="mut">على كم جوال يعمل رمز المستخدم أو حسابه. الرصيد والتعليقات والأرقام واحدة له على كل جوالاته.</p>
@@ -3621,10 +3627,23 @@ def pace_save():
     if not logged_in():
         return redirect(f"/{ADMIN}")
     pace = load_pace()
-    for key, name in (("typing", "كتابة التعليق"), ("gap", "الانتظار بين الأزرار"), ("settle", "الانتظار بعد تحميل التغريدة")):
+    for key, name in (("typing", "كتابة التعليق"), ("gap", "الانتظار بين الأزرار"), ("settle", "الانتظار بعد تحميل التغريدة"),
+                      ("in_page", "عدد التغريدات بدون تحميل الصفحة كاملة")):
         if request.form.get(key + "_from") is None and request.form.get(key + "_to") is None:
             continue                                 # (a form from before this pair: it stays as it is)
         low, high = form_dollars(request.form.get(key + "_from")), form_dollars(request.form.get(key + "_to"))
+        if key == "in_page":
+            if not (low == low and high == high and low >= 1 and high >= 1 and low == int(low) and high == int(high)):
+                flash("bad", f"اكتب {name} أعدادًا صحيحة من 1، مثل 1 و3.")
+                return redirect(f"/{ADMIN}")
+            if low > high:
+                flash("bad", f"في {name}: «من» يجب ألا يكون أكبر من «إلى».")
+                return redirect(f"/{ADMIN}")
+            if high > PACE_LIMITS[key]:
+                flash("bad", f"{name} حتى {PACE_LIMITS[key]:g} على الأكثر.")
+                return redirect(f"/{ADMIN}")
+            pace[key] = [int(low), int(high)]
+            continue
         if low < 0 or high < 0 or low != low or high != high:          # (and not «nan»)
             flash("bad", f"اكتب {name} بالثواني أرقامًا، مثل {dict(typing='3 و8', gap='0.3 و1', settle='0.6 و1.5')[key]}.")
             return redirect(f"/{ADMIN}")
@@ -3637,7 +3656,8 @@ def pace_save():
         pace[key] = [round(low, 2), round(high, 2)]
     write_private_json(PACE_PATH, {"version": 1, **pace})
     flash("ok", f"حُفظت سرعة التنفيذ: كتابة التعليق من {pace['typing'][0]:g} إلى {pace['typing'][1]:g} ثانية، وبين الأزرار من "
-                f"{pace['gap'][0]:g} إلى {pace['gap'][1]:g}، وبعد تحميل التغريدة من {pace['settle'][0]:g} إلى {pace['settle'][1]:g}. "
+                f"{pace['gap'][0]:g} إلى {pace['gap'][1]:g}، وبعد تحميل التغريدة من {pace['settle'][0]:g} إلى {pace['settle'][1]:g}، "
+                f"وتحميل الصفحة كاملة بعد {pace['in_page'][0]} إلى {pace['in_page'][1]} تغريدات. "
                 "تُطبَّق على كل المستخدمين من مهمتهم التالية.")
     return redirect(f"/{ADMIN}")
 

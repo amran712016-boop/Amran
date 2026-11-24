@@ -5634,11 +5634,37 @@ def confirm_press(page, answers: XAnswers, since: int, action: str, status_id: s
             if not answers.heard and now - on_since >= 1.5:
                 return "تم التنفيذ"                  # (no answers seen on this page: on for a while is done)
         elif on_since is not None:
+            # On, then off again: X put it back (it refused), or the page, still loading when it was pressed, drew the
+            # tweet again from what it had before the press (the button off, though X took it). X's own answer tells
+            # them apart, so it is waited for; with none, the button once the page has settled.
+            said = _answer_within(page, answers, action, since, TURNED_BACK_WAIT_SECONDS)
+            if said:
+                outcome = {"ok": "تم التنفيذ", "already": "تم التنفيذ", "limited": X_LIMITED}.get(said, X_ERROR)
+                trace_click(f"{action} ظهر الزر غير مفعّل بعد النقر، وجواب X: {outcome}")
+                return outcome
+            page.wait_for_timeout(1200)
+            row = (read_action_state(page, status_id, [action]) or {}).get(action) or {}
+            if row.get("on"):
+                trace_click(f"{action} عاد الزر مفعّلًا بعد اكتمال التحميل: تم التنفيذ")
+                return "تم التنفيذ"
             trace_click(f"{action} عاد الزر غير مفعّل بعد النقر: رفضه X")
             return X_UNDONE
         if now >= deadline:
             return "تم التنفيذ" if on_since is not None else UNCONFIRMED
         page.wait_for_timeout(120)
+
+
+TURNED_BACK_WAIT_SECONDS = 3.0
+
+
+def _answer_within(page, answers: XAnswers, action: str, since: int, seconds: float) -> str:
+    """X's answer to this action's request, waited for up to `seconds` ("" when none came)."""
+    end = time.monotonic() + seconds
+    while True:
+        said = answers.answer(action, since)
+        if said or time.monotonic() >= end:
+            return said
+        page.wait_for_timeout(150)
 
 
 def buttons_when_loaded(page, status_id: str, actions: list[str], seconds: float = 8.0) -> dict | None:

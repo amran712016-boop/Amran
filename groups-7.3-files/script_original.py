@@ -5718,7 +5718,8 @@ def apply_actions_on_path(page, path: str, actions: list[str]) -> dict[str, str]
     answers = XAnswers(page)
     try:
         outcome = _press_actions(page, path, status_id, actions, state, press, answers)
-        covered = [action for action in actions if str(outcome.get(action) or "").startswith(COVERED)]
+        covered = [action for action in actions                     # (covered, or no touch reached it: once more)
+                   if str(outcome.get(action) or "").startswith(COVERED) or outcome.get(action) == TAP_MISSED]
         if covered and status_id:
             _press_covered_again(page, path, status_id, covered, outcome, press, answers)
         return outcome
@@ -5733,7 +5734,7 @@ def _press_covered_again(page, path: str, status_id: str, covered: list[str], ou
     pressed, after the tweet has loaded and the usual wait. One that shows on by then is left alone (these buttons
     switch: a press would undo it). Pressed or not, the result is what this second try finds; a button still
     covered keeps its failure, for «إعادة المحاولة للفاشلة»."""
-    trace_click(f"إعادة صامتة للتغريدة {status_id}: زر مغطى ({', '.join(covered)})")
+    trace_click(f"إعادة صامتة للتغريدة {status_id}: زر لم يُضغط ({', '.join(covered)})")
     target = "https://x.com" + path if re.fullmatch(r"/[A-Za-z0-9_]{1,15}/status/\d{6,25}", path or "") \
         else f"https://x.com/i/web/status/{status_id}"
     try:

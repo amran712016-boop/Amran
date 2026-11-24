@@ -5191,147 +5191,297 @@ def web_mutate(page, status_id: str, action: str, text: str = "") -> dict:
     return result if isinstance(result, dict) else {"ok": False, "error": "رد غير مفهوم من الصفحة"}
 
 
-PRESS_PAGE_JS = r"""
-async ({statusId, testid}) => {
-  const labelOf = {
-    reply: /reply|رد/i, retweet: /repost|retweet|إعادة النشر|اعادة النشر/i,
-    unretweet: /undo repost|unretweet|تم إعادة|إلغاء إعادة/i,
-    like: /like|إعجاب|اعجاب/i, unlike: /unlike|liked|أعجبني|معجب/i,
-    bookmark: /bookmark|إشارة مرجعية/i, removeBookmark: /remove bookmark|إزالة الإشارة/i
-  };
-  const articles = [...document.querySelectorAll('article[data-testid="tweet"], [data-testid="tweet"]')];
-  let card = articles.find((article) => statusId && [...article.querySelectorAll('a[href*="/status/"]')]
-    .some((node) => (node.getAttribute("href") || "").includes("/status/" + statusId))) || articles[0] || null;
-  if (!card) return {how: "missing"};
-  const root = card.closest('[data-testid="cellInnerDiv"]') || card;
-  const re = labelOf[testid];
-  const nodes = [];
-  const tagged = root.querySelector('[data-testid="' + testid + '"]');
-  if (tagged) nodes.push(tagged);
-  if (re) {
-    for (const node of root.querySelectorAll("button, [role='button']")) {
-      const label = node.getAttribute("aria-label") || "";
-      if (!re.test(label)) continue;
-      if (testid === "like" && /unlike|liked|أعجبني|معجب/i.test(label)) continue;
-      nodes.push(node);
-    }
-  }
+# In the app every button is pressed by a real touch on it: the browser gets the touch and the click it makes, as
+# from a finger, and the page answers that click as it answers a person's. The touch is bound to the button: just
+# before it, the button is found by its selector in the tweet's own card and placed in the middle of the screen, and
+# while the touch is made only what lands on that button reaches the page. A touch that lands anywhere else (the page
+# moved under it, or this phone's screen puts touches a little off) is stopped before the page sees it, so it does
+# nothing: where it landed is kept, the aim corrected from it, and the button touched again. X's notice over a button
+# (such as «تمت الإضافة إلى العلامات المرجعية») lets the touch through to it. There is no silent press: a button no touch
+# could reach is left not done (TAP_MISSED, retried later), never pressed through the page.
+SEND_SELECTOR = '[data-testid="tweetButtonInline"]:not([aria-disabled="true"]), [data-testid="tweetButton"]:not([aria-disabled="true"])'
+REPOST_CONFIRM_SELECTOR = '[data-testid="retweetConfirm"], [data-testid="confirmationSheetConfirm"]'
+TAP_TRIES = 4
+TAP_HOLD_MS = 50
+TAP_SEEN_SECONDS = 1.5
+TAP_POINTS_KEPT = 6
+REPOST_MENU_SECONDS = 1.5
+TAP_MISSED = "تعذر النقر: اللمسة لم تصب الزر"
+TAP_MISSED_NOTE = "اللمسة لم تصب الزر"          # (a reply's, after «تعذر نشر التعليق: »)
+
+TAP_ARM_JS = r"""
+({statusId, testid, selector, arm}) => {
+  // The button: the tweet's own (by its data-testid, else by its label), or the last one showing for a selector.
   let button = null;
-  for (const node of nodes) {
-    const btn = node.closest("button, [role='button']") || node;
-    if (btn.closest("[data-testid='tweetTextarea_0'], [data-testid='toolBar']")) continue;
-    const rect = btn.getBoundingClientRect();
-    if (rect.width >= 2 && rect.height >= 2) { button = btn; break; }
+  if (selector) {
+    const shown = [...document.querySelectorAll(selector)].filter((node) => node.getClientRects().length);
+    button = shown[shown.length - 1] || null;
+  } else {
+    const labelOf = {
+      reply: /reply|رد/i, retweet: /repost|retweet|إعادة النشر|اعادة النشر/i,
+      unretweet: /undo repost|unretweet|تم إعادة|إلغاء إعادة/i,
+      like: /like|إعجاب|اعجاب/i, unlike: /unlike|liked|أعجبني|معجب/i,
+      bookmark: /bookmark|إشارة مرجعية/i, removeBookmark: /remove bookmark|إزالة الإشارة/i
+    };
+    const articles = [...document.querySelectorAll('article[data-testid="tweet"], [data-testid="tweet"]')];
+    const card = articles.find((article) => statusId && [...article.querySelectorAll('a[href*="/status/"]')]
+      .some((node) => (node.getAttribute("href") || "").includes("/status/" + statusId))) || articles[0] || null;
+    if (card) {
+      const root = card.closest('[data-testid="cellInnerDiv"]') || card;
+      const nodes = [];
+      const tagged = root.querySelector('[data-testid="' + testid + '"]');
+      if (tagged) nodes.push(tagged);
+      const re = labelOf[testid];
+      if (re) {
+        for (const node of root.querySelectorAll("button, [role='button']")) {
+          const label = node.getAttribute("aria-label") || "";
+          if (!re.test(label) || (testid === "like" && /unlike|liked|أعجبني|معجب/i.test(label))) continue;
+          nodes.push(node);
+        }
+      }
+      for (const node of nodes) {
+        const btn = node.closest("button, [role='button']") || node;
+        if (btn.closest("[data-testid='tweetTextarea_0'], [data-testid='toolBar']")) continue;
+        const r = btn.getBoundingClientRect();
+        if (r.width >= 2 && r.height >= 2) { button = btn; break; }
+      }
+    }
   }
   if (!button) return {how: "missing"};
-  const aboveBar = () => {
-    const bar = document.querySelector('[data-testid="BottomBar"]');
-    const top = bar ? bar.getBoundingClientRect().top : window.innerHeight;
-    return top > 80 ? top - 12 : window.innerHeight - 12;
-  };
-  const placed = () => {
-    const r = button.getBoundingClientRect();
-    return r.width >= 2 && r.top > 24 && r.bottom < aboveBar();
-  };
-  if (!placed()) {
-    let node = button.parentElement;
-    while (node) {
-      const style = getComputedStyle(node);
-      if (/(auto|scroll|overlay)/.test(style.overflowY) && node.scrollHeight > node.clientHeight + 8) {
-        const r = button.getBoundingClientRect();
-        const host = node.getBoundingClientRect();
-        node.scrollTop += (r.top + r.height / 2) - Math.min(host.top + host.height / 2, aboveBar() * 0.55);
-      }
-      node = node.parentElement;
-    }
-    const r = button.getBoundingClientRect();
-    const delta = (r.top + r.height / 2) - (aboveBar() * 0.55);
-    try { window.scrollBy(0, delta); } catch (error) {}
-    if (document.scrollingElement) document.scrollingElement.scrollTop += delta;
-    try { button.scrollIntoView({block: "center", inline: "nearest"}); } catch (error) {}
-  }
-  if (!placed()) return {how: "offscreen"};
-  const before = button.getAttribute("aria-label") || "";
-  const event = (node) => ({
-    preventDefault() {}, stopPropagation() {}, persist() {},
-    nativeEvent: {isTrusted: true, button: 0},
-    isTrusted: true, button: 0, type: "click",
-    target: node, currentTarget: node
-  });
-  const fire = (node) => {
-    if (!node) return "";
-    const keys = Object.keys(node);
-    for (const key of keys) {
-      if (!key.startsWith("__reactProps$")) continue;
-      const props = node[key];
-      if (props && typeof props.onClick === "function") {
-        props.onClick(event(node));
-        return "react";
-      }
-    }
-    return "";
-  };
-  let how = fire(button);
-  if (!how) {
-    for (const child of button.querySelectorAll("*")) {
-      how = fire(child);
-      if (how) break;
+  if (!selector) {
+    // in the middle of the screen: clear of the top bar, and of the bottom, where X's bars and notices show
+    const barTop = () => {
+      const bar = document.querySelector('[data-testid="BottomBar"]');
+      const top = bar ? bar.getBoundingClientRect().top : window.innerHeight;
+      return top > 80 ? top : window.innerHeight;
+    };
+    const placed = () => { const r = button.getBoundingClientRect(); return r.top > 64 && r.bottom < barTop() - 64; };
+    if (!placed()) {
+      try { button.scrollIntoView({block: "center", inline: "nearest", behavior: "instant"}); }
+      catch (error) { button.scrollIntoView({block: "center", inline: "nearest"}); }
     }
   }
-  // (the repost menu: its «إعادة النشر» is pressed the same way, by its selector, once it shows; it can take a moment)
-  const until = Date.now() + (testid === "retweet" ? 1500 : 400);
-  let sheet = null;
-  do {
-    await new Promise((done) => setTimeout(done, 100));
-    sheet = document.querySelector('[data-testid="confirmationSheetConfirm"], [data-testid="retweetConfirm"]');
-  } while (!sheet && Date.now() < until);
-  if (sheet) {
-    fire(sheet) || [...sheet.querySelectorAll("*")].some((child) => fire(child)) || sheet.click();
-    how = (how || "sheet") + "+تأكيد";
+  const r = button.getBoundingClientRect();
+  if (r.width < 2 || r.height < 2 || r.top < 0 || r.bottom > window.innerHeight) return {how: "offscreen"};
+  const x = r.left + r.width / 2, y = r.top + r.height / 2;
+  if (arm === false) return {how: "box", x, y};
+  const on = (node) => !!node && (node === button || button.contains(node));
+  const name = (node) => {
+    const tag = node && node.closest ? node.closest("[data-testid]") : null;
+    return (tag && tag.getAttribute("data-testid")) || (node && node.tagName ? node.tagName.toLowerCase() : "?");
+  };
+  let hit = document.elementFromPoint(x, y);
+  const notice = !on(hit) && hit ? hit.closest('[data-testid="toast"], [role="alert"], [role="status"]') : null;
+  if (notice) {
+    // X's notice over it (such as «تمت الإضافة إلى العلامات المرجعية»): touches go through it, to the button
+    for (const node of [notice, ...notice.querySelectorAll("*")]) node.style.pointerEvents = "none";
+    hit = document.elementFromPoint(x, y);
   }
-  return {how: how || "no-handler", before, after: button.isConnected ? (button.getAttribute("aria-label") || "") : "gone"};
+  if (!on(hit)) return {how: "covered", by: hit ? name(hit) : "?"};
+  // The guard, for this touch: what lands on the button goes on to the page; anything else (or a touch that began
+  // elsewhere) is stopped before the page sees it. Where the touch landed is kept (the aim is corrected from it).
+  if (window.__ggTap) window.__ggTap.off();
+  const guard = {events: [], at: null, onButton: null, clicked: false, stopped: "", closed: false};
+  const kinds = ["pointerdown", "touchstart", "mousedown", "pointerup", "touchend", "mouseup", "click"];
+  const watch = (event) => {
+    if (!event.isTrusted) return;
+    const point = (event.touches && event.touches[0]) || (event.changedTouches && event.changedTouches[0]) || event;
+    if (guard.at === null && typeof point.clientX === "number") guard.at = [point.clientX, point.clientY];
+    const inside = event.target instanceof Node && on(event.target);
+    if (guard.onButton === null) guard.onButton = inside;
+    guard.events.push(event.type + (inside ? "" : ":" + name(event.target)));
+    if (!guard.closed && guard.onButton && inside) {
+      if (event.type === "click") guard.clicked = true;
+      return;
+    }
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (!guard.stopped) guard.stopped = name(event.target);
+  };
+  for (const kind of kinds) window.addEventListener(kind, watch, {capture: true, passive: false});
+  guard.off = () => {
+    for (const kind of kinds) window.removeEventListener(kind, watch, {capture: true});
+    if (window.__ggTap === guard) window.__ggTap = null;
+  };
+  window.__ggTap = guard;
+  setTimeout(guard.off, 6000);                                    // (never left on)
+  return {how: "aim", x, y};
 }
 """
 
+TAP_SEEN_JS = r"""
+(finish) => {
+  const guard = window.__ggTap;
+  if (!guard) return null;
+  const seen = {events: guard.events.slice(), at: guard.at, onButton: guard.onButton, clicked: guard.clicked, stopped: guard.stopped};
+  if (finish) {
+    if (guard.clicked) guard.off();
+    else { guard.closed = true; setTimeout(guard.off, 1500); }    // (a late click of this touch reaches nothing)
+  }
+  return seen;
+}
+"""
 
-# In the app every button is pressed by its selector: the button is found in the tweet's own card (by its data-testid,
-# else by its label) and pressed through the page, by its own handler, at that moment. So the press goes to that
-# button wherever it is on the screen, even while the page moves, and whatever shows over it (a notice such as
-# «تمت الإضافة إلى العلامات المرجعية» left by the tweet before, or the bottom bar) does not stop it. A touch on the screen
-# is a point, not a button: on some phones it landed below the button (on a reply), so none is used.
-SEND_SELECTOR = '[data-testid="tweetButtonInline"]:not([aria-disabled="true"]), [data-testid="tweetButton"]:not([aria-disabled="true"])'
+_tap_points: dict[int, list[tuple[float, float, float, float]]] = {}   # id(page) -> (aimed x, y, landed x, y), latest last
 
 
-def press_by_selector(page, status_id: str, action: str, testid: str) -> str:
-    """Press the tweet's button by its selector (in the app). "" once pressed (with the repost's own «إعادة النشر»),
-    "missing" when the tweet has no such button, else why it could not be pressed."""
-    blocker = ""
-    for attempt in range(3):
-        close_popups(page)
+def _tap_fit(points: list, axis: int) -> tuple[float, float]:
+    """Where touches land on one axis, from the latest: landed = scale * aimed + shift (none yet: where aimed)."""
+    pairs = [(point[axis], point[2 + axis]) for point in points[-TAP_POINTS_KEPT:]]
+    if not pairs:
+        return 1.0, 0.0
+    aims = [aimed for aimed, _ in pairs]
+    if len(pairs) >= 2 and max(aims) - min(aims) >= 30:
+        middle_aim = sum(aims) / len(pairs)
+        middle_land = sum(landed for _, landed in pairs) / len(pairs)
+        spread = sum((aimed - middle_aim) ** 2 for aimed in aims)
+        scale = sum((aimed - middle_aim) * (landed - middle_land) for aimed, landed in pairs) / spread
+        if 0.6 <= scale <= 1.6:
+            return scale, middle_land - scale * middle_aim
+    return 1.0, sum(landed - aimed for aimed, landed in pairs) / len(pairs)
+
+
+def tap_aim(page, x: float, y: float) -> tuple[float, float]:
+    """Where to touch so that the touch lands at (x, y), as this phone's touches have been landing."""
+    points = _tap_points.get(id(page), [])
+    scale_x, shift_x = _tap_fit(points, 0)
+    scale_y, shift_y = _tap_fit(points, 1)
+    return (x - shift_x) / scale_x, (y - shift_y) / scale_y
+
+
+def _tap_seen(page) -> dict:
+    """What the guard saw of the touch just made: its click on the button, or where it landed and what it hit."""
+    end = time.monotonic() + TAP_SEEN_SECONDS
+    seen = None
+    while True:
         try:
-            pressed = page.evaluate(PRESS_PAGE_JS, {"statusId": status_id, "testid": testid})
+            seen = page.evaluate(TAP_SEEN_JS, False)
         except Exception as exc:
             if browser_closed_error(exc):
                 raise
-            pressed = {"how": "error", "error": (str(exc).splitlines() or [type(exc).__name__])[0][:160]}
-        trace_click(f"{action} {status_id} ضغط بمحدد الزر {pressed}")
-        how = str((pressed or {}).get("how") or "")
+            seen = None
+        if seen and (seen.get("clicked") or seen.get("onButton") is False) or time.monotonic() >= end:
+            break
+        page.wait_for_timeout(50)
+    try:
+        page.evaluate(TAP_SEEN_JS, True)
+    except Exception as exc:
+        if browser_closed_error(exc):
+            raise
+    return seen or {}
+
+
+def _tap_steady(page, target: dict, seconds: float = 2.0) -> None:
+    """Wait until the button holds still (two reads 100 ms apart agree), at most `seconds`."""
+    last = None
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        try:
+            box = page.evaluate(TAP_ARM_JS, dict(target, arm=False))
+        except Exception as exc:
+            if browser_closed_error(exc):
+                raise
+            return
+        if not box or box.get("how") != "box":
+            return
+        now = (float(box["x"]), float(box["y"]))
+        if last and abs(now[0] - last[0]) < 1 and abs(now[1] - last[1]) < 1:
+            return
+        last = now
+        page.wait_for_timeout(100)
+
+
+def tap_button(page, label: str, target: dict) -> str:
+    """A real touch on the button (in the app; see above). target: {"statusId", "testid"} (the tweet's button) or
+    {"selector"}. "" once the touch reached the button (its click went to it), "missing" when there is no such
+    button, TAP_MISSED when no touch reached it, else what covers it."""
+    why = ""
+    steady = False
+    missing = 0
+    for _ in range(TAP_TRIES):
+        if steady:
+            _tap_steady(page, target)
+        try:
+            aim = page.evaluate(TAP_ARM_JS, dict(target, arm=True))
+        except Exception as exc:
+            if browser_closed_error(exc):
+                raise
+            aim = {"how": "error", "why": (str(exc).splitlines() or [type(exc).__name__])[0][:120]}
+        how = str((aim or {}).get("how") or "")
         if how == "missing":
-            if attempt:
-                trace_page(page, f"{action} الزر غير موجود")
+            missing += 1
+            if missing >= 2:
                 return "missing"
             page.wait_for_timeout(600)              # (the tweet's card may be drawn again just now: once more)
             continue
-        if how in ("offscreen", "no-handler"):
-            blocker = "خارج الشاشة" if how == "offscreen" else "لم يُقبل النقر"
+        if how != "aim":
+            why = str(aim.get("by") or "?") if how == "covered" else (
+                "خارج الشاشة" if how == "offscreen" else str((aim or {}).get("why") or how or "?"))
+            trace_click(f"{label}: لا يُلمس الآن ({why})")
             page.wait_for_timeout(400)
             continue
-        return ""
-    return blocker or "missing"
+        button_x, button_y = float(aim["x"]), float(aim["y"])
+        x, y = tap_aim(page, button_x, button_y)
+        page.mouse.click(x, y, delay=TAP_HOLD_MS)
+        seen = _tap_seen(page)
+        at = seen.get("at")
+        if at:
+            points = _tap_points.setdefault(id(page), [])
+            points.append((x, y, float(at[0]), float(at[1])))
+            del points[:-TAP_POINTS_KEPT]
+        if seen.get("clicked"):
+            trace_click(f"{label}: لمسة على الزر ({x:.0f},{y:.0f})")
+            return ""
+        why = TAP_MISSED
+        if at:
+            steady = math.hypot(float(at[0]) - button_x, float(at[1]) - button_y) < 4   # (landed on the spot: the page moved)
+            trace_click(f"{label}: اللمسة وقعت عند ({float(at[0]):.0f},{float(at[1]):.0f}) على {seen.get('stopped') or 'غير الزر'} "
+                        f"والزر عند ({button_x:.0f},{button_y:.0f}): أُوقفت قبل أن تصل للصفحة، وتُعاد"
+                        + (" بعد ثبات الصفحة" if steady else " مصحَّحة"))
+        else:
+            trace_click(f"{label}: اللمسة لم تصل للصفحة {seen.get('events') or ''}")
+    return why or TAP_MISSED
+
+
+def press_in_app(page, status_id: str, action: str, testid: str) -> str:
+    """Press the tweet's button by a touch on it (in the app), and for a repost the «إعادة النشر» in its menu."""
+    close_popups(page)
+    why = tap_button(page, f"{action} {status_id}", {"statusId": status_id, "testid": testid})
+    if why == "missing":
+        trace_page(page, f"{action} الزر غير موجود")
+    if why or action != "repost":
+        return why
+    return tap_repost_confirm(page)
+
+
+def tap_repost_confirm(page) -> str:
+    """The repost's menu: once it shows (it can take a moment) and holds still, a touch on its «إعادة النشر»."""
+    end = time.monotonic() + REPOST_MENU_SECONDS
+    while True:
+        try:
+            shown = page.evaluate("(selector) => [...document.querySelectorAll(selector)].some((node) => node.getClientRects().length)",
+                                  REPOST_CONFIRM_SELECTOR)
+        except Exception as exc:
+            if browser_closed_error(exc):
+                raise
+            shown = False
+        if shown:
+            break
+        if time.monotonic() >= end:
+            trace_click("repost: لم تظهر قائمة إعادة النشر")
+            return ""                               # (X's answer, or the button, says what came of the press)
+        page.wait_for_timeout(100)
+    target = {"selector": REPOST_CONFIRM_SELECTOR}
+    _tap_steady(page, target, 1.0)
+    why = tap_button(page, "repost تأكيد", target)
+    if why:
+        close_popups(page)                          # (the menu, left open, would cover the page)
+        return TAP_MISSED if why == "missing" else why
+    return ""
 
 
 def press_action_button(page, path: str, status_id: str, action: str) -> str:
-    """Press the tweet's button. In the app by its selector (press_by_selector). Elsewhere: scroll the button into
+    """Press the tweet's button. In the app by a touch on it (press_in_app). Elsewhere: scroll the button into
     view, make sure nothing covers it, then click it.
 
     Returns "" after a click reached the button, "missing" when the button is
@@ -5339,7 +5489,7 @@ def press_action_button(page, path: str, status_id: str, action: str) -> str:
     """
     testid = ACTION_CONTROLS[action][1]
     if IN_APP:
-        return press_by_selector(page, status_id, action, testid)
+        return press_in_app(page, status_id, action, testid)
     blocker = ""
 
     def probe(scroll: bool = False):
@@ -5530,7 +5680,7 @@ def apply_actions_on_path(page, path: str, actions: list[str]) -> dict[str, str]
         blocker = press_action_button(page, path, status_id, action)
         if blocker:
             return blocker
-        if action == "repost" and not IN_APP:      # (in the app the press itself confirms it, by its selector)
+        if action == "repost" and not IN_APP:      # (in the app press_in_app confirms it, by a touch too)
             confirm = page.locator('[data-testid="retweetConfirm"]')
             try:
                 confirm.wait_for(state="visible", timeout=1200)
@@ -5590,7 +5740,7 @@ def _press_covered_again(page, path: str, status_id: str, covered: list[str], ou
             blocker = press(action)
             if blocker:
                 if blocker != "missing":
-                    outcome[action] = COVERED + blocker
+                    outcome[action] = blocker if blocker.startswith("تعذر") else COVERED + blocker
                 trace_click(f"{action} إعادة صامتة: لم يُضغط ({blocker})")
                 continue
             outcome[action] = confirm_press(page, answers, since, action, status_id)
@@ -5621,7 +5771,7 @@ def _press_actions(page, path: str, status_id: str, actions: list[str], state: d
                 outcome[action] = "زر الإجراء غير متاح — تم التجاوز"
                 continue
             if blocker:
-                outcome[action] = COVERED + blocker
+                outcome[action] = blocker if blocker.startswith("تعذر") else COVERED + blocker
                 continue
             outcome[action] = confirm_press(page, answers, since, action, status_id)
             if outcome[action] == "تم التنفيذ":
@@ -6605,8 +6755,8 @@ def composer_visible(page) -> bool:
 
 
 def open_reply_composer(page, path: str) -> None:
-    """Wait for the tweet to settle, then open the reply box. On the phone, call the reply
-    button's own handler. A coordinate press was landing on the account name."""
+    """Wait for the tweet to settle, then open the reply box. In the app by a touch on the reply button
+    (tap_button: bound to the button, a touch that would land elsewhere is stopped)."""
     match = re.search(r"status/(\d{6,25})", path or "")
     status_id = match.group(1) if match else ""
     if IN_APP:
@@ -6614,11 +6764,13 @@ def open_reply_composer(page, path: str) -> None:
             if composer_visible(page):
                 trace_click("reply مربع الكتابة ظاهر")
                 return
-            try:
-                pressed = page.evaluate(PRESS_PAGE_JS, {"statusId": status_id, "testid": "reply"})
-            except Exception as exc:
-                pressed = {"how": "error", "error": str(exc).splitlines()[0][:160]}
-            trace_click(f"reply فتح بمحدد الزر {pressed}")
+            why = tap_button(page, "reply", {"statusId": status_id, "testid": "reply"})
+            if why == TAP_MISSED:
+                raise PlaywrightTimeoutError("touch missed the reply button")
+            if why:
+                trace_click(f"reply لم يُلمس ({why})")
+                page.wait_for_timeout(500)
+                continue
             try:
                 page.locator('[data-testid="tweetTextarea_0"]').last.wait_for(state="visible", timeout=8000)
                 trace_click("reply ظهر مربع الكتابة")
@@ -6863,51 +7015,14 @@ def insert_reply_text(page, text: str) -> None:
     )
 
 
-PRESS_SEND_JS = r"""
-() => {
-  const nodes = [...document.querySelectorAll('[data-testid="tweetButtonInline"], [data-testid="tweetButton"]')];
-  const button = [...nodes].reverse().find((node) => node.getAttribute("aria-disabled") !== "true" && !node.disabled);
-  if (!button) return {how: "missing"};
-  const before = (button.innerText || button.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim();
-  const event = {
-    preventDefault() {}, stopPropagation() {}, persist() {},
-    nativeEvent: {isTrusted: true, button: 0},
-    isTrusted: true, button: 0, type: "click",
-    target: button, currentTarget: button
-  };
-  const keys = Object.keys(button);
-  for (const key of keys) {
-    if (!key.startsWith("__reactProps$")) continue;
-    const props = button[key];
-    if (props && typeof props.onClick === "function") {
-      props.onClick(event);
-      return {how: "react", before};
-    }
-  }
-  for (const child of button.querySelectorAll("*")) {
-    for (const key of Object.keys(child)) {
-      if (!key.startsWith("__reactProps$")) continue;
-      const props = child[key];
-      if (props && typeof props.onClick === "function") {
-        props.onClick(event);
-        return {how: "react", before};
-      }
-    }
-  }
-  return {how: "no-handler", before};
-}
-"""
-
-
 def click_reply_send(page) -> None:
     enabled = page.locator(SEND_SELECTOR)
     if enabled.count() == 0:
         raise PlaywrightTimeoutError("reply button stayed disabled")
     if IN_APP:
-        sent = page.evaluate(PRESS_SEND_JS)
-        trace_click(f"reply نشر بمحدد الزر {sent}")
-        if not isinstance(sent, dict) or sent.get("how") not in ("react", "fiber"):
-            raise PlaywrightTimeoutError("reply button stayed disabled")
+        why = tap_button(page, "reply نشر", {"selector": SEND_SELECTOR})
+        if why:
+            raise PlaywrightTimeoutError("touch missed the reply button" if why == TAP_MISSED else f"reply button not touched ({why})")
         return
     real_click(enabled.last)
 
@@ -6959,6 +7074,8 @@ def publish_reply(page, text: str, path: str) -> tuple[bool, str]:
 def comment_failure_text(exc: Exception) -> str:
     message = str(exc)
     if isinstance(exc, PlaywrightTimeoutError):
+        if "touch missed" in message or "not touched" in message:
+            return TAP_MISSED_NOTE
         if "tweetTextarea" in message:
             return "لم يظهر مربع كتابة الرد"
         if "reply button" in message or "aria-disabled" in message or "disabled" in message:
@@ -10674,7 +10791,7 @@ def apply_actions_immediately(page, url: str, actions: list[str]) -> dict[str, s
 COMMENT_RETRY_SAFE = (
     "تعذر فتح التغريدة", "تعذر العثور على المنشور", "لم يُرجع النموذج تعليقًا صالحًا", "لم يظهر مربع كتابة الرد",
     "زر النشر بقي معطّلًا", "لم تُفتح التغريدة في الوقت المناسب", "الحساب وصل حد الردود مؤقتًا",
-    "رفض X الرد (تقييد مؤقت)", "لم يُضغط: رفضه X مرتين متتاليتين في هذه المهمة",
+    "رفض X الرد (تقييد مؤقت)", "لم يُضغط: رفضه X مرتين متتاليتين في هذه المهمة", TAP_MISSED_NOTE,
 )
 
 

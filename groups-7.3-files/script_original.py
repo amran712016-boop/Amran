@@ -5311,18 +5311,63 @@ TOUCH_TARGET_JS = r"""
 """
 
 
-def touch_took(page, box: dict, took, label: str, seconds: float = TOUCH_TAKE_SECONDS) -> bool:
-    """Touch the button in box. True once took() says it did what it should (within seconds), else False."""
+# The touch is aimed at the moment of pressing: the button is found by its selector in the tweet, its place read then
+# (and checked to be the button's own: nothing over it), and its middle touched at once, with no movement or wait
+# before it, so the page has no time to move under it. If a touch still lands elsewhere (the page went to another
+# tweet or a profile), it is undone: back to the tweet, and the button is pressed through the page. Two such in a
+# task, and the rest of it presses through the page only.
+TOUCH_MISSES_OFF = 2
+_touch_missed: dict[int, int] = {}          # id(page) -> touches that landed elsewhere in this task
+
+
+def touches_on(page) -> bool:
+    return TOUCH_BUTTONS and _touch_missed.get(id(page), 0) < TOUCH_MISSES_OFF
+
+
+def _url_path(url: str) -> str:
+    return re.sub(r"^https?://[^/]+", "", str(url or "")).split("?", 1)[0].split("#", 1)[0].rstrip("/")
+
+
+def _touch_now(page, read, label: str) -> bool:
+    """Read the button's place now (read(): its box, whether nothing is over its middle, whether it is in view) and
+    touch its middle at once. False when it is not there to touch (then it is pressed through the page)."""
     try:
-        click_box(page, box)
+        info = read()
     except Exception as exc:
         if browser_closed_error(exc):
             raise
-        trace_click(f"{label}: اللمسة لم تُرسل ({type(exc).__name__})")
+        info = None
+    box = (info or {}).get("box")
+    if not box or not info.get("ok") or not info.get("inView"):
+        trace_click(f"{label}: الزر غير ظاهر أو شيء فوقه الآن، الضغط عبر الصفحة")
+        return False
+    x = float(box["x"]) + float(box["width"]) / 2
+    y = float(box["y"]) + float(box["height"]) / 2
+    page.mouse.click(x, y, delay=60)
+    _mouse_at[id(page)] = (x, y)
+    trace_click(f"{label}: لمسة على ({x:.0f},{y:.0f})")
+    return True
+
+
+def touch_took(page, read, took, label: str, seconds: float = TOUCH_TAKE_SECONDS) -> bool:
+    """Touch the button read() finds (see _touch_now). True once took() says it did what it should (within seconds),
+    else False. A touch that took the page elsewhere is undone (back to where it was, loaded in full)."""
+    if not touches_on(page):
+        return False
+    before = page.url
+    if not _touch_now(page, read, label):
         return False
     end = time.monotonic() + seconds
     while True:
         try:
+            if _url_path(page.url) != _url_path(before):
+                _touch_missed[id(page)] = _touch_missed.get(id(page), 0) + 1
+                trace_click(f"{label}: اللمسة وقعت على غير الزر (فتحت {_url_path(page.url) or 'صفحة أخرى'})، الرجوع للتغريدة والضغط عبر الصفحة"
+                            + ("؛ وباقي المهمة بالضغط عبر الصفحة" if not touches_on(page) else ""))
+                page.goto(before, wait_until="domcontentloaded", timeout=30_000)
+                in_page_loaded(page)
+                page.wait_for_timeout(800)
+                return False
             if took():
                 trace_click(f"{label}: لمسة على الزر")
                 return True
@@ -5371,8 +5416,11 @@ def press_action_button(page, path: str, status_id: str, action: str, heard=None
                             """() => !!document.querySelector('[data-testid="retweetConfirm"], [data-testid="confirmationSheetConfirm"]')"""):
                         return True
                     return bool(((read_action_state(page, status_id, [action]) or {}).get(action) or {}).get("on"))
-                if TOUCH_BUTTONS and touch_took(page, info["box"], moved, action):
+                read = lambda: page.evaluate(ACTION_BUTTON_PROBE_JS, {"statusId": status_id, "testid": testid, "scroll": False})
+                if touch_took(page, read, moved, action):
                     return ""
+                if not page.evaluate(ACTION_BUTTON_PROBE_JS, {"statusId": status_id, "testid": testid, "scroll": False}):
+                    page.wait_for_timeout(600)                  # (back on the tweet after a touch that missed: it loads)
                 try:
                     pressed = page.evaluate(PRESS_PAGE_JS, {"statusId": status_id, "testid": testid})
                 except Exception as exc:
@@ -6635,7 +6683,7 @@ def open_reply_composer(page, path: str) -> None:
     match = re.search(r"status/(\d{6,25})", path or "")
     status_id = match.group(1) if match else ""
     if IN_APP:
-        if TOUCH_BUTTONS and status_id and not composer_visible(page):
+        if touches_on(page) and status_id and not composer_visible(page):
             info = None
             for scroll in (False, True, False):
                 try:
@@ -6648,8 +6696,9 @@ def open_reply_composer(page, path: str) -> None:
                     page.wait_for_timeout(450)
                 elif info and info.get("box") and info.get("inView"):
                     break
-            if info and info.get("ok") and info.get("inView") and info.get("box"):
-                if touch_took(page, info["box"], lambda: composer_visible(page), "reply", seconds=3.0):
+            if info and info.get("box"):
+                read = lambda: page.evaluate(ACTION_BUTTON_PROBE_JS, {"statusId": status_id, "testid": "reply", "scroll": False})
+                if touch_took(page, read, lambda: composer_visible(page), "reply", seconds=3.0):
                     trace_click("reply ظهر مربع الكتابة")
                     return
         for _ in range(3):
@@ -6946,16 +6995,10 @@ def click_reply_send(page, heard=None) -> None:
     if enabled.count() == 0:
         raise PlaywrightTimeoutError("reply button stayed disabled")
     if IN_APP:
-        if TOUCH_BUTTONS:
-            try:
-                target = page.evaluate(TOUCH_TARGET_JS, SEND_SELECTOR)
-            except Exception as exc:
-                if browser_closed_error(exc):
-                    raise
-                target = None
+        if touches_on(page):
             # (gone: X turns the button off as it sends, or closes the box; or X has answered it)
             went = lambda: (heard is not None and heard()) or enabled.count() == 0
-            if target and target.get("ok") and target.get("box") and touch_took(page, target["box"], went, "reply نشر", seconds=2.5):
+            if touch_took(page, lambda: page.evaluate(TOUCH_TARGET_JS, SEND_SELECTOR), went, "reply نشر", seconds=2.5):
                 return
             if went():
                 return
@@ -10035,6 +10078,7 @@ def in_page_fresh(page, refused: bool = False) -> None:
     is tried again, whatever the task before found. refused: the browser was reopened inside a task X has refused
     in already, so this page goes on loading each tweet in full."""
     _in_page.pop(id(page), None)
+    _touch_missed.pop(id(page), None)
     if refused:
         state = _in_page_state(page)
         state["off"] = state["refused"] = True

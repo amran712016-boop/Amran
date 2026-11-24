@@ -6878,8 +6878,13 @@ def same_text(seen, wanted: str) -> bool:
 # waits between them, in the box of the reply dialog.
 COMPOSER_TEXT_JS = r"""
 () => {
-  const box = document.querySelector('[role="dialog"] [data-testid="tweetTextarea_0"]')
-    || document.querySelector('[data-testid="tweetTextarea_0"]');
+  // the box being typed in: the one with the focus (X's page also has its own reply box under the tweet, first in
+  // the page, besides the one the reply button opens); else the last one showing
+  const boxes = [...document.querySelectorAll('[data-testid="tweetTextarea_0"]')];
+  const active = document.activeElement;
+  const box = boxes.find((node) => active && (node === active || node.contains(active)))
+    || boxes.filter((node) => node.getClientRects().length).pop()
+    || document.querySelector('[role="dialog"] [data-testid="tweetTextarea_0"]') || boxes[0];
   return box ? (box.innerText || "") : "";
 }
 """
@@ -6905,7 +6910,7 @@ def type_like_a_person(page, text: str) -> bool:
     if same_text(seen, text) and reply_button_ready(page):
         trace_click(f"reply كُتب النص حرفًا حرفًا ({len(steps)} ضغطة)")
         return True
-    trace_click("reply الكتابة حرفًا حرفًا لم تترك النص كما هو: يُكتب دفعة واحدة")
+    trace_click(f"reply الكتابة حرفًا حرفًا لم تترك النص كما هو ({str(seen or '')[:40]!r}): يُكتب دفعة واحدة")
     return False
 
 
@@ -6952,9 +6957,11 @@ def insert_reply_text(page, text: str) -> None:
         page.keyboard.press("Backspace")
         page.keyboard.insert_text(text)
         page.wait_for_timeout(400)
-        if same_text(page.evaluate(COMPOSER_TEXT_JS), text) and reply_button_ready(page):
+        seen = page.evaluate(COMPOSER_TEXT_JS)
+        if same_text(seen, text) and reply_button_ready(page):
             trace_click("reply كُتب النص دفعة واحدة من لوحة المفاتيح")
             return
+        trace_click(f"reply النص في المربع ليس التعليق ({str(seen or '')[:40]!r})")
         raise PlaywrightTimeoutError("reply text not typed")
     box = page.locator('[role="dialog"] [data-testid="tweetTextarea_0"]')
     if box.count() == 0:

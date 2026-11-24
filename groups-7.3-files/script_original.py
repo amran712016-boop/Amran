@@ -6840,7 +6840,6 @@ def pace_ms(key: str) -> int:
 
 # A reply is typed into the box a letter at a time at an uneven pace, not pasted whole. The whole comment takes the
 # panel's typing time (see pace_ms), whatever its length.
-TYPE_STEPS_PER_CALL = 20        # (in the app the typing is done by the page itself, this many letters a call)
 
 
 def typing_plan(text: str) -> list[list]:
@@ -6877,27 +6876,6 @@ def same_text(seen, wanted: str) -> bool:
 
 # The page types the letters itself (the reply box is X's editor): each letter put in as typed text, with the
 # waits between them, in the box of the reply dialog.
-TYPING_JS = r"""
-async ({steps, clear}) => {
-  const box = document.querySelector('[role="dialog"] [data-testid="tweetTextarea_0"]')
-    || document.querySelector('[data-testid="tweetTextarea_0"]');
-  if (!box) return {ok: false, why: "no box"};
-  const editable = box.querySelector('[contenteditable="true"]') || box;
-  editable.focus();
-  if (clear) {
-    document.execCommand("selectAll", false);
-    document.execCommand("delete", false);
-  }
-  const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
-  for (const [letter, wait] of steps) {
-    if (letter === "\b") document.execCommand("delete", false);
-    else document.execCommand("insertText", false, letter);
-    if (wait) await sleep(wait);
-  }
-  return {ok: true, text: (editable.innerText || "").replace(/\s+/g, " ").trim()};
-}
-"""
-
 COMPOSER_TEXT_JS = r"""
 () => {
   const box = document.querySelector('[role="dialog"] [data-testid="tweetTextarea_0"]')
@@ -6911,30 +6889,19 @@ def type_like_a_person(page, text: str) -> bool:
     """Type the reply a letter at a time (see typing_plan). True when the box then holds the text and the reply
     button is live; False when it did not work out (the box is then written in one go by the caller)."""
     steps = typing_plan(text)
-    if IN_APP:
-        typed: object = None
-        for start in range(0, len(steps), TYPE_STEPS_PER_CALL):
-            try:
-                typed = page.evaluate(TYPING_JS, {"steps": steps[start:start + TYPE_STEPS_PER_CALL], "clear": start == 0})
-            except Exception as exc:
-                typed = {"ok": False, "why": str(exc).splitlines()[0][:80]}
-            if not (isinstance(typed, dict) and typed.get("ok")):
-                trace_click(f"reply الكتابة حرفًا حرفًا توقفت: {typed}")
-                return False
-        page.wait_for_timeout(200)
-        seen = typed.get("text") if isinstance(typed, dict) else ""
-    else:
-        for letter, wait in steps:
-            if letter == "\b":
-                page.keyboard.press("Backspace")
-            else:
-                page.keyboard.type(letter)
-            page.wait_for_timeout(wait)
-        page.wait_for_timeout(350)
-        try:
-            seen = page.evaluate(COMPOSER_TEXT_JS)
-        except Exception:
-            seen = ""
+    for letter, wait in steps:
+        if letter == "\b":
+            page.keyboard.press("Backspace")
+        else:
+            page.keyboard.type(letter)
+        page.wait_for_timeout(wait)
+    page.wait_for_timeout(350)
+    try:
+        seen = page.evaluate(COMPOSER_TEXT_JS)
+    except Exception as exc:
+        if browser_closed_error(exc):
+            raise
+        seen = ""
     if same_text(seen, text) and reply_button_ready(page):
         trace_click(f"reply كُتب النص حرفًا حرفًا ({len(steps)} ضغطة)")
         return True
@@ -6942,35 +6909,53 @@ def type_like_a_person(page, text: str) -> bool:
     return False
 
 
+REPLY_BOX_SELECTOR = '[data-testid="tweetTextarea_0"]'
+REPLY_BOX_FOCUSED_JS = r"""
+() => {
+  const boxes = [...document.querySelectorAll('[data-testid="tweetTextarea_0"]')].filter((node) => node.getClientRects().length);
+  const box = boxes[boxes.length - 1], active = document.activeElement;
+  return !!(box && active && (box === active || box.contains(active)));
+}
+"""
+FOCUS_REPLY_BOX_JS = r"""
+() => {
+  const boxes = [...document.querySelectorAll('[data-testid="tweetTextarea_0"]')].filter((node) => node.getClientRects().length);
+  const box = boxes[boxes.length - 1];
+  if (!box) return false;
+  (box.querySelector('[contenteditable="true"]') || box).focus();
+  return true;
+}
+"""
+
+
+def focus_reply_box(page) -> None:
+    """The reply box ready to type in (in the app): focused (by a touch on it, when it is not already), and empty."""
+    if not page.evaluate(REPLY_BOX_FOCUSED_JS):
+        why = tap_button(page, "reply مربع الكتابة", {"selector": REPLY_BOX_SELECTOR})
+        page.wait_for_timeout(150)
+        if not page.evaluate(REPLY_BOX_FOCUSED_JS):
+            trace_click(f"reply مربع الكتابة لم يُركَّز باللمس ({why or 'بلا تركيز'})، يُركَّز ليُكتب فيه")
+            page.evaluate(FOCUS_REPLY_BOX_JS)
+    if str(page.evaluate(COMPOSER_TEXT_JS) or "").strip():
+        page.keyboard.press("Control+A")
+        page.keyboard.press("Backspace")
+
+
 def insert_reply_text(page, text: str) -> None:
     if IN_APP:
+        # By real input, as from the phone's keyboard: each letter typed (see typing_plan); if the box does not then
+        # hold the text, the text put in at once, still as typed input. Never written into the page by a script.
+        focus_reply_box(page)
         if type_like_a_person(page, text):
             return
-        page.evaluate(
-            """(value) => {
-              const box = document.querySelector('[role="dialog"] [data-testid="tweetTextarea_0"]')
-                || document.querySelector('[data-testid="tweetTextarea_0"]');
-              if (!box) return false;
-              const editable = box.querySelector('[contenteditable="true"]') || box;
-              editable.focus();
-              document.execCommand("selectAll", false);
-              document.execCommand("delete", false);
-              document.execCommand("insertText", false, value);
-              editable.dispatchEvent(new InputEvent("input", {bubbles: true, inputType: "insertText", data: value}));
-              return true;
-            }""",
-            text,
-        )
-        page.wait_for_timeout(400)
-        if reply_button_ready(page):
-            trace_click("reply كُتب النص")
-            return
+        page.keyboard.press("Control+A")
+        page.keyboard.press("Backspace")
         page.keyboard.insert_text(text)
         page.wait_for_timeout(400)
-        if not reply_button_ready(page):
-            raise PlaywrightTimeoutError("reply button stayed disabled")
-        trace_click("reply كُتب النص من لوحة المفاتيح")
-        return
+        if same_text(page.evaluate(COMPOSER_TEXT_JS), text) and reply_button_ready(page):
+            trace_click("reply كُتب النص دفعة واحدة من لوحة المفاتيح")
+            return
+        raise PlaywrightTimeoutError("reply text not typed")
     box = page.locator('[role="dialog"] [data-testid="tweetTextarea_0"]')
     if box.count() == 0:
         box = page.locator('[data-testid="tweetTextarea_0"]')
@@ -7076,6 +7061,8 @@ def comment_failure_text(exc: Exception) -> str:
     if isinstance(exc, PlaywrightTimeoutError):
         if "touch missed" in message or "not touched" in message:
             return TAP_MISSED_NOTE
+        if "text not typed" in message:
+            return "لم يُكتب نص الرد"
         if "tweetTextarea" in message:
             return "لم يظهر مربع كتابة الرد"
         if "reply button" in message or "aria-disabled" in message or "disabled" in message:
@@ -10791,7 +10778,7 @@ def apply_actions_immediately(page, url: str, actions: list[str]) -> dict[str, s
 COMMENT_RETRY_SAFE = (
     "تعذر فتح التغريدة", "تعذر العثور على المنشور", "لم يُرجع النموذج تعليقًا صالحًا", "لم يظهر مربع كتابة الرد",
     "زر النشر بقي معطّلًا", "لم تُفتح التغريدة في الوقت المناسب", "الحساب وصل حد الردود مؤقتًا",
-    "رفض X الرد (تقييد مؤقت)", "لم يُضغط: رفضه X مرتين متتاليتين في هذه المهمة", TAP_MISSED_NOTE,
+    "رفض X الرد (تقييد مؤقت)", "لم يُضغط: رفضه X مرتين متتاليتين في هذه المهمة", TAP_MISSED_NOTE, "لم يُكتب نص الرد",
 )
 
 

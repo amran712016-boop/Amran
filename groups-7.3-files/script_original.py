@@ -9884,7 +9884,7 @@ def tweet_flags_from_api(data, status_id: str) -> dict | None:
 # the task ends, the browser closed and reopened for a pause included.
 IN_PAGE_MOVES = True
 IN_PAGE_WAIT_SECONDS = 7
-IN_PAGE_FULL_EVERY = (5, 8)
+IN_PAGE_FULL_EVERY = (1, 3)
 _in_page: dict[int, dict] = {}              # id(page) -> {"since_full", "full_at", "missed", "off", "refused"}
 
 MOVE_IN_PAGE_JS = r"""

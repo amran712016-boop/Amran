@@ -645,7 +645,16 @@ EMBEDDED_PAGE = r'''<!doctype html>
     .run-row .btn-wide { flex: 1; margin-top: 0; }
     .btn-fast { flex: none; min-height: 44px; padding: 0 12px; border-radius: 13px; font-size: 12.5px; font-weight: 600; color: #b45309; border-color: rgba(217, 119, 6, 0.5); }
     .btn-fast.ic::before { color: #d97706; width: 13px; height: 13px; }
-    .fast-note { color: #b45309; font-weight: 500; }
+    /* its warning: in the middle of the page */
+    .pc-backdrop.pc-center { align-items: center; padding: 20px; }
+    .usage-sheet.danger-box { width: min(340px, 100%); border-radius: 20px; padding: 24px 18px 16px; text-align: center; animation: pop 0.22s var(--ease) both; }
+    .usage-sheet.danger-box::before { display: none; }
+    .danger-icon { display: grid; place-items: center; width: 54px; height: 54px; margin: 0 auto 12px; border-radius: 50%; background: var(--bad-soft); border: 1px solid var(--bad-line); color: var(--bad); }
+    .danger-icon.ic::before { width: 26px; height: 26px; }
+    .danger-title { display: block; margin-bottom: 6px; font-size: 18px; font-weight: 700; color: var(--bad); }
+    .danger-note { margin: 0; font-size: 15px; line-height: 1.7; color: var(--text); }
+    .btn-danger { color: #fff; background: var(--bad); border-color: var(--bad); box-shadow: 0 8px 18px -10px rgba(217, 45, 32, 0.9); }
+    @keyframes pop { from { opacity: 0; transform: scale(0.94); } to { opacity: 1; transform: none; } }
     /* a button that waits for the program shows it is working */
     .btn:disabled::after {
       content: "";
@@ -1823,16 +1832,14 @@ EMBEDDED_PAGE = r'''<!doctype html>
     </div>
   </div>
 </div>{% endif %}
-<div id="fast-box" class="pc-backdrop" hidden>
-  <div class="usage-sheet" role="alertdialog" aria-modal="true" aria-labelledby="fast-title" aria-describedby="fast-note">
-    <div class="usage-head">
-      <b id="fast-title">تنبيه</b>
-      <button id="fast-close" class="usage-x" type="button" aria-label="إغلاق">×</button>
-    </div>
-    <p id="fast-note" class="usage-note fast-note">التنفيذ السريع يفتح التغريدات بدون تحميل الصفحة كاملة، وهو خطر على الحساب: قد يقيّده X.</p>
+<div id="fast-box" class="pc-backdrop pc-center" hidden>
+  <div class="usage-sheet danger-box" role="alertdialog" aria-modal="true" aria-labelledby="fast-title" aria-describedby="fast-note">
+    <span class="danger-icon ic i-alert" aria-hidden="true"></span>
+    <b id="fast-title" class="danger-title">تحذير</b>
+    <p id="fast-note" class="danger-note">قد يتم تقييد حسابك.</p>
     <div class="usage-foot">
       <button id="fast-cancel" class="btn btn-ghost" type="button">إلغاء</button>
-      <button id="fast-go" class="btn btn-pine" type="button">تنفيذ سريع</button>
+      <button id="fast-go" class="btn btn-danger" type="button">تنفيذ سريع</button>
     </div>
   </div>
 </div>
@@ -3633,7 +3640,6 @@ EMBEDDED_PAGE = r'''<!doctype html>
     if (form.requestSubmit) form.requestSubmit(repostButton); else repostButton.click();
   });
   document.getElementById("fast-cancel").addEventListener("click", closeFast);
-  document.getElementById("fast-close").addEventListener("click", closeFast);
   fastBox.addEventListener("click", (event) => { if (event.target === fastBox) closeFast(); });
   document.addEventListener("keydown", (event) => { if (event.key === "Escape" && !fastBox.hidden) closeFast(); });
 

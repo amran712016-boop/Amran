@@ -590,6 +590,7 @@ def load_pace() -> dict:
         if key == "in_page":
             low, high = int(low), int(high)
         out[key] = [low, high] if (1 if key == "in_page" else 0) <= low <= high <= PACE_LIMITS[key] else list(default)
+    out["in_page_on"] = data.get("in_page_on") is True     # «الفتح السريع»: off unless turned on in the panel
     return out
 
 
@@ -2609,7 +2610,7 @@ main{padding-bottom:56px}
 <label class="prf prw"><span>رصيد الحساب الجديد</span><input class="fs" name="welcome" dir="ltr" inputmode="decimal" autocomplete="off" value="{{ '%g'|format(welcome) }}"></label>
 <p class="mut prh">يُضاف تلقائيًا لكل من ينشئ حسابًا جديدًا في التطبيق، مرة واحدة لكل جوال. و0 يوقفه.</p>
 <button class="btn wide" style="margin-top:14px">حفظ الأسعار</button></form></details>
-<details class="card prc"><summary><span class="prc-h">{{ic('sort')}}<b>سرعة التنفيذ</b></span><span class="prc-s"><span>كتابة التعليق <bdi dir="ltr">{{ '%g'|format(pace.typing[0]) }}–{{ '%g'|format(pace.typing[1]) }}</bdi> ث</span><span>بين الأزرار <bdi dir="ltr">{{ '%g'|format(pace.gap[0]) }}–{{ '%g'|format(pace.gap[1]) }}</bdi> ث</span><span>بعد التحميل <bdi dir="ltr">{{ '%g'|format(pace.settle[0]) }}–{{ '%g'|format(pace.settle[1]) }}</bdi> ث</span><span>بدون تحميل كامل <bdi dir="ltr">{{ pace.in_page[0] }}–{{ pace.in_page[1] }}</bdi> تغريدات</span></span>{{ic('chev')}}</summary>
+<details class="card prc"><summary><span class="prc-h">{{ic('sort')}}<b>سرعة التنفيذ</b></span><span class="prc-s"><span>كتابة التعليق <bdi dir="ltr">{{ '%g'|format(pace.typing[0]) }}–{{ '%g'|format(pace.typing[1]) }}</bdi> ث</span><span>بين الأزرار <bdi dir="ltr">{{ '%g'|format(pace.gap[0]) }}–{{ '%g'|format(pace.gap[1]) }}</bdi> ث</span><span>بعد التحميل <bdi dir="ltr">{{ '%g'|format(pace.settle[0]) }}–{{ '%g'|format(pace.settle[1]) }}</bdi> ث</span>{% if pace.in_page_on %}<span>فتح سريع <bdi dir="ltr">{{ pace.in_page[0] }}–{{ pace.in_page[1] }}</bdi> تغريدات</span>{% else %}<span>فتح سريع: متوقف</span>{% endif %}</span>{{ic('chev')}}</summary>
 <form method="post" action="/{{admin}}/pace" data-toast="تم حفظ سرعة التنفيذ"><p class="mut">بالثواني، ويختار التطبيق كل مرة رقمًا عشوائيًا بين «من» و«إلى». تُطبَّق على كل المستخدمين من مهمتهم التالية.</p>
 <p class="l">مدة كتابة التعليق كله</p>
 <div class="prg"><label class="prf"><span>من</span><input class="fs" name="typing_from" dir="ltr" inputmode="decimal" autocomplete="off" value="{{ '%g'|format(pace.typing[0]) }}"></label><label class="prf"><span>إلى</span><input class="fs" name="typing_to" dir="ltr" inputmode="decimal" autocomplete="off" value="{{ '%g'|format(pace.typing[1]) }}"></label></div>
@@ -2617,7 +2618,9 @@ main{padding-bottom:56px}
 <div class="prg"><label class="prf"><span>من</span><input class="fs" name="gap_from" dir="ltr" inputmode="decimal" autocomplete="off" value="{{ '%g'|format(pace.gap[0]) }}"></label><label class="prf"><span>إلى</span><input class="fs" name="gap_to" dir="ltr" inputmode="decimal" autocomplete="off" value="{{ '%g'|format(pace.gap[1]) }}"></label></div>
 <p class="l">بعد تحميل التغريدة وقبل أول نقرة <small>(لا ينقر قبل أن تظهر أزرار التغريدة)</small></p>
 <div class="prg"><label class="prf"><span>من</span><input class="fs" name="settle_from" dir="ltr" inputmode="decimal" autocomplete="off" value="{{ '%g'|format(pace.settle[0]) }}"></label><label class="prf"><span>إلى</span><input class="fs" name="settle_to" dir="ltr" inputmode="decimal" autocomplete="off" value="{{ '%g'|format(pace.settle[1]) }}"></label></div>
-<p class="l">عدد التغريدات التي تُفتح بدون تحميل الصفحة كاملة <small>(عدد صحيح، وبعدها تُحمَّل التغريدة التالية كاملة)</small></p>
+<input type="hidden" name="in_page_form" value="1">
+<label class="opt au"><input type="checkbox" name="in_page_on" value="1"{% if pace.in_page_on %} checked{% endif %}><span class="pi">{{ic('sort')}}</span><span><b>الفتح السريع للتغريدات</b><small>تُفتح التغريدة داخل صفحة X بدون تحميلها كاملة، بالعدد الذي تحدده تحت. متوقف: كل تغريدة تُحمَّل كاملة</small></span><span class="ck">{{ic('check')}}</span></label>
+<p class="l">عدد التغريدات التي تُفتح بدون تحميل الصفحة كاملة <small>(مع الفتح السريع؛ عدد صحيح، وبعدها تُحمَّل التغريدة التالية كاملة)</small></p>
 <div class="prg"><label class="prf"><span>من</span><input class="fs" name="in_page_from" dir="ltr" inputmode="numeric" autocomplete="off" value="{{ pace.in_page[0] }}"></label><label class="prf"><span>إلى</span><input class="fs" name="in_page_to" dir="ltr" inputmode="numeric" autocomplete="off" value="{{ pace.in_page[1] }}"></label></div>
 <button class="btn wide" style="margin-top:14px">حفظ سرعة التنفيذ</button></form></details>
 <details class="card prc" id="dv-card"><summary><span class="prc-h">{{ic('phone')}}<b>الأجهزة</b></span><span class="prc-s"><span>{{ 'جهاز واحد لكل مستخدم' if one_device else 'عدة أجهزة لكل مستخدم' }}</span><span>الأجوال المسجّلة: <bdi dir="ltr">{{stats.bound}}</bdi></span></span>{{ic('chev')}}</summary>
@@ -3654,11 +3657,14 @@ def pace_save():
             flash("bad", f"{name} حتى {PACE_LIMITS[key]:g} ثانية على الأكثر.")
             return redirect(f"/{ADMIN}")
         pace[key] = [round(low, 2), round(high, 2)]
+    if request.form.get("in_page_form"):                  # (a form with the switch: checked or not)
+        pace["in_page_on"] = request.form.get("in_page_on") == "1"
     write_private_json(PACE_PATH, {"version": 1, **pace})
     flash("ok", f"حُفظت سرعة التنفيذ: كتابة التعليق من {pace['typing'][0]:g} إلى {pace['typing'][1]:g} ثانية، وبين الأزرار من "
                 f"{pace['gap'][0]:g} إلى {pace['gap'][1]:g}، وبعد تحميل التغريدة من {pace['settle'][0]:g} إلى {pace['settle'][1]:g}، "
-                f"وتحميل الصفحة كاملة بعد {pace['in_page'][0]} إلى {pace['in_page'][1]} تغريدات. "
-                "تُطبَّق على كل المستخدمين من مهمتهم التالية.")
+                + (f"والفتح السريع مشغّل: تحميل الصفحة كاملة بعد {pace['in_page'][0]} إلى {pace['in_page'][1]} تغريدات. "
+                   if pace.get("in_page_on") else "والفتح السريع متوقف: كل تغريدة تُحمَّل كاملة. ")
+                + "تُطبَّق على كل المستخدمين من مهمتهم التالية.")
     return redirect(f"/{ADMIN}")
 
 

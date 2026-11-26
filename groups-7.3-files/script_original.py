@@ -7039,6 +7039,8 @@ def pace_update(answer) -> None:
             continue
         if 0 <= low <= high <= limit:
             _pace[key] = (low, high)
+    if isinstance(pace.get("in_page_on"), bool):  # («الفتح السريع» on or off, from the panel)
+        _pace["in_page_on"] = pace["in_page_on"]
     try:                                        # (how many tweets inside the page before a full load: whole numbers)
         low, high = (int(float(value)) for value in pace.get("in_page"))
         if 1 <= low <= high <= IN_PAGE_FULL_MOST:
@@ -10246,6 +10248,13 @@ def tweet_flags_from_api(data, status_id: str) -> dict | None:
 # Once X refuses anything in a task (see in_page_after), every tweet after it is loaded in full, as before, until
 # the task ends, the browser closed and reopened for a pause included.
 IN_PAGE_MOVES = False                        # off: every tweet, and every silent retry, is loaded in full
+# (unless the panel's «الفتح السريع للتغريدات» is on: given with each task's start, see in_page_moves_on)
+
+
+def in_page_moves_on() -> bool:
+    """Tweets opened inside X's page («الفتح السريع»): as the panel says, else IN_PAGE_MOVES."""
+    return bool(_pace.get("in_page_on", IN_PAGE_MOVES))
+
 IN_PAGE_WAIT_SECONDS = 7
 IN_PAGE_FULL_EVERY = (1, 3)                 # (unless the panel's «سرعة التنفيذ» says otherwise: _pace["in_page"])
 IN_PAGE_FULL_MOST = 50
@@ -10281,7 +10290,7 @@ MOVED_STATE_JS = r"""
 
 def move_in_page(page, status_id: str, canonical: str) -> bool:
     """Start opening this tweet inside the page now on X (True), or say it is to be loaded in full (False)."""
-    if not IN_PAGE_MOVES or not status_id:
+    if not in_page_moves_on() or not status_id:
         return False
     state = _in_page_state(page)
     if state["off"] or state["since_full"] >= state["full_at"]:
@@ -10407,7 +10416,7 @@ REOPEN_RETURN_JS = r"""
 def reopen_in_page(page, status_id: str, path: str) -> bool:
     """Open the tweet now showing again inside X's page (see above). True once it is there anew; False for the full
     load, as before."""
-    if not IN_PAGE_MOVES or not status_id:
+    if not in_page_moves_on() or not status_id:
         return False
     state = _in_page_state(page)
     if state["off"]:

@@ -640,6 +640,12 @@ EMBEDDED_PAGE = r'''<!doctype html>
     .btn-pine:hover:not(:disabled) { background: linear-gradient(180deg, #3f6bff 0%, var(--brand-2) 100%); }
     .btn-wide { width: 100%; min-height: 44px; margin-top: 12px; border-radius: 13px; font-size: 14px; font-weight: 600; }
     .btn-wide.ic::before { width: 14px; height: 14px; }
+    /* «تنفيذ» and, beside it, the small «تنفيذ سريع» */
+    .run-row { display: flex; gap: 8px; align-items: stretch; margin-top: 12px; }
+    .run-row .btn-wide { flex: 1; margin-top: 0; }
+    .btn-fast { flex: none; min-height: 44px; padding: 0 12px; border-radius: 13px; font-size: 12.5px; font-weight: 600; color: #b45309; border-color: rgba(217, 119, 6, 0.5); }
+    .btn-fast.ic::before { color: #d97706; width: 13px; height: 13px; }
+    .fast-note { color: #b45309; font-weight: 500; }
     /* a button that waits for the program shows it is working */
     .btn:disabled::after {
       content: "";
@@ -1727,7 +1733,10 @@ EMBEDDED_PAGE = r'''<!doctype html>
               <span id="claude-now" class="claude-now">بدون مفتاح Claude تُكتب التعليقات بواسطة Gemini.</span>
             </div>
           </div>{% endif %}
-          <button id="reposts-button" class="btn btn-pine btn-wide ic i-play" type="submit">تنفيذ</button>
+          <div class="run-row">
+            <button id="reposts-button" class="btn btn-pine btn-wide ic i-play" type="submit">تنفيذ</button>
+            <button id="fast-button" class="btn btn-ghost btn-fast ic i-zap" type="button">تنفيذ سريع</button>
+          </div>
         </section>
       </div>
     </form>
@@ -1814,6 +1823,19 @@ EMBEDDED_PAGE = r'''<!doctype html>
     </div>
   </div>
 </div>{% endif %}
+<div id="fast-box" class="pc-backdrop" hidden>
+  <div class="usage-sheet" role="alertdialog" aria-modal="true" aria-labelledby="fast-title" aria-describedby="fast-note">
+    <div class="usage-head">
+      <b id="fast-title">تنبيه</b>
+      <button id="fast-close" class="usage-x" type="button" aria-label="إغلاق">×</button>
+    </div>
+    <p id="fast-note" class="usage-note fast-note">التنفيذ السريع يفتح التغريدات بدون تحميل الصفحة كاملة، وهو خطر على الحساب: قد يقيّده X.</p>
+    <div class="usage-foot">
+      <button id="fast-cancel" class="btn btn-ghost" type="button">إلغاء</button>
+      <button id="fast-go" class="btn btn-pine" type="button">تنفيذ سريع</button>
+    </div>
+  </div>
+</div>
 <div id="fails-box" class="pc-backdrop" hidden>
   <div class="usage-sheet" role="dialog" aria-modal="true" aria-labelledby="fails-title">
     <div class="usage-head">
@@ -3593,8 +3615,32 @@ EMBEDDED_PAGE = r'''<!doctype html>
     }
   });
 
+  // «تنفيذ سريع»: the same task, its tweets opened inside X's page (3 to 15, then one loaded in full), once the
+  // short warning has been read and accepted.
+  const fastBox = document.getElementById("fast-box");
+  let fastRun = false;
+  function closeFast() { fastBox.hidden = true; }
+  document.getElementById("fast-button").addEventListener("click", () => {
+    if (repostButton.disabled) return;
+    fastBox.hidden = false;
+    document.getElementById("fast-go").focus();
+  });
+  document.getElementById("fast-go").addEventListener("click", () => {
+    closeFast();
+    if (repostButton.disabled) return;
+    fastRun = true;
+    const form = document.getElementById("repost-form");
+    if (form.requestSubmit) form.requestSubmit(repostButton); else repostButton.click();
+  });
+  document.getElementById("fast-cancel").addEventListener("click", closeFast);
+  document.getElementById("fast-close").addEventListener("click", closeFast);
+  fastBox.addEventListener("click", (event) => { if (event.target === fastBox) closeFast(); });
+  document.addEventListener("keydown", (event) => { if (event.key === "Escape" && !fastBox.hidden) closeFast(); });
+
   document.getElementById("repost-form").addEventListener("submit", async (event) => {
     event.preventDefault();
+    const fast = fastRun;                    // (this submit only: from «تنفيذ سريع» after its warning)
+    fastRun = false;
     const authToken = tokenField.value.trim();
     const pin = pinField.value.trim();
     const stopRaw = stopField.value.trim();
@@ -3648,6 +3694,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
       };
       if (byLinks) task.links = links;
       else Object.assign(task, {group: selectedGroup, stop_tweet: stopRaw});
+      if (fast) task.fast = true;
       const started = await postJson("/group-run", task, 90000);
       if (!started.success || !started.job_id || !started.job_key) {
         showNotice(started.message || "تعذّر بدء التنفيذ.", false);
@@ -3660,7 +3707,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
         id: started.job_id,
         key: started.job_key,
         token: authToken,
-        title: name + (account ? " · " + account : ""),
+        title: (fast ? "سريع · " : "") + name + (account ? " · " + account : ""),
         startedAt: Date.now()
       });
       showNotice(started.queued
@@ -8229,8 +8276,9 @@ def _run_on_account_browser(auth_token: str, work):
             if state["playwright"] is None:
                 state["playwright"] = sync_playwright().start()
             refused = in_page_refused(state["page"])        # (X refused earlier in this task: still each in full)
+            fast = in_page_is_fast(state["page"])           # (a «تنفيذ سريع» task stays one)
             state["context"], new_page = open_saved(state["playwright"])
-            in_page_fresh(new_page, refused)
+            in_page_fresh(new_page, refused, fast)
             state["page"] = new_page
             try:
                 new_page.goto("https://www.google.com/", wait_until="domcontentloaded", timeout=60_000)
@@ -10261,13 +10309,17 @@ IN_PAGE_MOVES = False                        # off: every tweet, and every silen
 # (unless the panel's «الفتح السريع للتغريدات» is on: given with each task's start, see in_page_moves_on)
 
 
-def in_page_moves_on() -> bool:
-    """Tweets opened inside X's page («الفتح السريع»): as the panel says, else IN_PAGE_MOVES."""
+def in_page_moves_on(page=None) -> bool:
+    """Tweets opened inside X's page: always for a «تنفيذ سريع» task's page; else as the panel's «الفتح السريع» says,
+    else IN_PAGE_MOVES."""
+    if page is not None and (_in_page.get(id(page)) or {}).get("fast"):
+        return True
     return bool(_pace.get("in_page_on", IN_PAGE_MOVES))
 
 IN_PAGE_WAIT_SECONDS = 7
 IN_PAGE_FULL_EVERY = (1, 3)                 # (unless the panel's «سرعة التنفيذ» says otherwise: _pace["in_page"])
 IN_PAGE_FULL_MOST = 50
+FAST_IN_PAGE_EVERY = (3, 15)                # («تنفيذ سريع»: this many tweets inside the page, then one loaded in full)
 _in_page: dict[int, dict] = {}              # id(page) -> {"since_full", "full_at", "missed", "off", "refused"}
 
 MOVE_IN_PAGE_JS = r"""
@@ -10300,7 +10352,7 @@ MOVED_STATE_JS = r"""
 
 def move_in_page(page, status_id: str, canonical: str) -> bool:
     """Start opening this tweet inside the page now on X (True), or say it is to be loaded in full (False)."""
-    if not in_page_moves_on() or not status_id:
+    if not in_page_moves_on(page) or not status_id:
         return False
     state = _in_page_state(page)
     if state["off"] or state["since_full"] >= state["full_at"]:
@@ -10313,8 +10365,8 @@ def move_in_page(page, status_id: str, canonical: str) -> bool:
         return False
 
 
-def _in_page_full_at() -> int:
-    low, high = sorted(int(value) for value in (_pace.get("in_page") or IN_PAGE_FULL_EVERY))
+def _in_page_full_at(fast: bool = False) -> int:
+    low, high = sorted(int(value) for value in (FAST_IN_PAGE_EVERY if fast else (_pace.get("in_page") or IN_PAGE_FULL_EVERY)))
     return random.randint(max(1, low), max(1, high))
 
 
@@ -10326,14 +10378,29 @@ def in_page_loaded(page) -> None:
     """The page was just loaded in full: the next tweets open inside it again, until the next full one is due."""
     state = _in_page_state(page)
     state["since_full"] = 0
-    state["full_at"] = _in_page_full_at()
+    state["full_at"] = _in_page_full_at(bool(state.get("fast")))
 
 
-def in_page_fresh(page, refused: bool = False) -> None:
+def in_page_go_fast(page) -> None:
+    """«تنفيذ سريع»: this task's tweets are opened inside X's page, FAST_IN_PAGE_EVERY of them, then one loaded in
+    full (whatever the panel says for the others). As in any task, once X refuses anything, each is loaded in full."""
+    state = _in_page_state(page)
+    state["fast"] = True
+    state["full_at"] = _in_page_full_at(True)
+    trace_click(f"تنفيذ سريع: التغريدات تُفتح داخل الصفحة، وتحميل كامل بعد كل {FAST_IN_PAGE_EVERY[0]} إلى {FAST_IN_PAGE_EVERY[1]}")
+
+
+def in_page_is_fast(page) -> bool:
+    return page is not None and bool((_in_page.get(id(page)) or {}).get("fast"))
+
+
+def in_page_fresh(page, refused: bool = False, fast: bool = False) -> None:
     """A task starts on this page (a new one, or an account's page kept open from its last task): the in-page move
     is tried again, whatever the task before found. refused: the browser was reopened inside a task X has refused
     in already, so this page goes on loading each tweet in full."""
     _in_page.pop(id(page), None)
+    if fast:
+        in_page_go_fast(page)
     if refused:
         state = _in_page_state(page)
         state["off"] = state["refused"] = True
@@ -10426,7 +10493,7 @@ REOPEN_RETURN_JS = r"""
 def reopen_in_page(page, status_id: str, path: str) -> bool:
     """Open the tweet now showing again inside X's page (see above). True once it is there anew; False for the full
     load, as before."""
-    if not in_page_moves_on() or not status_id:
+    if not in_page_moves_on(page) or not status_id:
         return False
     state = _in_page_state(page)
     if state["off"]:
@@ -11540,7 +11607,7 @@ def tweet_links_from(entries) -> list[dict]:
     return items
 
 
-def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, requested_count: int, actions: list[str], gemini_api_key: str = "", gemini_model: str = "", stop_id: str = "", group_wait_s: int = DEFAULT_GROUP_WAIT_SECONDS, reply_voice: str = DEFAULT_REPLY_VOICE, tweet_links: list[dict] | None = None) -> None:
+def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, requested_count: int, actions: list[str], gemini_api_key: str = "", gemini_model: str = "", stop_id: str = "", group_wait_s: int = DEFAULT_GROUP_WAIT_SECONDS, reply_voice: str = DEFAULT_REPLY_VOICE, tweet_links: list[dict] | None = None, fast: bool = False) -> None:
     def on_progress(done: int, requested: int, phase: str) -> None:
         if job_cancelled(job_id):
             raise JobStopped
@@ -11578,9 +11645,11 @@ def run_group_job(job_id: str, auth_token: str, pin: str, group_name: str, reque
         else:
             publish_job(job_id, phase=phase, message="فتح الدردشة والقروب…")
 
-    job_run_args[job_id] = (auth_token, pin, group_name, requested_count, actions, gemini_api_key, gemini_model, stop_id, group_wait_s, reply_voice, tweet_links)
+    job_run_args[job_id] = (auth_token, pin, group_name, requested_count, actions, gemini_api_key, gemini_model, stop_id, group_wait_s, reply_voice, tweet_links, fast)
 
     def work(page):
+        if fast:
+            in_page_go_fast(page)
         try:
             # Pick up any change to the ignored-accounts list (the owner sets it in «توزيع البرنامج»,
             # which shares this folder; a user's copy keeps it current from its check-in).
@@ -13471,6 +13540,7 @@ def group_run_endpoint(access_path: str):
     reply_voice = str(data.get("reply_voice") or DEFAULT_REPLY_VOICE)
     if reply_voice not in REPLY_VOICES:
         reply_voice = DEFAULT_REPLY_VOICE
+    fast = data.get("fast") is True             # («تنفيذ سريع»: its tweets opened inside X's page, see in_page_go_fast)
     requested_actions = list(dict.fromkeys(requested_actions))
     gemini_api_key = str(data.get("gemini_api_key") or "").strip()
     gemini_model = normalize_gemini_model(str(data.get("gemini_model") or ""))
@@ -13526,7 +13596,7 @@ def group_run_endpoint(access_path: str):
     if ahead:
         publish_job(job_id, phase="queue", message=waiting_message(ahead))
     run_args = (auth_token, pin, group_name, requested_count, requested_actions, gemini_api_key, gemini_model or "",
-                stop_id, group_wait_s, reply_voice, tweet_links)
+                stop_id, group_wait_s, reply_voice, tweet_links, fast)
     threading.Thread(
         target=run_group_job_in_turn,
         args=(job_id, auth_digest, start_phase, start_message, run_args),
@@ -13647,7 +13717,7 @@ def retry_failed_endpoint(access_path: str):
     if ahead:
         publish_job(new_id, phase="queue", message=waiting_message(ahead))
     run_args = (auth_token, "", name, len(items), actions, gemini_api_key, gemini_model, "", DEFAULT_GROUP_WAIT_SECONDS,
-                reply_voice, items)
+                reply_voice, items, bool(args[11]) if args and len(args) > 11 else False)     # (a fast task's, fast too)
     threading.Thread(target=run_group_job_in_turn, args=(new_id, auth_digest, "prepare", "التحقق من الجلسة…", run_args),
                      daemon=True).start()
     count = sum(len(item["only"]) for item in items)

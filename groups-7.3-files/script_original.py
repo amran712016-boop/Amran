@@ -159,13 +159,16 @@ def trace_page(page, why: str) -> None:
     trace_click(why + " | " + str(snap)[:450])
 SESSIONS_PATH = DATA_DIR / "sessions.json"
 JOBS_PATH = DATA_DIR / "jobs.json"
+# This run of the program. A task finished in an earlier run (its card with «إعادة المحاولة» buttons) is not shown
+# again once the program has started anew: the page drops its card (see "old_run").
+ENGINE_RUN = secrets.token_hex(6)
 GEMINI_PATH = DATA_DIR / "gemini.json"
 saved_sessions: list[dict] = []
 saved_gemini = {"api_key": "", "model": "gemini-3.5-flash"}
 JOB_FIELDS = (
     "owner", "client_id", "created_at", "updated_at", "status", "phase", "kind",
     "collected", "done", "requested", "message", "success",
-    "username", "actions", "items", "results", "key_hash", "auth_digest", "account",
+    "username", "actions", "items", "results", "key_hash", "auth_digest", "account", "run",
 )
 logging.getLogger("werkzeug").disabled = True
 
@@ -2311,6 +2314,13 @@ EMBEDDED_PAGE = r'''<!doctype html>
           }
           if (response.status === 404) writeTasks(readTasks().filter((row) => row.id !== task.id));
           if (!response.ok) throw new Error(data.message || "تعذّر متابعة المهمة.");
+          if (data.status !== "running" && data.old_run) {
+            // (a task finished before the program started anew: its card goes, «إعادة المحاولة» buttons and all)
+            writeTasks(readTasks().filter((row) => row.id !== task.id));
+            card.remove();
+            filterTaskCards();
+            break;
+          }
           paint(data);
           if (data.status !== "running") {
             showTaskNotice(task, (task.title ? task.title + ": " : "") + (data.message || ""), Boolean(data.success));
@@ -13065,6 +13075,7 @@ def begin_job(owner: str, client_id: str, requested: int, phase: str, message: s
         jobs[job_id] = {
             "owner": owner,
             "client_id": client_id,
+            "run": ENGINE_RUN,
             "created_at": now,
             "updated_at": now,
             "status": "running",
@@ -13114,6 +13125,7 @@ def public_job(job: dict, light: bool = False, links: bool = False) -> dict:
         "resumable": bool(job.get("resumable")) and job.get("status") == "done",
         "retry_failed": failed_retry_count(job),
         "failed": failed_summary(job) if (job.get("kind") or "") == "execute" else {},
+        "old_run": job.get("run") != ENGINE_RUN,          # (from before the program started anew)
     }
     if light and job["status"] == "running":
         payload["items"] = []

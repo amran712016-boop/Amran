@@ -6787,29 +6787,204 @@ def composer_visible(page) -> bool:
         return False
 
 
+# The comments' fallback: when a real touch did not open the reply box or send the reply, or the real typing did not
+# leave the comment in the box, that step is done once more directly, through the page, as before (the button's own
+# handler, the text written into the box). Only the comments: the other buttons are never pressed so.
+PRESS_PAGE_JS = r"""
+async ({statusId, testid}) => {
+  const labelOf = {
+    reply: /reply|رد/i, retweet: /repost|retweet|إعادة النشر|اعادة النشر/i,
+    unretweet: /undo repost|unretweet|تم إعادة|إلغاء إعادة/i,
+    like: /like|إعجاب|اعجاب/i, unlike: /unlike|liked|أعجبني|معجب/i,
+    bookmark: /bookmark|إشارة مرجعية/i, removeBookmark: /remove bookmark|إزالة الإشارة/i
+  };
+  const articles = [...document.querySelectorAll('article[data-testid="tweet"], [data-testid="tweet"]')];
+  let card = articles.find((article) => statusId && [...article.querySelectorAll('a[href*="/status/"]')]
+    .some((node) => (node.getAttribute("href") || "").includes("/status/" + statusId))) || articles[0] || null;
+  if (!card) return {how: "missing"};
+  const root = card.closest('[data-testid="cellInnerDiv"]') || card;
+  const re = labelOf[testid];
+  const nodes = [];
+  const tagged = root.querySelector('[data-testid="' + testid + '"]');
+  if (tagged) nodes.push(tagged);
+  if (re) {
+    for (const node of root.querySelectorAll("button, [role='button']")) {
+      const label = node.getAttribute("aria-label") || "";
+      if (!re.test(label)) continue;
+      if (testid === "like" && /unlike|liked|أعجبني|معجب/i.test(label)) continue;
+      nodes.push(node);
+    }
+  }
+  let button = null;
+  for (const node of nodes) {
+    const btn = node.closest("button, [role='button']") || node;
+    if (btn.closest("[data-testid='tweetTextarea_0'], [data-testid='toolBar']")) continue;
+    const rect = btn.getBoundingClientRect();
+    if (rect.width >= 2 && rect.height >= 2) { button = btn; break; }
+  }
+  if (!button) return {how: "missing"};
+  const aboveBar = () => {
+    const bar = document.querySelector('[data-testid="BottomBar"]');
+    const top = bar ? bar.getBoundingClientRect().top : window.innerHeight;
+    return top > 80 ? top - 12 : window.innerHeight - 12;
+  };
+  const placed = () => {
+    const r = button.getBoundingClientRect();
+    return r.width >= 2 && r.top > 24 && r.bottom < aboveBar();
+  };
+  if (!placed()) {
+    let node = button.parentElement;
+    while (node) {
+      const style = getComputedStyle(node);
+      if (/(auto|scroll|overlay)/.test(style.overflowY) && node.scrollHeight > node.clientHeight + 8) {
+        const r = button.getBoundingClientRect();
+        const host = node.getBoundingClientRect();
+        node.scrollTop += (r.top + r.height / 2) - Math.min(host.top + host.height / 2, aboveBar() * 0.55);
+      }
+      node = node.parentElement;
+    }
+    const r = button.getBoundingClientRect();
+    const delta = (r.top + r.height / 2) - (aboveBar() * 0.55);
+    try { window.scrollBy(0, delta); } catch (error) {}
+    if (document.scrollingElement) document.scrollingElement.scrollTop += delta;
+    try { button.scrollIntoView({block: "center", inline: "nearest"}); } catch (error) {}
+  }
+  if (!placed()) return {how: "offscreen"};
+  const before = button.getAttribute("aria-label") || "";
+  const event = (node) => ({
+    preventDefault() {}, stopPropagation() {}, persist() {},
+    nativeEvent: {isTrusted: true, button: 0},
+    isTrusted: true, button: 0, type: "click",
+    target: node, currentTarget: node
+  });
+  const fire = (node) => {
+    if (!node) return "";
+    const keys = Object.keys(node);
+    for (const key of keys) {
+      if (!key.startsWith("__reactProps$")) continue;
+      const props = node[key];
+      if (props && typeof props.onClick === "function") {
+        props.onClick(event(node));
+        return "react";
+      }
+    }
+    return "";
+  };
+  let how = fire(button);
+  if (!how) {
+    for (const child of button.querySelectorAll("*")) {
+      how = fire(child);
+      if (how) break;
+    }
+  }
+  // (the repost menu: its «إعادة النشر» is pressed the same way, by its selector, once it shows; it can take a moment)
+  const until = Date.now() + (testid === "retweet" ? 1500 : 400);
+  let sheet = null;
+  do {
+    await new Promise((done) => setTimeout(done, 100));
+    sheet = document.querySelector('[data-testid="confirmationSheetConfirm"], [data-testid="retweetConfirm"]');
+  } while (!sheet && Date.now() < until);
+  if (sheet) {
+    fire(sheet) || [...sheet.querySelectorAll("*")].some((child) => fire(child)) || sheet.click();
+    how = (how || "sheet") + "+تأكيد";
+  }
+  return {how: how || "no-handler", before, after: button.isConnected ? (button.getAttribute("aria-label") || "") : "gone"};
+}
+"""
+
+PRESS_SEND_JS = r"""
+() => {
+  const nodes = [...document.querySelectorAll('[data-testid="tweetButtonInline"], [data-testid="tweetButton"]')];
+  const button = [...nodes].reverse().find((node) => node.getAttribute("aria-disabled") !== "true" && !node.disabled);
+  if (!button) return {how: "missing"};
+  const before = (button.innerText || button.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim();
+  const event = {
+    preventDefault() {}, stopPropagation() {}, persist() {},
+    nativeEvent: {isTrusted: true, button: 0},
+    isTrusted: true, button: 0, type: "click",
+    target: button, currentTarget: button
+  };
+  const keys = Object.keys(button);
+  for (const key of keys) {
+    if (!key.startsWith("__reactProps$")) continue;
+    const props = button[key];
+    if (props && typeof props.onClick === "function") {
+      props.onClick(event);
+      return {how: "react", before};
+    }
+  }
+  for (const child of button.querySelectorAll("*")) {
+    for (const key of Object.keys(child)) {
+      if (!key.startsWith("__reactProps$")) continue;
+      const props = child[key];
+      if (props && typeof props.onClick === "function") {
+        props.onClick(event);
+        return {how: "react", before};
+      }
+    }
+  }
+  return {how: "no-handler", before};
+}
+"""
+
+WRITE_REPLY_JS = r"""
+(value) => {
+  // the box being typed in: the one with the focus, else the last one showing (as COMPOSER_TEXT_JS)
+  const boxes = [...document.querySelectorAll('[data-testid="tweetTextarea_0"]')];
+  const active = document.activeElement;
+  const box = boxes.find((node) => active && (node === active || node.contains(active)))
+    || boxes.filter((node) => node.getClientRects().length).pop()
+    || document.querySelector('[role="dialog"] [data-testid="tweetTextarea_0"]') || boxes[0];
+  if (!box) return false;
+  const editable = box.matches("textarea, input, [contenteditable='true']") ? box
+    : (box.querySelector("textarea, input, [contenteditable='true']") || box);
+  editable.focus();
+  document.execCommand("selectAll", false);
+  document.execCommand("delete", false);
+  document.execCommand("insertText", false, value);
+  editable.dispatchEvent(new InputEvent("input", {bubbles: true, inputType: "insertText", data: value}));
+  return true;
+}
+"""
+
+
+def composer_shows(page, timeout_ms: int = 8000) -> bool:
+    try:
+        page.locator('[data-testid="tweetTextarea_0"]').last.wait_for(state="visible", timeout=timeout_ms)
+        return True
+    except PlaywrightTimeoutError:
+        return False
+
+
 def open_reply_composer(page, path: str) -> None:
     """Wait for the tweet to settle, then open the reply box. In the app by a touch on the reply button
     (tap_button: bound to the button, a touch that would land elsewhere is stopped)."""
     match = re.search(r"status/(\d{6,25})", path or "")
     status_id = match.group(1) if match else ""
     if IN_APP:
-        for _ in range(3):
+        if composer_visible(page):
+            trace_click("reply مربع الكتابة ظاهر")
+            return
+        why = tap_button(page, "reply", {"statusId": status_id, "testid": "reply"})
+        if not why and composer_shows(page):
+            trace_click("reply ظهر مربع الكتابة")
+            return
+        trace_click(f"reply اللمسة لم تفتح مربع الكتابة ({why or 'لم يظهر'}): فتح مباشر عبر الصفحة")
+        for _ in range(2):
             if composer_visible(page):
                 trace_click("reply مربع الكتابة ظاهر")
                 return
-            why = tap_button(page, "reply", {"statusId": status_id, "testid": "reply"})
-            if why == TAP_MISSED:
-                raise PlaywrightTimeoutError("touch missed the reply button")
-            if why:
-                trace_click(f"reply لم يُلمس ({why})")
-                page.wait_for_timeout(500)
-                continue
             try:
-                page.locator('[data-testid="tweetTextarea_0"]').last.wait_for(state="visible", timeout=8000)
+                pressed = page.evaluate(PRESS_PAGE_JS, {"statusId": status_id, "testid": "reply"})
+            except Exception as exc:
+                if browser_closed_error(exc):
+                    raise
+                pressed = {"how": "error", "error": (str(exc).splitlines() or [type(exc).__name__])[0][:160]}
+            trace_click(f"reply فتح مباشر {pressed}")
+            if composer_shows(page):
                 trace_click("reply ظهر مربع الكتابة")
                 return
-            except PlaywrightTimeoutError:
-                page.wait_for_timeout(500)
+            page.wait_for_timeout(500)
         raise PlaywrightTimeoutError("tweetTextarea_0 not visible after retries")
     for attempt in range(3):
         page.wait_for_timeout(800 if attempt == 0 else 1400)
@@ -6997,13 +7172,12 @@ def insert_reply_text(page, text: str) -> None:
         focus_reply_box(page)
         if type_like_a_person(page, text):
             return
-        page.keyboard.press("Control+A")
-        page.keyboard.press("Backspace")
-        page.keyboard.insert_text(text)
+        trace_click("reply الكتابة الحقيقية لم تترك التعليق في المربع: كتابة مباشرة عبر الصفحة")
+        page.evaluate(WRITE_REPLY_JS, text)
         page.wait_for_timeout(400)
         seen = page.evaluate(COMPOSER_TEXT_JS)
         if reply_button_ready(page) and (same_text(seen, text) or not str(seen or "").strip()):
-            trace_click("reply كُتب النص دفعة واحدة من لوحة المفاتيح")
+            trace_click("reply كُتب النص مباشرة")
             return
         trace_click(f"reply النص في المربع ليس التعليق ({str(seen or '')[:40]!r})")
         raise PlaywrightTimeoutError("reply text not typed")
@@ -7057,8 +7231,13 @@ def click_reply_send(page) -> None:
         raise PlaywrightTimeoutError("reply button stayed disabled")
     if IN_APP:
         why = tap_button(page, "reply نشر", {"selector": SEND_SELECTOR})
-        if why:
-            raise PlaywrightTimeoutError("touch missed the reply button" if why == TAP_MISSED else f"reply button not touched ({why})")
+        if not why:
+            return
+        trace_click(f"reply نشر: اللمسة لم تصب الزر ({why}): ضغط مباشر عبر الصفحة")
+        sent = page.evaluate(PRESS_SEND_JS)
+        trace_click(f"reply نشر مباشر {sent}")
+        if not isinstance(sent, dict) or sent.get("how") not in ("react", "fiber"):
+            raise PlaywrightTimeoutError("reply button stayed disabled")
         return
     real_click(enabled.last)
 

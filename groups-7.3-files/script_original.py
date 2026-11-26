@@ -10383,7 +10383,8 @@ def in_page_loaded(page) -> None:
 
 def in_page_go_fast(page) -> None:
     """«تنفيذ سريع»: this task's tweets are opened inside X's page, FAST_IN_PAGE_EVERY of them, then one loaded in
-    full (whatever the panel says for the others). As in any task, once X refuses anything, each is loaded in full."""
+    full (whatever the panel says for the others), to the end of the task: X refusing does not change it (see
+    in_page_after)."""
     state = _in_page_state(page)
     state["fast"] = True
     state["full_at"] = _in_page_full_at(True)
@@ -10418,6 +10419,8 @@ def in_page_after(page, notes: dict) -> None:
     if not any(note in X_REFUSED_NOTES or note == X_ERROR for note in said):
         return
     state = _in_page_state(page)
+    if state.get("fast"):
+        return                                  # («تنفيذ سريع» goes on inside the page, refused or not)
     if not state.get("refused"):
         state["off"] = state["refused"] = True
         trace_click("رفض X التفاعل: كل تغريدة تُحمَّل كاملة في باقي المهمة (الطريقة السابقة)")

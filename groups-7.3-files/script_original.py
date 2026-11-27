@@ -16390,6 +16390,20 @@ def queue_failure(report: dict) -> None:
     _failure_wake.set()
 
 
+# A task that ran to its end with only a few failures of the passing kind (the tweet did not open, no touch reached
+# the button, the press went but its state could not be confirmed) is not reported to the control panel: fewer than
+# FAILURES_REPORTED_FROM of them. From that many on, or with any other failure, or a task that stopped, as before.
+FAILURES_REPORTED_FROM = 5
+PASSING_FAILURES = ("تعذر فتح التغريدة", TAP_MISSED, TAP_MISSED_NOTE, UNCONFIRMED)
+
+
+def passing_failure(note: str) -> bool:
+    note = str(note or "")
+    if note.startswith("تعذر نشر التعليق: "):
+        note = note[len("تعذر نشر التعليق: "):]
+    return note in PASSING_FAILURES or note.startswith("أُرسل الطلب لكن")   # (and a reply sent, not seen after)
+
+
 def failure_check(job_id: str) -> None:
     """A task just finished: if it failed, or some of its actions did, its report is made (a moment later, so the
     last lines it printed are in the log)."""
@@ -16406,10 +16420,13 @@ def failure_check(job_id: str) -> None:
             requested = int(job.get("requested") or 0)
         if message.strip() == "تم إيقاف التنفيذ.":
             return                                     # (stopped by the user: not a failure)
+        notes = [str(note) for row in results for note in (row.get("actions") or {}).values() if action_failed(note)]
         failed = [f"{row.get('url') or ''} · {action}: {note}" for row in results
                   for action, note in (row.get("actions") or {}).items() if action_failed(note)]
         if success and not failed:
             return
+        if success and len(failed) < FAILURES_REPORTED_FROM and all(passing_failure(note) for note in notes):
+            return                                     # (a few passing failures: not reported)
         summary = {"requested": requested, "done": len(results)}
         if failed:
             summary["failed"] = len(failed)

@@ -3959,6 +3959,11 @@ EMBEDDED_PAGE = r'''<!doctype html>
         showNotice(started.message || "تعذّر بدء التنفيذ.", false);
         return;
       }
+      if (!byLinks) {                       // (the task has its tweet: the box is emptied for the next one)
+        stopField.value = "";
+        snapshotActive();
+        pushScreen();
+      }
       const accountRow = sessionRows.find((item) => item.token === authToken);
       const account = accountRow && accountRow.username ? "@" + accountRow.username : "";
       const name = byLinks ? "روابط (" + links.length + ")" : selectedGroup;
@@ -5760,18 +5765,41 @@ def tap_button(page, label: str, target: dict) -> str:
 
 
 def press_in_app(page, status_id: str, action: str, testid: str) -> str:
-    """Press the tweet's button by a touch on it (in the app), and for a repost the «إعادة النشر» in its menu."""
+    """Press the tweet's button by a touch on it (in the app), and for a repost the «إعادة النشر» in its menu. When
+    no touch reaches the button (it missed, something covers it, it is off the screen), it is pressed at once
+    directly, through the page, on the same page (press_directly), instead of opening the tweet again."""
     close_popups(page)
     why = tap_button(page, f"{action} {status_id}", {"statusId": status_id, "testid": testid})
     if why == "missing":
         trace_page(page, f"{action} الزر غير موجود")
-    if why or action != "repost":
         return why
-    return tap_repost_confirm(page)
+    if why:
+        return "" if press_directly(page, status_id, action, testid, why) else why
+    if action != "repost":
+        return ""
+    return tap_repost_confirm(page, status_id)
 
 
-def tap_repost_confirm(page) -> str:
-    """The repost's menu: once it shows (it can take a moment) and holds still, a touch on its «إعادة النشر»."""
+def press_directly(page, status_id: str, action: str, testid: str, why: str, confirm_only: bool = False) -> bool:
+    """The touch did not reach the button (why): the button is pressed directly, through the page (its own handler,
+    as the comments' fallback), once. True when it was pressed (X's answer and the button then say what came of it)."""
+    reason = why if why.startswith("تعذر") else COVERED + why
+    trace_click(f"{action} {status_id}: {reason}؛ ضغط مباشر عبر الصفحة" + (" على «إعادة النشر» في القائمة" if confirm_only else ""))
+    try:
+        pressed = page.evaluate(PRESS_PAGE_JS, {"statusId": status_id, "testid": testid, "confirmOnly": confirm_only})
+    except Exception as exc:
+        if browser_closed_error(exc):
+            raise
+        pressed = {"how": "error", "error": (str(exc).splitlines() or [type(exc).__name__])[0][:160]}
+    how = str((pressed or {}).get("how") or "")
+    done = how.startswith("react") or how == "تأكيد"
+    trace_click(f"{action} ضغط مباشر: {pressed}" + ("" if done else " — لم يُضغط"))
+    return done
+
+
+def tap_repost_confirm(page, status_id: str = "") -> str:
+    """The repost's menu: once it shows (it can take a moment) and holds still, a touch on its «إعادة النشر»; when
+    no touch reaches it, it is pressed directly (press_directly)."""
     end = time.monotonic() + REPOST_MENU_SECONDS
     while True:
         try:
@@ -5790,6 +5818,8 @@ def tap_repost_confirm(page) -> str:
     target = {"selector": REPOST_CONFIRM_SELECTOR}
     _tap_steady(page, target, 1.0)
     why = tap_button(page, "repost تأكيد", target)
+    if why and press_directly(page, status_id, "repost", "retweet", TAP_MISSED if why == "missing" else why, confirm_only=True):
+        return ""
     if why:
         close_popups(page)                          # (the menu, left open, would cover the page)
         return TAP_MISSED if why == "missing" else why
@@ -6045,8 +6075,9 @@ def apply_actions_on_path(page, path: str, actions: list[str]) -> dict[str, str]
 
 def _press_covered_again(page, path: str, status_id: str, covered: list[str], outcome: dict[str, str], press,
                          answers: XAnswers) -> None:
-    """Something covered these buttons, or no touch reached them, so they were never pressed: once more, with nothing
-    shown to the user. The tweet is opened again, and only these buttons are pressed, after the tweet has loaded and
+    """Something covered these buttons, or no touch reached them, and pressing them directly on the page did not work
+    either (press_directly; rare), so they were never pressed: once more, with nothing shown to the user. The tweet is
+    opened again, and only these buttons are pressed, after the tweet has loaded and
     the usual wait. For a touch that missed, the tweet is opened again inside X's page, with no full load
     (reopen_in_page), when it can; else, and for a covered button (whatever covered it goes with the old page), it is
     loaded in full. One that shows on by then is left alone (these buttons switch: a press would undo it). Pressed
@@ -7103,11 +7134,45 @@ def composer_visible(page) -> bool:
         return False
 
 
-# The comments' fallback: when a real touch did not open the reply box or send the reply, or the real typing did not
-# leave the comment in the box, that step is done once more directly, through the page, as before (the button's own
-# handler, the text written into the box). Only the comments: the other buttons are never pressed so.
+# The fallback when a real touch did not do it: the comments (the reply box did not open, the reply was not sent,
+# the real typing did not leave the comment in the box), and the tweet's buttons (the touch did not reach the button
+# or the repost menu's «إعادة النشر»): that step is done once more directly, through the page, at once and on the
+# same page (the button's own handler, the text written into the box). confirmOnly: only the repost menu's item.
 PRESS_PAGE_JS = r"""
-async ({statusId, testid}) => {
+async ({statusId, testid, confirmOnly}) => {
+  const event = (node) => ({
+    preventDefault() {}, stopPropagation() {}, persist() {},
+    nativeEvent: {isTrusted: true, button: 0},
+    isTrusted: true, button: 0, type: "click",
+    target: node, currentTarget: node
+  });
+  const fire = (node) => {
+    if (!node) return "";
+    const keys = Object.keys(node);
+    for (const key of keys) {
+      if (!key.startsWith("__reactProps$")) continue;
+      const props = node[key];
+      if (props && typeof props.onClick === "function") {
+        props.onClick(event(node));
+        return "react";
+      }
+    }
+    return "";
+  };
+  // (the repost menu: its «إعادة النشر» is pressed the same way, by its selector, once it shows; it can take a moment)
+  const confirmSheet = async (wait) => {
+    const until = Date.now() + wait;
+    let sheet = null;
+    do {
+      await new Promise((done) => setTimeout(done, 100));
+      sheet = [...document.querySelectorAll('[data-testid="confirmationSheetConfirm"], [data-testid="retweetConfirm"]')]
+        .find((node) => node.getClientRects().length) || null;
+    } while (!sheet && Date.now() < until);
+    if (!sheet) return false;
+    fire(sheet) || [...sheet.querySelectorAll("*")].some((child) => fire(child)) || sheet.click();
+    return true;
+  };
+  if (confirmOnly) return {how: (await confirmSheet(1500)) ? "تأكيد" : "missing"};
   const labelOf = {
     reply: /reply|رد/i, retweet: /repost|retweet|إعادة النشر|اعادة النشر/i,
     unretweet: /undo repost|unretweet|تم إعادة|إلغاء إعادة/i,
@@ -7167,25 +7232,6 @@ async ({statusId, testid}) => {
   }
   if (!placed()) return {how: "offscreen"};
   const before = button.getAttribute("aria-label") || "";
-  const event = (node) => ({
-    preventDefault() {}, stopPropagation() {}, persist() {},
-    nativeEvent: {isTrusted: true, button: 0},
-    isTrusted: true, button: 0, type: "click",
-    target: node, currentTarget: node
-  });
-  const fire = (node) => {
-    if (!node) return "";
-    const keys = Object.keys(node);
-    for (const key of keys) {
-      if (!key.startsWith("__reactProps$")) continue;
-      const props = node[key];
-      if (props && typeof props.onClick === "function") {
-        props.onClick(event(node));
-        return "react";
-      }
-    }
-    return "";
-  };
   let how = fire(button);
   if (!how) {
     for (const child of button.querySelectorAll("*")) {
@@ -7193,17 +7239,7 @@ async ({statusId, testid}) => {
       if (how) break;
     }
   }
-  // (the repost menu: its «إعادة النشر» is pressed the same way, by its selector, once it shows; it can take a moment)
-  const until = Date.now() + (testid === "retweet" ? 1500 : 400);
-  let sheet = null;
-  do {
-    await new Promise((done) => setTimeout(done, 100));
-    sheet = document.querySelector('[data-testid="confirmationSheetConfirm"], [data-testid="retweetConfirm"]');
-  } while (!sheet && Date.now() < until);
-  if (sheet) {
-    fire(sheet) || [...sheet.querySelectorAll("*")].some((child) => fire(child)) || sheet.click();
-    how = (how || "sheet") + "+تأكيد";
-  }
+  if (how && await confirmSheet(testid === "retweet" ? 1500 : 400)) how += "+تأكيد";
   return {how: how || "no-handler", before, after: button.isConnected ? (button.getAttribute("aria-label") || "") : "gone"};
 }
 """
@@ -13894,7 +13930,7 @@ def group_run_endpoint(access_path: str):
             auth_token=auth_token,
             chat_pin=pin,
             group=group_name,
-            stop_tweet=stop_raw,
+            stop_tweet="",                   # (the task keeps its tweet; the page's box is emptied for the next one)
             actions=requested_actions,
             job_id=job_id,
             job_key=job_key,

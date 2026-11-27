@@ -2518,6 +2518,7 @@ html.loading .ldpill{display:flex}
 .fl-ok{background:var(--prisoft);color:var(--pri)}.fl-bad{background:var(--badsoft);color:var(--bad)}
 .mvd{display:grid;gap:8px;margin:12px 0 4px;font-size:14px}.mvd div{display:flex;gap:12px;align-items:baseline}.mvd dt{color:var(--mut);min-width:72px;flex:none}.mvd dd{margin:0}
 .mc{font:700 16px/1 var(--mono);letter-spacing:1px;background:var(--soft);border:1px solid var(--line);border-radius:8px;padding:4px 8px;direction:ltr;display:inline-block}
+.mk{display:block;font:500 12px/1.5 var(--mono);word-break:break-all;background:var(--soft);border:1px solid var(--line);border-radius:8px;padding:6px 8px;direction:ltr;margin-bottom:4px}
 .bk{display:flex;gap:8px;align-items:center;font-size:14px;margin:10px 0 0;color:var(--pri)}.bk.none{color:var(--warn)}.bk .i{width:18px;height:18px;flex:none}
 .ckl{display:flex;gap:10px;align-items:center;margin:14px 0 0;font-size:14px;cursor:pointer}
 :root{--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a}[data-theme=dark]{--s1:#3987e5;--s2:#d95926;--s3:#199e70}
@@ -3047,6 +3048,8 @@ f.addEventListener('change',sync);sync()})();</script>{% endif %}
 <p class="mut">إذا تعطّل خادمك القديم وشغّلت لوحة التحكّم هنا: اضغط «ربط» وأدخل <b>كلمة مرور لوحة التحكّم نفسها التي كانت على الخادم القديم</b>. يصل للتطبيقات أمر موقَّع بها بأن الخادم انتقل إلى هنا، فتتصل بهذا الخادم خلال دقائق.</p>
 <dl class="mvd">
 <div><dt>رمز الربط</dt><dd>{% if move_code %}<bdi class="mc">{{move_code}}</bdi> <span class="mut">يجب أن يكون نفسه على الخادم القديم والجديد (يأتي من كلمة المرور).</span>{% else %}<span class="mut">يظهر بعد تسجيل الدخول مرة.</span>{% endif %}</dd></div>
+{% if move_public %}<div><dt>مفتاح الربط العام</dt><dd><bdi class="mk" dir="ltr">{{move_public}}</bdi><span class="mut"> يوضع في التطبيق عند بنائه (في السكربت: <bdi dir="ltr">MOVE_KEY</bdi>)، فيتبع التطبيقُ أمر النقل حتى عند تثبيته لأول مرة. عام وآمن، ولا يكشف كلمة المرور.</span>
+<button type="button" class="btn ghost sm" data-copy="{{move_public}}" style="margin-top:6px">{{ic('copy')}}نسخ المفتاح</button></dd></div>{% endif %}
 <div><dt>آخر ربط</dt><dd>{% if move_when %}{{move_when}}{% if move_active %} · <span class="b on">يُعاد إرساله تلقائيًا</span>{% endif %}{% if not move_moved_here %} <span class="mut">(لخادم آخر)</span>{% endif %}{% else %}<span class="mut">لم يُضغط «ربط» على هذا الخادم.</span>{% endif %}</dd></div>
 </dl>
 <button class="btn wide" type="button" data-open="mv">{{ic('link')}}ربط التطبيقات بهذا الخادم</button>
@@ -3419,6 +3422,7 @@ def dashboard():
         unread=sum(1 for m in all_messages if not m.get("read")), messages_total=len(all_messages),
         failures=failures, failures_new=sum(1 for f in all_failures if not f.get("read")), failures_total=len(all_failures),
         flash=session.pop("flash", None), move_code=move_code(SECRETS.get("move_public", "")),
+        move_public=SECRETS.get("move_public", ""),
         move_link=move.get("link") or "", move_when=seen_text({"last_seen": int(move.get("at") or 0)}) if move.get("at") else "",
         move_active=bool(move.get("record")) and int(time.time()) < int(move.get("until") or 0),
         move_moved_here=(move.get("link") or "").split("#")[0].split("/")[-1] == SECRETS["api_secret"],

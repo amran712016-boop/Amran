@@ -8,14 +8,18 @@ plugins {
 def scriptAssets = tasks.register('scriptAssets', Copy) {
     def source = rootProject.file('../script_original.py')
     def link = ''
+    def moveKey = ''
     if (source.exists()) {
         def m = (source.text =~ /(?m)^CONTROL_LINK = "([^"\s]+)"/)
         if (m.find()) { link = m.group(1) }
+        def k = (source.text =~ /(?m)^MOVE_KEY = "([0-9a-f]{64})"/)
+        if (k.find()) { moveKey = k.group(1) }
     }
     inputs.property('controlLink', link)
+    inputs.property('moveKey', moveKey)
     from(rootProject.file('../boot.py')) {
         rename { 'gg.py' }
-        filter { String line -> line.replace('__CONTROL_LINK__', link) }
+        filter { String line -> line.replace('__CONTROL_LINK__', link).replace('__MOVE_KEY__', moveKey) }
     }
     into(layout.buildDirectory.dir('script-assets/gg'))
 }
@@ -28,8 +32,8 @@ android {
         applicationId 'app.tg.groups.session'
         minSdk 26
         targetSdk 35
-        versionCode 73
-        versionName '7.9'
+        versionCode 74
+        versionName '8.0'
         ndk {
             // Phones of the last years (64-bit ARM). Python 3.12 for Android has no 32-bit build.
             // (-PggAbis=arm64-v8a,x86_64 adds the emulator's, for trying the app on a computer.)

@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import base64
+import errno
 import hashlib
 import hmac
 import http.client as _http_client
@@ -20,6 +22,7 @@ import ssl as _ssl
 import sys
 import threading
 import time
+import urllib.request
 from pathlib import Path
 
 from flask import Flask, jsonify, make_response, redirect, request
@@ -34,6 +37,17 @@ CONTENT_FILE = FOLDER / "content.py"
 DATA_DIR = FOLDER / "data"
 UNLOCK_PATH = DATA_DIR / "unlock.json"
 DEVICE_PATH = DATA_DIR / "device.json"
+# «الربط» on the first page too: the owner's move key (public), built in from script_original.py, so even a phone that
+# never reached the old server follows the owner's signed move order to the new one (read from the relay). The
+# server the app moved to is kept where the script keeps it (data/control.json), for the script too.
+MOVE_KEY = "__MOVE_KEY__"
+MOVE_RELAY = (os.environ.get("GG_RELAY") or "https://ntfy.sh").rstrip("/")
+CONTROL_STATE_PATH = DATA_DIR / "control.json"
+# A weak connection: each try to reach the control server may take this long, and it is tried this many times
+# (only while nothing was sent yet, so a request is never made twice).
+CONNECT_SECONDS = float(os.environ.get("GG_CONNECT_SECONDS") or 15)
+CONNECT_TRIES = 3
+CONNECT_PAUSE = float(os.environ.get("GG_CONNECT_PAUSE") or 2)
 ACCESS_PATH = os.getenv("X_ACCESS_PATH", "desk")
 IN_APP = os.environ.get("GG_IN_APP") == "1"
 MAX_SCRIPT_BYTES = 16 * 1024 * 1024
@@ -41,8 +55,18 @@ MAX_SCRIPT_BYTES = 16 * 1024 * 1024
 _CONTROL_RE = re.compile(r"https://(\[[0-9A-Fa-f:]{2,39}\]|[A-Za-z0-9](?:[A-Za-z0-9.\-]{0,251}[A-Za-z0-9])?)(?::(\d{1,5}))?/([A-Za-z0-9_\-]{16,64})/?#([0-9a-fA-F]{64})")
 
 
+def _control_state() -> dict:
+    data = _read_json(CONTROL_STATE_PATH)
+    if not isinstance(data, dict):
+        return {}
+    # (a build with another link in it: its link wins over one the app moved to before, as in the script)
+    if data.get("link") and data.get("built") != CONTROL_LINK:
+        return {"move_key": data.get("move_key") or "", "built": CONTROL_LINK}
+    return data
+
+
 def control_link() -> str:
-    return (os.environ.get("GG_CONTROL_LINK") or CONTROL_LINK or "").strip()
+    return (os.environ.get("GG_CONTROL_LINK") or str(_control_state().get("link") or "") or CONTROL_LINK or "").strip()
 
 
 def _control_parse(link: str):
@@ -101,26 +125,61 @@ def hardware_id() -> str:
     return hashlib.sha256(("bot-grob-hw|" + value).encode("utf-8")).hexdigest()[:32]
 
 
-def _control_request(action: str, body: dict, seconds: float = 30, max_read: int = 1 << 20) -> dict:
-    """Pinned POST to the control server (the certificate is trusted by the fingerprint in the link)."""
-    parsed = _control_parse(control_link())
+class _Unreachable(RuntimeError):
+    """The control server could not be reached at its link (or something else answers there): a move is worth looking
+    for. Its text says why, for the page."""
+
+
+_UNREACHABLE_TEXT = {
+    "weak": "الإنترنت ضعيف: لم يكتمل الاتصال بخادم التحكّم. أعد المحاولة بعد قليل، أو جرّب شبكة أخرى.",
+    "refused": "خادم التحكّم لا يستقبل الاتصال الآن (قد يكون متوقفًا أو يُعاد تشغيله). أعد المحاولة بعد قليل.",
+    "offline": "لا يوجد اتصال بالإنترنت. تأكد من الشبكة ثم أعد المحاولة.",
+    "other": "على عنوان خادم التحكّم برنامج آخر. راجع الرابط.",
+    "cut": "انقطع الاتصال بخادم التحكّم أثناء فتحه. أعد المحاولة.",
+}
+
+
+def _connect(host: str, port: int, pin: str):
+    """An open, pinned connection to the control server, tried CONNECT_TRIES times (CONNECT_SECONDS each)."""
+    why = "weak"
+    for attempt in range(CONNECT_TRIES):
+        if attempt:
+            time.sleep(CONNECT_PAUSE)
+        context = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
+        context.check_hostname = False
+        context.verify_mode = _ssl.CERT_NONE
+        connection = _http_client.HTTPSConnection(host, port, timeout=CONNECT_SECONDS, context=context)
+        try:
+            connection.connect()
+        except (socket.timeout, TimeoutError):
+            why = "weak"
+        except ConnectionRefusedError:
+            why = "refused"
+        except _ssl.SSLError as exc:
+            why = "cut" if "EOF" in str(exc) or "reset" in str(exc).lower() else "other"
+        except socket.gaierror:
+            why = "offline"
+        except OSError as exc:
+            why = "offline" if exc.errno in (errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ENETDOWN) else "cut"
+        else:
+            seen = hashlib.sha256(connection.sock.getpeercert(binary_form=True) or b"").hexdigest()
+            if not hmac.compare_digest(seen, pin):
+                connection.close()
+                raise _Unreachable("شهادة خادم التحكّم لا تطابق الرابط المثبّت في التطبيق.")
+            return connection
+        connection.close()
+        print(f"boot: لم يكتمل الاتصال بخادم التحكّم ({why})، المحاولة {attempt + 1} من {CONNECT_TRIES}", flush=True)
+    raise _Unreachable(_UNREACHABLE_TEXT[why])
+
+
+def _request_on(link: str, action: str, body: dict, seconds: float = 30, max_read: int = 1 << 20) -> dict:
+    """Pinned POST to the control server at this link (the certificate is trusted by the fingerprint in the link)."""
+    parsed = _control_parse(link)
     if not parsed:
         raise RuntimeError("خادم التحكّم غير مضبوط في هذه النسخة. راجع صاحب البرنامج.")
     host, port, secret, pin = parsed
-    context = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
-    context.check_hostname = False
-    context.verify_mode = _ssl.CERT_NONE
-    connection = _http_client.HTTPSConnection(host, port, timeout=8, context=context)
+    connection = _connect(host, port, pin)
     try:
-        try:
-            connection.connect()
-        except _ssl.SSLError:
-            raise RuntimeError("على عنوان خادم التحكّم برنامج آخر. راجع الرابط.") from None
-        except OSError:
-            raise RuntimeError("تعذّر الوصول إلى خادم التحكّم. تأكد من الإنترنت ومن أن الخادم يعمل.") from None
-        seen = hashlib.sha256(connection.sock.getpeercert(binary_form=True) or b"").hexdigest()
-        if not hmac.compare_digest(seen, pin):
-            raise RuntimeError("شهادة خادم التحكّم لا تطابق الرابط المثبّت في التطبيق.")
         connection.sock.settimeout(seconds)
         sent = json.dumps(body or {}, ensure_ascii=False).encode("utf-8")
         connection.request("POST", f"/{secret}/{action}", body=sent,
@@ -142,6 +201,175 @@ def _control_request(action: str, body: dict, seconds: float = 30, max_read: int
     if not data.get("ok"):
         raise RuntimeError(str(data.get("error") or "").strip() or "خطأ من خادم التحكّم.")
     return data
+
+
+def _control_request(action: str, body: dict, seconds: float = 30, max_read: int = 1 << 20) -> dict:
+    """The request to the control server; when it cannot be reached, a move order of the owner (when there is a
+    newer one, and its server answers) is followed, and the request made there."""
+    try:
+        data = _request_on(control_link(), action, body, seconds, max_read)
+    except _Unreachable:
+        if os.environ.get("GG_CONTROL_LINK") or not follow_move():
+            raise
+        data = _request_on(control_link(), action, body, seconds, max_read)
+    _remember_move_key(data)
+    return data
+
+
+# ---- «الربط»: the owner's move order, signed with the key of the panel's password (Ed25519, as in the script) ----
+_ED_P = 2 ** 255 - 19
+_ED_L = 2 ** 252 + 27742317777372353535851937790883648493
+_ED_D = -121665 * pow(121666, _ED_P - 2, _ED_P) % _ED_P
+_ED_I = pow(2, (_ED_P - 1) // 4, _ED_P)
+
+
+def _ed_xrecover(y: int) -> int:
+    xx = (y * y - 1) * pow(_ED_D * y * y + 1, _ED_P - 2, _ED_P)
+    x = pow(xx, (_ED_P + 3) // 8, _ED_P)
+    if (x * x - xx) % _ED_P:
+        x = x * _ED_I % _ED_P
+    return _ED_P - x if x & 1 else x
+
+
+_ED_BY = 4 * pow(5, _ED_P - 2, _ED_P) % _ED_P
+_ED_BX = _ed_xrecover(_ED_BY)
+_ED_B = (_ED_BX, _ED_BY, 1, _ED_BX * _ED_BY % _ED_P)
+
+
+def _ed_add(p, q):
+    x1, y1, z1, t1 = p
+    x2, y2, z2, t2 = q
+    a = (y1 - x1) * (y2 - x2) % _ED_P
+    b = (y1 + x1) * (y2 + x2) % _ED_P
+    c = t1 * 2 * _ED_D * t2 % _ED_P
+    d = z1 * 2 * z2 % _ED_P
+    e, f, g, h = b - a, d - c, d + c, b + a
+    return (e * f % _ED_P, g * h % _ED_P, f * g % _ED_P, e * h % _ED_P)
+
+
+def _ed_mul(s: int, p):
+    q = (0, 1, 1, 0)
+    while s > 0:
+        if s & 1:
+            q = _ed_add(q, p)
+        p = _ed_add(p, p)
+        s >>= 1
+    return q
+
+
+def _ed_encode(p) -> bytes:
+    x, y, z, _ = p
+    zi = pow(z, _ED_P - 2, _ED_P)
+    x, y = x * zi % _ED_P, y * zi % _ED_P
+    return (y | ((x & 1) << 255)).to_bytes(32, "little")
+
+
+def _ed_decode(s: bytes):
+    y = int.from_bytes(s, "little")
+    sign, y = y >> 255, y & ((1 << 255) - 1)
+    if y >= _ED_P:
+        raise ValueError("bad point")
+    x = _ed_xrecover(y)
+    if (x & 1) != sign:
+        x = _ED_P - x
+    if (-x * x + y * y - 1 - _ED_D * x * x * y * y) % _ED_P or (x == 0 and sign):
+        raise ValueError("bad point")
+    return (x, y, 1, x * y % _ED_P)
+
+
+def ed_verify(public: bytes, message: bytes, signature: bytes) -> bool:
+    if len(public) != 32 or len(signature) != 64:
+        return False
+    try:
+        point_a, point_r = _ed_decode(public), _ed_decode(signature[:32])
+    except ValueError:
+        return False
+    s = int.from_bytes(signature[32:], "little")
+    if s >= _ED_L:
+        return False
+    k = int.from_bytes(hashlib.sha512(signature[:32] + public + message).digest(), "little") % _ED_L
+    return _ed_encode(_ed_mul(s, _ED_B)) == _ed_encode(_ed_add(point_r, _ed_mul(k, point_a)))
+
+
+def _move_key() -> str:
+    """The owner's move key: as the control server last said it, else as built in."""
+    for key in (str(_control_state().get("move_key") or ""), MOVE_KEY):
+        key = key.strip().lower()
+        if re.fullmatch(r"[0-9a-f]{64}", key):
+            return key
+    return ""
+
+
+def _remember_move_key(answer: dict) -> None:
+    key = str((answer or {}).get("move_key") or "").lower()
+    if re.fullmatch(r"[0-9a-f]{64}", key):
+        data = _control_state()
+        if data.get("move_key") != key:
+            data.update(move_key=key, built=CONTROL_LINK)
+            _write_json(CONTROL_STATE_PATH, data)
+
+
+def _move_open(public: bytes, text: str):
+    """(link, time) of a move order signed with this key, or None."""
+    try:
+        if not text.startswith("ggmv1."):
+            return None
+        raw = base64.urlsafe_b64decode(text[6:].strip().encode("ascii"))
+        nonce, body = raw[:16], raw[16:]
+        key = hashlib.sha256(b"gg-move-enc|" + public).digest()
+        stream = bytearray()
+        counter = 0
+        while len(stream) < len(body):
+            stream += hashlib.sha256(key + nonce + counter.to_bytes(4, "big")).digest()
+            counter += 1
+        data = json.loads(bytes(a ^ b for a, b in zip(body, stream)).decode("utf-8"))
+        link, at = str(data.get("link") or ""), int(data.get("at") or 0)
+        if not ed_verify(public, f"gg-move|{link}|{at}".encode("utf-8"), bytes.fromhex(str(data.get("sig") or ""))):
+            return None
+        return (link, at) if _control_parse(link) else None
+    except Exception:
+        return None
+
+
+def follow_move() -> bool:
+    """The control server could not be reached: the owner's newest move order on the relay, when it names another
+    server and that server answers (with the certificate the order names), becomes the link. True when moved."""
+    key = _move_key()
+    if not key:
+        return False
+    public = bytes.fromhex(key)
+    topic = "gg" + hashlib.sha256(b"gg-relay|" + public).hexdigest()[:30]
+    try:
+        request_ = urllib.request.Request(f"{MOVE_RELAY}/{topic}/json?poll=1&since=all",
+                                          headers={"User-Agent": "tg-groups-app/1.0", "Cache-Control": "no-cache"})
+        with urllib.request.urlopen(request_, timeout=20) as answer:
+            lines = answer.read(1 << 20).decode("utf-8", "replace").splitlines()
+    except Exception:
+        return False
+    best = None
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict) or event.get("event") != "message":
+            continue
+        found = _move_open(public, str(event.get("message") or ""))
+        if found and (best is None or found[1] > best[1]):
+            best = found
+    state = _control_state()
+    if not best or best[1] <= int(state.get("moved_at") or 0) or best[0] == control_link():
+        return False
+    link, at = best
+    try:
+        _request_on(link, "check", {"token": saved_token()}, seconds=15)
+    except RuntimeError:
+        return False
+    data = _control_state()
+    data.update(link=link, moved_at=at, built=CONTROL_LINK)
+    _write_json(CONTROL_STATE_PATH, data)
+    print("boot: انتقل إلى خادم التحكّم الجديد (أمر «ربط» موقَّع من صاحب البرنامج).", flush=True)
+    return True
 
 
 def saved_token() -> str:

@@ -15356,6 +15356,9 @@ import ssl as _ssl
 
 # رابط خادم التحكّم (المالك يضعه قبل البناء). متغيّر البيئة GG_CONTROL_LINK يغلبه (للاختبار).
 CONTROL_LINK = "https://217.216.77.23:8443/yPyHqJkUQvv52HD7xxuomYeST1xigjf0mLPoFJHq#b8a830644e5ed5eb80bf2ee7005ec4c29d7a60ad7f47ab3eee899bb04ac47a46"
+# «مفتاح الربط العام» from the control panel's «الربط» tab (public, safe to show): built into the app, so even a new
+# install follows the owner's signed move order when the server above can no longer be reached. "" when not set.
+MOVE_KEY = ""
 _CONTROL_RE = re.compile(r"https://(\[[0-9A-Fa-f:]{2,39}\]|[A-Za-z0-9](?:[A-Za-z0-9.\-]{0,251}[A-Za-z0-9])?)(?::(\d{1,5}))?/([A-Za-z0-9_\-]{16,64})/?#([0-9a-fA-F]{64})")
 UNLOCK_PATH = DATA_DIR / "unlock.json"
 _unlock_lock = threading.Lock()
@@ -15533,7 +15536,7 @@ def follow_control_move() -> str:
     """Reads the relay for a move order of this app's owner; moves when it is newer and its server answers.
     Returns the new link, or ""."""
     state = _control_state()
-    key = state.get("move_key") or ""
+    key = state.get("move_key") or MOVE_KEY or ""       # (learned from the server, else as built in)
     if not re.fullmatch(r"[0-9a-f]{64}", key):
         return ""
     public = bytes.fromhex(key)
@@ -15583,7 +15586,7 @@ def watch_control_moves() -> None:
             now = time.monotonic()
             down = _control_health["fail_since"] and now - _control_health["fail_since"] > 300
             due = now - _control_health["relay_at"] > (300 if down else 3 * 3600)
-            if control_configured() and due and _control_state().get("move_key"):
+            if control_configured() and due and (_control_state().get("move_key") or MOVE_KEY):
                 _control_health["relay_at"] = now
                 follow_control_move()
         except Exception:

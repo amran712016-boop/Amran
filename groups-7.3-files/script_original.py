@@ -1902,7 +1902,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
       <ol class="bn-steps">
         <li>حوّل المبلغ بعملة <b>USDT</b> إلى هذا المعرّف من Binance ← Pay ← إرسال.</li>
         <li>اكتب المبلغ ورقم العملية (Order ID) من تفاصيل التحويل.</li>
-        <li>اضغط «تحقق وشحن»<span id="topup-auto"> فيُشحن رصيدك فور التأكد من وصول المبلغ</span>.</li>
+        <li id="topup-step3">اضغط «تحقق وشحن» فيُشحن رصيدك فور التأكد من وصول المبلغ.</li>
       </ol>
       <p id="topup-note" class="topup-note" hidden></p>
     </div>
@@ -2934,7 +2934,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
     const topupNone = document.getElementById("topup-none");
     const topupBid = document.getElementById("topup-bid");
     const topupNote = document.getElementById("topup-note");
-    const topupAuto = document.getElementById("topup-auto");
+    const topupStep3 = document.getElementById("topup-step3");
     const topupBalance = document.getElementById("topup-balance");
     const topupAmount = document.getElementById("topup-amount");
     const topupRef = document.getElementById("topup-ref");
@@ -2956,7 +2956,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
       topupBid.textContent = pay.binance_id || "";
       topupNote.textContent = pay.note || "";
       topupNote.hidden = !pay.note;
-      topupAuto.hidden = !pay.auto;
+      topupStep3.textContent = pay.auto ? "اضغط «تحقق وشحن» فيُشحن رصيدك فور التأكد من وصول المبلغ."
+        : "اضغط «إرسال طلب الشحن»، فيتحقق صاحب البرنامج من وصول المبلغ ثم يشحن رصيدك.";
       topupSend.textContent = pay.auto ? "تحقق وشحن" : "إرسال طلب الشحن";
       topupSend.disabled = topupBusy || !pay.binance_id;
       topupBalance.textContent = usageData && usageData.pay === "prepaid" ? "رصيدك الآن " + money(usageData.balance) + "." : "";

@@ -594,24 +594,40 @@ TOPUP_LOOKBACK_DAYS = 30
 TOPUP_TRIES_PER_HOUR = 12
 TOPUP_MAX = 10000.0
 _topup_tries: dict[str, list] = {}
+BINANCE_BLOCKED_SECONDS = 86400                 # Binance refused this server's location: by hand for a day, then tried again
 
 
 def load_binance() -> dict:
     data = read_private_json(BINANCE_PATH) or {}
     return {"binance_id": re.sub(r"\D", "", str(data.get("binance_id") or ""))[:20],
             "note": str(data.get("note") or "").strip()[:500],
-            "key": str(data.get("key") or "").strip()[:128], "secret": str(data.get("secret") or "").strip()[:128]}
+            "key": str(data.get("key") or "").strip()[:128], "secret": str(data.get("secret") or "").strip()[:128],
+            "blocked": int(data.get("blocked") or 0)}
+
+
+def binance_blocked(data: dict) -> bool:
+    """Binance refused this server's location lately (its «restricted location»): transfers are checked by hand."""
+    return bool(data.get("blocked")) and time.time() - int(data["blocked"]) < BINANCE_BLOCKED_SECONDS
+
+
+def binance_mark_blocked(blocked: bool) -> None:
+    with LOCK:
+        data = load_binance()
+        data["blocked"] = int(time.time()) if blocked else 0
+        write_private_json(BINANCE_PATH, {"version": 1, **data})
 
 
 def public_payment() -> dict:
     """What the app shows in «شحن رصيد» (never the key)."""
     data = load_binance()
-    return {"binance_id": data["binance_id"], "note": data["note"], "auto": bool(data["key"] and data["secret"]),
-            "coins": list(TOPUP_COINS)}
+    return {"binance_id": data["binance_id"], "note": data["note"],
+            "auto": bool(data["key"] and data["secret"]) and not binance_blocked(data), "coins": list(TOPUP_COINS)}
 
 
 class BinanceError(RuntimeError):
-    pass
+    def __init__(self, message: str, restricted: bool = False):
+        super().__init__(message)
+        self.restricted = restricted            # (Binance refuses this server's location: HTTP 451)
 
 
 def binance_history(key: str, secret: str) -> list:
@@ -630,7 +646,9 @@ def binance_history(key: str, secret: str) -> list:
             said = json.loads(exc.read().decode("utf-8") or "{}")
         except (ValueError, OSError):
             said = {}
-        raise BinanceError(f"Binance: {said.get('msg') or exc.reason} ({said.get('code', exc.code)})") from exc
+        message = str(said.get("msg") or exc.reason or "")
+        raise BinanceError(f"Binance: {message} ({said.get('code', exc.code)})",
+                           restricted=exc.code == 451 or "restricted location" in message.lower()) from exc
     except (urllib.error.URLError, OSError, ValueError) as exc:
         raise BinanceError(f"تعذّر الوصول إلى Binance ({type(exc).__name__}).") from exc
     if str(data.get("code")) not in ("000000", "0") and data.get("success") is not True:
@@ -2696,19 +2714,20 @@ main{padding-bottom:56px}
 <label class="prf prw"><span>رصيد الحساب الجديد</span><input class="fs" name="welcome" dir="ltr" inputmode="decimal" autocomplete="off" value="{{ '%g'|format(welcome) }}"></label>
 <p class="mut prh">يُضاف تلقائيًا لكل من ينشئ حسابًا جديدًا في التطبيق، مرة واحدة لكل جوال. و0 يوقفه.</p>
 <button class="btn wide" style="margin-top:14px">حفظ الأسعار</button></form></details>
-<details class="card prc" id="pay-card"><summary><span class="prc-h">{{ic('key')}}<b>الدفع عبر Binance</b></span><span class="prc-s"><span>{{ ('المعرّف ' ~ pay.binance_id) if pay.binance_id else 'لم يُحدَّد المعرّف' }}</span><span>{{ 'تحقق تلقائي' if pay.auto else 'تحقق يدوي' }}</span></span>{{ic('chev')}}</summary>
+<details class="card prc" id="pay-card"><summary><span class="prc-h">{{ic('key')}}<b>الدفع عبر Binance</b></span><span class="prc-s"><span>{{ ('المعرّف ' ~ pay.binance_id) if pay.binance_id else 'لم يُحدَّد المعرّف' }}</span><span>{{ 'تحقق تلقائي' if pay.auto else ('تحقق يدوي: Binance يرفض موقع الخادم' if pay.blocked else 'تحقق يدوي') }}</span></span>{{ic('chev')}}</summary>
+{% if pay.blocked %}<div class="note fl-bad" style="margin:10px 0 0">{{ic('alert')}}<p>Binance يرفض الطلبات من موقع هذا الخادم (عنوان IP في دولة لا تخدمها Binance)، فطلبات الشحن تصلك في «رسائل العملاء» لتتحقق منها بنفسك. تُعاد التجربة تلقائيًا بعد يوم، أو اضغط «اختبار الاتصال».</p></div>{% endif %}
 <form method="post" action="/{{admin}}/payment" data-toast="تم الحفظ"><p class="mut">يظهر معرّفك للمستخدم في «شحن رصيد»: يحوّل إليه عبر Binance Pay بعملة USDT، ثم يكتب المبلغ ورقم العملية (Order ID). مع مفتاح Binance API يتحقق الخادم من وصول التحويل إلى حسابك (وارد، بعملة دولارية، بالمبلغ نفسه، ولم يُستخدم من قبل) ويشحن رصيده فورًا. بدون المفتاح يصلك طلبه في «رسائل العملاء» لتتحقق بنفسك.</p>
 <p class="l">معرّف Binance Pay (Binance ID)</p>
 <input class="fs" name="binance_id" dir="ltr" inputmode="numeric" autocomplete="off" value="{{ pay.binance_id }}" placeholder="123456789">
 <p class="l">ملاحظة للمستخدم <small>(اختياري)</small></p>
 <textarea class="ta" name="note" maxlength="500" rows="3" placeholder="مثال: أقل شحن 5$.">{{ pay.note }}</textarea>
 <p class="l">مفتاح Binance API <small>(للتحقق التلقائي، بصلاحية القراءة فقط)</small></p>
-<input class="fs" name="api_key" dir="ltr" autocomplete="off" spellcheck="false" placeholder="{{ 'محفوظ: اتركه فارغًا ليبقى' if pay.auto else 'API Key' }}">
+<input class="fs" name="api_key" dir="ltr" autocomplete="off" spellcheck="false" placeholder="{{ 'محفوظ: اتركه فارغًا ليبقى' if pay.has_key else 'API Key' }}">
 <p class="l">السر (Secret Key)</p>
-<input class="fs" name="api_secret" type="password" dir="ltr" autocomplete="new-password" spellcheck="false" placeholder="{{ 'محفوظ: اتركه فارغًا ليبقى' if pay.auto else 'Secret Key' }}">
+<input class="fs" name="api_secret" type="password" dir="ltr" autocomplete="new-password" spellcheck="false" placeholder="{{ 'محفوظ: اتركه فارغًا ليبقى' if pay.has_key else 'Secret Key' }}">
 <p class="mut" style="margin-top:8px">أنشئ المفتاح من Binance ← API Management بصلاحية «Enable Reading» فقط، بلا تداول ولا سحب، ويُفضَّل تقييده بعنوان IP هذا الخادم. يبقى على هذا الخادم ولا يظهر في اللوحة.</p>
 <button class="btn wide" style="margin-top:14px">حفظ</button></form>
-{% if pay.auto %}<div class="row" style="display:flex;gap:8px;margin-top:10px"><form method="post" action="/{{admin}}/binance/test" style="flex:1"><button class="btn ghost wide">اختبار الاتصال</button></form>
+{% if pay.has_key %}<div class="row" style="display:flex;gap:8px;margin-top:10px"><form method="post" action="/{{admin}}/binance/test" style="flex:1"><button class="btn ghost wide">اختبار الاتصال</button></form>
 <form method="post" action="/{{admin}}/binance/forget" style="flex:1" data-title="حذف مفتاح Binance؟" data-confirm="يتوقف التحقق التلقائي، وتصلك طلبات الشحن في «رسائل العملاء»." data-yes="حذف" data-kind="danger" data-toast="حُذف المفتاح"><button class="btn ghost wide">حذف المفتاح</button></form></div>{% endif %}</details>
 <details class="card prc"><summary><span class="prc-h">{{ic('sort')}}<b>سرعة التنفيذ</b></span><span class="prc-s"><span>كتابة التعليق <bdi dir="ltr">{{ '%g'|format(pace.typing[0]) }}–{{ '%g'|format(pace.typing[1]) }}</bdi> ث</span><span>بين الأزرار <bdi dir="ltr">{{ '%g'|format(pace.gap[0]) }}–{{ '%g'|format(pace.gap[1]) }}</bdi> ث</span><span>بعد التحميل <bdi dir="ltr">{{ '%g'|format(pace.settle[0]) }}–{{ '%g'|format(pace.settle[1]) }}</bdi> ث</span>{% if pace.in_page_on %}<span>فتح سريع <bdi dir="ltr">{{ pace.in_page[0] }}–{{ pace.in_page[1] }}</bdi> تغريدات</span>{% else %}<span>فتح سريع: متوقف</span>{% endif %}</span>{{ic('chev')}}</summary>
 <form method="post" action="/{{admin}}/pace" data-toast="تم حفظ سرعة التنفيذ"><p class="mut">بالثواني، ويختار التطبيق كل مرة رقمًا عشوائيًا بين «من» و«إلى». تُطبَّق على كل المستخدمين من مهمتهم التالية.</p>
@@ -3387,7 +3406,7 @@ def dashboard():
         owner_link=owner_app_link(request.host), in_owner_app=OWNER_APP_MARK in (request.headers.get("User-Agent") or ""),
         this_host=request.host, relay=MOVE_RELAY.split("//")[-1],
         prices=load_prices(), welcome=load_welcome(), pace=load_pace(), prompt=load_prompt(), one_device=one_device(),
-        pay=public_payment(),
+        pay=dict(public_payment(), has_key=bool(load_binance()["key"]), blocked=binance_blocked(load_binance())),
         app_slots=app_panel(codes), app_dl_link=app_download_link(), app_package=APP_PACKAGE,
         script_live=script_live, script_staged=script_staged, script_next=next_version(highest_published_version()),
         script_floor=highest_published_version(), script_pilot=script_pilot, script_pilot_ids=pilot_ids,
@@ -3815,8 +3834,14 @@ def binance_test():
     try:
         rows = binance_history(data["key"], data["secret"])
     except BinanceError as exc:
-        flash("bad", f"لم ينجح الاتصال: {exc}")
+        if exc.restricted:
+            binance_mark_blocked(True)
+            flash("bad", "Binance يرفض الطلبات من موقع هذا الخادم (عنوان IP في دولة لا تخدمها Binance حسب شروط الأهلية)، "
+                         "فالتحقق التلقائي لا يعمل من هنا. المفتاح سليم. طلبات الشحن تصلك الآن في «رسائل العملاء» لتتحقق بنفسك.")
+        else:
+            flash("bad", f"لم ينجح الاتصال: {exc}")
         return redirect(f"/{ADMIN}")
+    binance_mark_blocked(False)
     received = [row for row in rows if topup_amount(row.get("amount")) > 0 and float(row.get("amount") or 0) > 0]
     last = "، ".join(f"{row.get('transactionId')} ({row.get('amount')} {row.get('currency')})" for row in received[:3])
     flash("ok", f"الاتصال يعمل: {len(rows)} عملية في آخر {TOPUP_LOOKBACK_DAYS} يومًا، منها {len(received)} واردة."
@@ -4889,7 +4914,7 @@ def api_topup():
     if len(_tx_key(typed)) < 6:
         return api_err("اكتب رقم العملية (Order ID) من تفاصيل التحويل في Binance.")
     settings = load_binance()
-    if not (settings["key"] and settings["secret"]):
+    if not (settings["key"] and settings["secret"]) or binance_blocked(settings):
         return api_ok(manual=True)
     now = time.time()
     with LOCK:
@@ -4902,8 +4927,11 @@ def api_topup():
     try:
         rows = binance_history(settings["key"], settings["secret"])
     except BinanceError as exc:
-        print(f"شحن رصيد: تعذّر التحقق من Binance: {exc}", flush=True)
-        return api_err("تعذّر التحقق من Binance الآن. أعد المحاولة بعد قليل.")
+        # (not lost: the request goes to the owner, who checks it by hand)
+        print(f"شحن رصيد: تعذّر التحقق من Binance، يُرسل للمالك: {exc}", flush=True)
+        if exc.restricted:
+            binance_mark_blocked(True)
+        return api_ok(manual=True)
     found = next((tx for tx in rows if tx_matches(tx.get("transactionId"), typed)), None)
     try:
         came = float((found or {}).get("amount") or 0)          # (positive: received; negative: the owner sent it)

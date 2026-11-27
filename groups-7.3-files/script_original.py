@@ -1584,7 +1584,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
         <span class="mark" aria-hidden="true"><i class="i i-zap"></i></span>
         <div class="brand-text">
           <p class="eyebrow">من قروب الدردشة <span id="net-state" class="net" data-state="ok" role="status" aria-live="polite"><i aria-hidden="true"></i><span id="net-text">متصل</span></span></p>
-          <h1>تنفيذ على تغريدات القروب</h1>
+          <h1>{% if app_user %}<bdi>{{ app_user }}</bdi>{% else %}تنفيذ على تغريدات القروب{% endif %}</h1>
         </div>
       </div>
       <ol class="counts" aria-label="الإجراءات الناجحة">
@@ -2859,9 +2859,9 @@ EMBEDDED_PAGE = r'''<!doctype html>
       ? "رصيدك " + money(usageData.balance) + ". " + priceText + " بلا رصيد لا تبدأ مهمة جديدة، والمهمة التي بدأت تكمل إلى آخرها ولو نفد الرصيد في نصها"
         + (Number(usageData.balance || 0) < -0.004 ? " (ما زاد عليه يُخصم من الشحنة القادمة)" : "") + ". للشحن راسل صاحب البرنامج."
       : usageData.source === "control"
-      ? (usageData.stale ? "آخر قراءة من لوحة التحكم (الخادم غير متاح الآن). " : "من لوحة التحكم: تُحسب لكل حساب، وتبقى حتى لو أُعيد تثبيت التطبيق. ")
-        + priceText
+      ? (usageData.stale ? "آخر قراءة من لوحة التحكم (الخادم غير متاح الآن)." : "")
       : "محسوبة في هذه النسخة: " + money(price) + " لكل تعليق.";
+    usageNote.hidden = !usageNote.textContent;
   }
   async function loadCommentsUsage(fresh) {
     try {
@@ -11891,6 +11891,7 @@ def login_page(access_path: str):
         session["csrf_token"] = csrf_token
     response = make_response(render_template_string(
         PAGE, csrf_token=csrf_token, api_root="/" + ACCESS_PATH, app_version=shown_version(), owner_copy=is_owner_copy(), max_links=MAX_TWEET_LINKS,
+        app_user=app_user_name(),
         claude_here=key_typed_here(), claude_default=CLAUDE_DEFAULT_MODEL, control_on=control_configured(),
         content_ready=content_ready.is_set() or (CONTENT_FILE.is_file() if is_owner_copy() else bool(CONTENT_EMBEDDED)),
         tweets_in_content=content_shows_tweets, in_app=IN_APP, max_accounts=MAX_ACCOUNTS,
@@ -15542,6 +15543,12 @@ def _control_request_once(action: str, body: dict | None, seconds: float, link: 
 def _load_unlock() -> tuple[str, str]:
     data = read_private_json(UNLOCK_PATH) or {}
     return str(data.get("token") or ""), str(data.get("code") or "")
+
+
+def app_user_name() -> str:
+    """The name this app signed in with (login or new account), shown at the top of the page; "" with a code."""
+    data = read_private_json(UNLOCK_PATH) or {}
+    return re.sub(r"\s+", " ", str(data.get("user") or "")).strip()[:40]
 
 
 def _current_token() -> str:

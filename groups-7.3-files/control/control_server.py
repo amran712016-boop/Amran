@@ -674,6 +674,18 @@ def load_topups() -> dict:
     return {"used": data.get("used") if isinstance(data.get("used"), dict) else {}}
 
 
+def topup_request_of(item: dict | None) -> dict | None:
+    """A «طلب شحن رصيد» not handled yet: the amount and the Order ID the user wrote (for «تأكيد وشحن»)."""
+    if not isinstance(item, dict) or item.get("kind") != "topup" or item.get("handled"):
+        return None
+    text = str(item.get("text") or "")
+    amount = re.search(r"المبلغ:\s*\$?\s*([\d.]+)", text)
+    order = re.search(r"رقم العملية:\s*(\S+)", text)
+    if not amount:
+        return None
+    return {"amount": topup_amount(amount.group(1)), "order_id": order.group(1)[:80] if order else ""}
+
+
 def topup_amount(raw) -> float:
     text = str(raw or "").strip().translate(str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹٫،", "01234567890123456789.."))
     try:
@@ -1254,7 +1266,10 @@ def support_rows(codes: list) -> list:
                else f"قبل {delta // 3600} س" if delta < 86400 else f"قبل {delta // 86400} يوم")
         replies = [dict(r, when=time.strftime("%Y-%m-%d %H:%M", time.localtime(int(r.get("at") or 0))))
                    for r in item.get("replies") or [] if isinstance(r, dict)]
+        handled = item.get("handled") if isinstance(item.get("handled"), dict) else None
         rows.append(dict(item, replies=replies, who=code.get("label") or item.get("label") or "مستخدم محذوف",
+                         topup=topup_request_of(item), handled=handled,
+                         handled_when=time.strftime("%Y-%m-%d %H:%M", time.localtime(int(handled.get("at") or 0))) if handled else "",
                          code=code.get("code") or "", exists=bool(code), ago=ago,
                          when=time.strftime("%Y-%m-%d %H:%M", time.localtime(int(item.get("at") or 0)))))
     return rows
@@ -2548,6 +2563,9 @@ input[type=file].fs{height:auto;padding:10px 12px;width:100%;margin-bottom:4px}
 .mh p{font-size:12.5px;color:var(--mut)}
 .nw{display:inline-block;vertical-align:middle;border-radius:99px;padding:0 9px;font-size:11.5px;font-weight:600;background:var(--prisoft);color:var(--pri)}
 .nw.tp{background:#fef0c7;color:#93370d}
+.tpc{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:10px;padding:10px;border-radius:12px;background:#fffaeb;border:1px solid #fedf89}
+.tpl{display:flex;align-items:center;gap:6px;font-weight:600}.tpa{width:96px;height:36px}
+.tph{margin-top:8px;font-weight:600;color:#067647}
 .mt{white-space:pre-wrap;overflow-wrap:anywhere;font-size:15px;line-height:1.75}
 .mf{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px}
 .mi{display:block;border-radius:12px;overflow:hidden;border:1px solid var(--line);background:var(--soft);aspect-ratio:3/4}
@@ -2877,6 +2895,8 @@ if(j.ok){show(j.comment,false,'\u2066'+j.chars+' / '+j.limit+'\u2069 حرف',j.t
 <div class="mh"><div class="av" style="--h:{{hue}}" aria-hidden="true">{{ (m.who or '؟')[:1] }}</div>
 <div class="nm"><h3>{{m.who}}{% if m.kind == 'topup' %} <span class="nw tp">طلب شحن رصيد</span>{% endif %}{% if not m.read %} <span class="nw">جديدة</span>{% endif %}</h3><p>{% if m.code %}<bdi>{{m.code}}</bdi> · {% endif %}{{m.ago}} · <span dir="ltr">{{m.when}}</span></p></div></div>
 {% if m.text %}<p class="mt">{{m.text}}</p>{% endif %}
+{% if m.topup %}<form method="post" action="/{{admin}}/topup/confirm" class="tpc" data-title="تأكيد الشحن؟" data-confirm="هل تأكدت في تطبيق Binance من وصول التحويل؟ يُضاف المبلغ إلى رصيد {{m.who}} ويصله إشعار." data-yes="تأكيد وشحن" data-toast="تم الشحن"><input type="hidden" name="id" value="{{m.id}}"><label class="tpl">المبلغ $<input class="fs tpa" name="amount" dir="ltr" inputmode="decimal" autocomplete="off" value="{{ '%g'|format(m.topup.amount) }}"></label><button class="btn sm">{{ic('check')}}تأكيد وشحن</button></form>
+{% elif m.handled %}<p class="tph">✓ شُحن {{ usd(m.handled.amount) }}{{ ' تلقائيًا' if m.handled.auto else '' }} · <span dir="ltr">{{m.handled_when}}</span></p>{% endif %}
 {% if m.files %}<div class="mf">{% for f in m.files %}{% set url = '/' ~ admin ~ '/support/' ~ m.id ~ '/' ~ loop.index0 %}{% if (f.type or '').startswith('image/') %}<a class="mi" href="{{url}}" target="_blank" rel="noopener" aria-label="فتح الصورة {{loop.index}}"><img src="{{url}}" alt="صورة {{loop.index}} من المستخدم" loading="lazy"></a>{% else %}<video class="mv" src="{{url}}" controls preload="none" playsinline aria-label="فيديو {{loop.index}} من المستخدم"></video>{% endif %}{% endfor %}</div>{% endif %}
 {% if m.meta and (m.meta.version or m.meta.device or m.meta.has_log or m.meta.log) %}<details class="acc mm{{ ' lazy' if m.meta.has_log else '' }}"{% if m.meta.has_log %} data-src="/{{admin}}/support/{{m.id}}/log"{% endif %}><summary class="axs"><span>معلومات الجهاز والسجل</span>{{ic('chev')}}</summary>
 <dl class="md">{% if m.meta.version %}<div><dt>الإصدار</dt><dd dir="ltr">{{m.meta.version}}</dd></div>{% endif %}{% if m.meta.device %}<div><dt>الجهاز</dt><dd dir="ltr">{{m.meta.device}}</dd></div>{% endif %}{% if m.meta.accounts %}<div><dt>حسابات X</dt><dd dir="ltr">{{m.meta.accounts}}</dd></div>{% endif %}</dl>
@@ -4144,6 +4164,58 @@ def support_delete():
     return redirect(f"/{ADMIN}")
 
 
+@app.post(f"/{ADMIN}/topup/confirm")
+def topup_confirm():
+    """«تأكيد وشحن» under a «طلب شحن رصيد»: the owner saw the transfer arrive in Binance; the user's balance is topped
+    up by the amount (as written there, or as the owner corrected it), its Order ID kept as used (it tops up once,
+    by hand or automatically), and the user told in the app."""
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    try:
+        message_id = int(request.form.get("id") or 0)
+    except ValueError:
+        return redirect(f"/{ADMIN}")
+    amount = topup_amount(request.form.get("amount"))
+    if not 0 < amount <= TOPUP_MAX:
+        flash("bad", "اكتب المبلغ بالدولار، مثل 10.")
+        return redirect(f"/{ADMIN}")
+    now = int(time.time())
+    with LOCK:
+        data = load_support()
+        item = next((row for row in data["items"] if row.get("id") == message_id), None)
+        asked = topup_request_of(item)
+        if not asked:
+            flash("bad", "الطلب غير موجود، أو شُحن من قبل.")
+            return redirect(f"/{ADMIN}")
+        order = asked["order_id"]
+        topups = load_topups()
+        if order and any(tx_matches(used, order) for used in topups["used"]):
+            flash("bad", f"رقم العملية {order} استُخدم من قبل لشحن رصيد.")
+            return redirect(f"/{ADMIN}")
+        codes = load_codes()
+        target = next((row for row in codes if row.get("id") == item.get("code_id")), None)
+        if target is None:
+            flash("bad", "المستخدم غير موجود.")
+            return redirect(f"/{ADMIN}")
+        target["balance"] = round(balance_of(target) + amount, 4)
+        ledger = target.get("ledger") if isinstance(target.get("ledger"), list) else []
+        ledger.insert(0, {"at": now, "amount": amount, "note": f"Binance Pay · {order[-8:]}" if order else "شحن رصيد",
+                          "after": round(target["balance"], 2)})
+        target["ledger"] = ledger[:LEDGER_KEEP]
+        save_codes(codes)
+        if order:
+            topups["used"][order] = {"code_id": target["id"], "amount": amount, "at": now, "by_hand": True}
+            write_private_json(TOPUPS_PATH, {"version": 1, **topups})
+        item["handled"] = {"at": now, "amount": amount}
+        item["read"] = True
+        item.setdefault("replies", []).append({"text": f"تم شحن رصيدك بـ {money(amount)}.", "at": now})
+        save_support(data)
+        name, balance, code_id = target.get("label") or target.get("code") or "", target["balance"], target["id"]
+    add_notice(f"تم شحن رصيدك بـ {money(amount)}. رصيدك الآن {money(balance)}.", "info", code_id)
+    flash("ok", f"شُحن {money(amount)} إلى رصيد {name}. الرصيد الآن {money(balance)}.")
+    return redirect(f"/{ADMIN}")
+
+
 @app.post(f"/{ADMIN}/support/reply")
 def support_reply():
     """The owner's answer: it goes to that user's app as a notice (its notifications list opens by itself)."""
@@ -4966,7 +5038,8 @@ def api_topup():
         support["seq"] += 1
         support["items"].insert(0, {"id": support["seq"], "code_id": row["id"], "label": row.get("label") or "",
                                     "text": f"شُحن رصيده تلقائيًا عبر Binance Pay: {money(received)} ({coin}).\nرقم العملية: {tx_id}",
-                                    "files": [], "meta": {}, "at": int(now), "read": False, "replies": [], "kind": "topup"})
+                                    "files": [], "meta": {}, "at": int(now), "read": False, "replies": [], "kind": "topup",
+                                    "handled": {"at": int(now), "amount": received, "auto": True}})
         del support["items"][SUPPORT_MAX:]
         save_support(support)
         balance, pay = target["balance"], pay_of(target)

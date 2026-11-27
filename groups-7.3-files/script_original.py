@@ -488,8 +488,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
     }
     .kpi {
       display: grid;
-      grid-template-columns: auto minmax(0, 1fr);
-      grid-template-areas: "num num" "ic lbl";
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      grid-template-areas: "num num day" "ic lbl lbl";
       align-items: center;
       gap: 1px 5px;
       padding: 7px 8px 6px;
@@ -499,6 +499,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
       min-width: 0;
     }
     .kpi .i { grid-area: ic; width: 12px; height: 12px; }
+    .kpi::after { content: "اليوم"; grid-area: day; align-self: start; margin-top: 4px; font-size: 9px; color: rgba(255, 255, 255, 0.45); }
     .kpi b {
       grid-area: num;
       font-size: 17px;
@@ -521,6 +522,34 @@ EMBEDDED_PAGE = r'''<!doctype html>
     .k-like .i { color: #fda4af; }
     .k-bookmark .i { color: #fec84b; }
     .k-comment .i { color: #bdb4fe; }
+    /* all of them since the beginning, in small under today's */
+    .counts-all {
+      list-style: none;
+      margin: 4px 0 0;
+      padding: 0;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 6px;
+    }
+    .counts-all li {
+      display: flex;
+      align-items: baseline;
+      gap: 4px;
+      min-width: 0;
+      padding: 0 8px;
+      font-size: 10px;
+      line-height: 1.5;
+      color: rgba(255, 255, 255, 0.5);
+      white-space: nowrap;
+    }
+    .counts-all b {
+      font-size: 11px;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+      color: rgba(255, 255, 255, 0.82);
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
 
     .mast-links {
       display: flex;
@@ -926,23 +955,25 @@ EMBEDDED_PAGE = r'''<!doctype html>
     .c-like { --tint: var(--c-like); }
     .c-bookmark { --tint: var(--c-bookmark); }
     .c-comment { --tint: var(--c-comment); }
-    /* «خدمات مجانية»: a service the owner gave this user for free */
-    .choices .choice.free::before {
-      content: "مجاني";
+    /* each service's price for this user, small above its tile (green «مجاني» when it costs them nothing) */
+    .choices .choice[data-price]::before {
+      content: attr(data-price);
       position: absolute;
       top: -7px;
       left: 50%;
       transform: translateX(-50%);
       padding: 0 6px;
       border-radius: 99px;
-      border: 1px solid var(--ok-line);
-      background: var(--ok-soft);
-      color: var(--ok);
+      border: 1px solid var(--line-2);
+      background: var(--surface);
+      color: var(--text-2);
       font-size: 9.5px;
       font-weight: 700;
       line-height: 12px;
       white-space: nowrap;
+      font-variant-numeric: tabular-nums;
     }
+    .choices .choice.free[data-price]::before { border-color: var(--ok-line); background: var(--ok-soft); color: var(--ok); }
 
     .reply-voice { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
     .voice-label { font-size: 12px; font-weight: 500; color: var(--text-2); white-space: nowrap; }
@@ -1601,6 +1632,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
       .page { padding-inline: 8px; }
       .kpi { padding: 6px; }
       .kpi b { font-size: 15px; }
+      .counts-all li { padding: 0 6px; }
       .choice-title { font-size: 10.5px; }
       .chip { padding: 0 8px; font-size: 11px; }
     }
@@ -1623,11 +1655,17 @@ EMBEDDED_PAGE = r'''<!doctype html>
           <h1>{% if app_user %}<bdi>{{ app_user }}</bdi>{% else %}تنفيذ على تغريدات القروب{% endif %}</h1>
         </div>
       </div>
-      <ol class="counts" aria-label="الإجراءات الناجحة">
+      <ol class="counts" aria-label="الإجراءات الناجحة اليوم">
         <li class="kpi k-repost"><i class="i i-repeat" aria-hidden="true"></i><b id="count-repost">0</b><span class="kpi-label">الرتويت</span></li>
         <li class="kpi k-like"><i class="i i-heart" aria-hidden="true"></i><b id="count-like">0</b><span class="kpi-label">الإعجاب</span></li>
         <li class="kpi k-bookmark"><i class="i i-bookmark" aria-hidden="true"></i><b id="count-bookmark">0</b><span class="kpi-label">المرجعية</span></li>
         <li class="kpi k-comment"><i class="i i-msg" aria-hidden="true"></i><b id="count-comment">0</b><span class="kpi-label">التعليقات</span></li>
+      </ol>
+      <ol class="counts-all" aria-label="الإجراءات الناجحة منذ البداية">
+        <li class="k-repost"><span>الكل</span><b id="all-repost">0</b></li>
+        <li class="k-like"><span>الكل</span><b id="all-like">0</b></li>
+        <li class="k-bookmark"><span>الكل</span><b id="all-bookmark">0</b></li>
+        <li class="k-comment"><span>الكل</span><b id="all-comment">0</b></li>
       </ol>
       <div class="mast-links">
         {% if not tweets_in_content %}<a class="chip ic i-list" href="{{ api_root }}/tweets">عرض التغريدات</a>{% endif %}
@@ -2755,24 +2793,43 @@ EMBEDDED_PAGE = r'''<!doctype html>
     } catch (_) {}
   }
 
-  // Successful actions of all tasks so far (kept on the server), shown at the top of the page.
-  function setCounts(counts) {
+  // Successful actions (kept on the server), shown at the top of the page: today's big, all of them in small.
+  // A number too long for its place is shortened (12.3K, 1.2M).
+  function countText(value, longest) {
+    const n = Number(value || 0);
+    if (n < longest) return n.toLocaleString("en-US");
+    try { return new Intl.NumberFormat("en-US", {notation: "compact", maximumFractionDigits: 1}).format(n); }
+    catch (_) { return n.toLocaleString("en-US"); }
+  }
+  // Today's number gets smaller until it fits its tile, beside «اليوم», instead of being cut.
+  function fitCount(node) {
+    node.style.fontSize = "";
+    for (let size = 16; size >= 10 && node.scrollWidth > node.clientWidth + 0.5; size -= 1) node.style.fontSize = size + "px";
+  }
+  function setCounts(today, all) {
     ["repost", "like", "bookmark", "comment"].forEach((key) => {
-      document.getElementById("count-" + key).textContent = Number((counts && counts[key]) || 0).toLocaleString("en-US");
+      const big = document.getElementById("count-" + key);
+      big.textContent = countText(today && today[key], 10000);
+      fitCount(big);
+      document.getElementById("all-" + key).textContent = countText(all && all[key], 100000);
     });
   }
-  // The top counters show the chosen account's own successes only (its token tells the server which).
+  window.addEventListener("resize", () => document.querySelectorAll(".kpi b").forEach(fitCount));
+  // The top counters show the chosen account's own successes only (its token tells the server which); «today»
+  // begins at this phone's midnight.
   async function loadActionCounts() {
     const token = tokenField.value.trim();
-    if (!token) { setCounts(null); return; }
+    if (!token) { setCounts(null, null); return; }
+    const midnight = new Date();
+    midnight.setHours(0, 0, 0, 0);
     try {
-      const response = await fetchWithTimeout(apiRoot + "/stats", {
+      const response = await fetchWithTimeout(apiRoot + "/stats?since=" + Math.floor(midnight.getTime() / 1000), {
         headers: {"X-CSRF-Token": csrf, "X-Account-Token": token}, cache: "no-store"
       });
       const data = await response.json();
       if (!response.ok || !data.success) return;
       // (ignore a late answer for an account that is no longer the chosen one)
-      if (tokenField.value.trim() === token) setCounts(data.counts);
+      if (tokenField.value.trim() === token) setCounts(data.today || data.counts, data.counts);
     } catch (_) {}
   }
 
@@ -2874,11 +2931,21 @@ EMBEDDED_PAGE = r'''<!doctype html>
     const text = "الأسعار: " + paid.map((key) => SERVICE_WORDS[key] + " " + money(all[key])).join(" · ") + ".";
     return freeText(free) ? text + " " + freeText(free) : text;
   }
-  // The tiles of «الإجراءات» say which services are free for this user.
-  function markFreeChoices(free) {
+  // Each tile of «الإجراءات» shows, small above it, what that service costs this user (as the control panel says;
+  // «مجاني» when nothing). Nothing is shown without the control panel's prices.
+  function markPrices(prices, commentPrice) {
+    const all = prices ? Object.assign({comment: commentPrice}, prices) : null;
     ["repost", "like", "bookmark", "comment"].forEach((key) => {
       const tile = document.querySelector(".choices .c-" + key);
-      if (tile) tile.classList.toggle("free", (free || []).includes(key));
+      if (!tile) return;
+      const value = all ? Number(all[key] || 0) : NaN;
+      if (Number.isNaN(value)) {
+        delete tile.dataset.price;
+        tile.classList.remove("free");
+        return;
+      }
+      tile.dataset.price = value > 0 ? money(value) : "مجاني";
+      tile.classList.toggle("free", !(value > 0));
     });
   }
   function renderUsage() {
@@ -2931,7 +2998,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
     const price = usageData.price == null ? 0.01 : Number(usageData.price);
     const free = Array.isArray(usageData.free) ? usageData.free : [];
     const priceText = priceList(prices, price, free);
-    markFreeChoices(free);
+    markPrices(usageData.source === "control" ? prices : null, price);
     usageNote.textContent = prepaid
       ? "رصيدك " + money(usageData.balance) + ". " + priceText + " بلا رصيد لا تبدأ مهمة جديدة، والمهمة التي بدأت تكمل إلى آخرها ولو نفد الرصيد في نصها"
         + (Number(usageData.balance || 0) < -0.004 ? " (ما زاد عليه يُخصم من الشحنة القادمة)" : "") + ". للشحن راسل صاحب البرنامج."
@@ -10968,8 +11035,13 @@ def already_done_recently(account: str, status_id: str, actions: list[str]) -> b
 ACTION_COUNTS_PATH = DATA_DIR / "action_counts.json"
 action_counts_lock = threading.Lock()
 ACTION_NAMES = ("repost", "like", "bookmark", "comment")
-# The totals shown at the top of the page, kept for each account on its own (keyed by profile_key).
+# The totals shown (in small) at the top of the page, kept for each account on its own (keyed by profile_key).
 action_counts: dict[str, dict[str, int]] = {}
+# And today's, shown big there: each account's successes in quarter-hour slots of the last two days, so the page
+# sums those from its own midnight, whatever its time zone (every time zone's midnight falls on a quarter hour).
+COUNT_SLOT_SECONDS = 900
+COUNT_SLOTS_KEPT = 2 * 24 * 4 + 8
+action_recent: dict[str, dict[int, dict[str, int]]] = {}
 
 
 def zero_counts() -> dict[str, int]:
@@ -10983,16 +11055,58 @@ def account_counts(account: str) -> dict[str, int]:
     return {action: int(row.get(action) or 0) for action in ACTION_NAMES}
 
 
+def account_counts_since(account: str, since: float) -> dict[str, int]:
+    """One account's successes from this moment on (the slots that start at it or after, within the last two days)."""
+    first = math.ceil(since / COUNT_SLOT_SECONDS)
+    with action_counts_lock:
+        slots = [dict(row) for slot, row in (action_recent.get(account) or {}).items() if slot >= first]
+    out = zero_counts()
+    for row in slots:
+        for action in ACTION_NAMES:
+            out[action] += int(row.get(action) or 0)
+    return out
+
+
+def local_midnight(now: float | None = None) -> float:
+    """When today began on this phone's own clock (for a page that did not say when its day began)."""
+    t = time.localtime(time.time() if now is None else now)
+    return time.mktime((t.tm_year, t.tm_mon, t.tm_mday, 0, 0, 0, 0, 0, -1))
+
+
+def _counts_file_unlocked() -> dict:
+    """(Under action_counts_lock.) What action_counts.json keeps: the totals, and the last two days' slots."""
+    newest = int(time.time() // COUNT_SLOT_SECONDS)
+    recent = {}
+    for key, slots in list(action_recent.items()):
+        kept = {slot: row for slot, row in slots.items() if newest - slot < COUNT_SLOTS_KEPT}
+        if kept:
+            action_recent[key] = kept
+            recent[key] = {str(slot): row for slot, row in kept.items()}
+        else:
+            action_recent.pop(key, None)
+    return {"by_account": action_counts, "recent": recent}
+
+
 def load_action_counts() -> None:
     loaded = read_private_json(ACTION_COUNTS_PATH) or {}
     by_account = loaded.get("by_account") if isinstance(loaded, dict) else None
+    recent = loaded.get("recent") if isinstance(loaded, dict) else None
     with action_counts_lock:
         action_counts.clear()
+        action_recent.clear()
         if isinstance(by_account, dict):
             for key, row in by_account.items():
                 if not isinstance(row, dict):
                     continue
                 action_counts[str(key)] = {action: max(0, int(row.get(action) or 0)) for action in ACTION_NAMES}
+        if isinstance(recent, dict):
+            for key, slots in recent.items():
+                if not isinstance(slots, dict):
+                    continue
+                for slot, row in slots.items():
+                    if str(slot).isdigit() and isinstance(row, dict):
+                        action_recent.setdefault(str(key), {})[int(slot)] = {
+                            action: max(0, int(row.get(action) or 0)) for action in ACTION_NAMES if row.get(action)}
 
 
 def count_successes(outcome: dict[str, str], account: str = "") -> None:
@@ -11006,10 +11120,12 @@ def count_successes(outcome: dict[str, str], account: str = "") -> None:
         row = action_counts.get(account)
         if row is None:
             row = action_counts[account] = zero_counts()
+        slot = action_recent.setdefault(account, {}).setdefault(int(time.time() // COUNT_SLOT_SECONDS), {})
         for action in done:
             row[action] += 1
+            slot[action] = int(slot.get(action) or 0) + 1
         try:
-            write_private_json(ACTION_COUNTS_PATH, {"by_account": action_counts})
+            write_private_json(ACTION_COUNTS_PATH, _counts_file_unlocked())
         except Exception:
             pass
     stats_changed()
@@ -14143,10 +14259,20 @@ def stats_endpoint(access_path: str):
         abort(404)
     if not csrf_matches(request.headers.get("X-CSRF-Token", "")):
         return jsonify(success=False, message="انتهت صلاحية الصفحة. أعد تحميلها ثم حاول مجددًا."), 400
-    # The counts of the account the page is showing now (its token comes in a header; zeros when none).
+    # The counts of the account the page is showing now (its token comes in a header; zeros when none): today's,
+    # from the page's own midnight («since», its time zone's), and all of them.
     token = (request.headers.get("X-Account-Token") or "").strip()
-    counts = account_counts(profile_key(token)) if valid_auth_token(token) else zero_counts()
-    return jsonify(success=True, counts=counts)
+    try:
+        since = float(request.args.get("since") or "nan")
+    except ValueError:
+        since = math.nan
+    now = time.time()
+    if not now - 27 * 3600 <= since <= now + 300:        # (not a midnight of the last day: this phone's own)
+        since = local_midnight(now)
+    if not valid_auth_token(token):
+        return jsonify(success=True, counts=zero_counts(), today=zero_counts())
+    key = profile_key(token)
+    return jsonify(success=True, counts=account_counts(key), today=account_counts_since(key, since))
 
 
 @app.post("/<access_path>/gemini-usage/reset")
@@ -14280,9 +14406,9 @@ def forget_account_data(auth_token: str) -> None:
         _group_stores.pop(key, None)
     shutil.rmtree(account_dir(key), ignore_errors=True)
     with action_counts_lock:
-        if action_counts.pop(key, None) is not None:
+        if (action_counts.pop(key, None) is not None) | (action_recent.pop(key, None) is not None):
             try:
-                write_private_json(ACTION_COUNTS_PATH, {"by_account": action_counts})
+                write_private_json(ACTION_COUNTS_PATH, _counts_file_unlocked())
             except Exception:
                 pass
     stats_changed()

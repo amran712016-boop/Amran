@@ -42,6 +42,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from urllib.parse import quote
@@ -579,19 +580,88 @@ PACE_LIMITS = {"typing": 60.0, "gap": 10.0, "settle": 10.0, "in_page": 50}
 # one is loaded in full: whole numbers, from 1)
 
 
-# «نموذج الدفع»: what a user sees in the app's «شحن رصيد» window: how to pay (accounts, numbers, steps), and an
-# optional link with its button's name. The user then sends the amount, the transfer's number and its receipt
-# (as a message marked «طلب شحن رصيد» in «رسائل العملاء»).
-PAYMENT_PATH = DATA_DIR / "payment.json"
-PAYMENT_TEXT_MAX = 1500
+# «الدفع عبر Binance»: the app's «شحن رصيد» shows the owner's Binance Pay ID; a user sends it dollar coins (USDT),
+# then types the amount and the transfer's Order ID. With the owner's Binance API key (reading only), this server
+# finds that transfer in the owner's Binance Pay history: received (not sent), in a dollar coin, of the amount typed,
+# and not used before; then the user's balance is topped up by what arrived, at once, with a line in its «سجل
+# الرصيد» (and a note to the owner in «رسائل العملاء»). Without a key, the request goes to «رسائل العملاء» for the
+# owner to check by hand. The key and its secret stay in this server's private folder; the panel never shows them.
+BINANCE_PATH = DATA_DIR / "binance.json"
+TOPUPS_PATH = DATA_DIR / "topups.json"          # the transfers used already: each tops up one balance, once
+BINANCE_API = os.environ.get("CONTROL_BINANCE_API", "https://api.binance.com").rstrip("/")
+TOPUP_COINS = ("USDT", "USDC", "FDUSD")         # counted as dollars, one for one
+TOPUP_LOOKBACK_DAYS = 30
+TOPUP_TRIES_PER_HOUR = 12
+TOPUP_MAX = 10000.0
+_topup_tries: dict[str, list] = {}
 
 
-def load_payment() -> dict:
-    data = read_private_json(PAYMENT_PATH) or {}
-    link = str(data.get("link") or "").strip()
-    return {"text": str(data.get("text") or "").strip()[:PAYMENT_TEXT_MAX],
-            "link": link if re.fullmatch(r"https://[^\s<>\"']{3,300}", link) else "",
-            "label": str(data.get("label") or "").strip()[:40]}
+def load_binance() -> dict:
+    data = read_private_json(BINANCE_PATH) or {}
+    return {"binance_id": re.sub(r"\D", "", str(data.get("binance_id") or ""))[:20],
+            "note": str(data.get("note") or "").strip()[:500],
+            "key": str(data.get("key") or "").strip()[:128], "secret": str(data.get("secret") or "").strip()[:128]}
+
+
+def public_payment() -> dict:
+    """What the app shows in «شحن رصيد» (never the key)."""
+    data = load_binance()
+    return {"binance_id": data["binance_id"], "note": data["note"], "auto": bool(data["key"] and data["secret"]),
+            "coins": list(TOPUP_COINS)}
+
+
+class BinanceError(RuntimeError):
+    pass
+
+
+def binance_history(key: str, secret: str) -> list:
+    """The owner's Binance Pay transactions of the last TOPUP_LOOKBACK_DAYS (GET /sapi/v1/pay/transactions)."""
+    now = int(time.time() * 1000)
+    query = urllib.parse.urlencode({"startTime": now - TOPUP_LOOKBACK_DAYS * 86_400_000, "endTime": now, "limit": 100,
+                                    "recvWindow": 10000, "timestamp": now})
+    signature = hmac.new(secret.encode("utf-8"), query.encode("utf-8"), hashlib.sha256).hexdigest()
+    request_ = urllib.request.Request(f"{BINANCE_API}/sapi/v1/pay/transactions?{query}&signature={signature}",
+                                      headers={"X-MBX-APIKEY": key, "User-Agent": "bot-grob-control"})
+    try:
+        with urllib.request.urlopen(request_, timeout=15) as response:
+            data = json.loads(response.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as exc:
+        try:
+            said = json.loads(exc.read().decode("utf-8") or "{}")
+        except (ValueError, OSError):
+            said = {}
+        raise BinanceError(f"Binance: {said.get('msg') or exc.reason} ({said.get('code', exc.code)})") from exc
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        raise BinanceError(f"تعذّر الوصول إلى Binance ({type(exc).__name__}).") from exc
+    if str(data.get("code")) not in ("000000", "0") and data.get("success") is not True:
+        raise BinanceError(f"Binance: {data.get('message') or data.get('msg') or 'جواب غير متوقع'}")
+    rows = data.get("data")
+    return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+
+def _tx_key(value) -> str:
+    return re.sub(r"[^A-Z0-9]", "", str(value or "").upper())
+
+
+def tx_matches(tx_id, typed: str) -> bool:
+    """The Order ID the user typed is this transfer's (as Binance writes it, with or without its letters before)."""
+    a, b = _tx_key(tx_id), _tx_key(typed)
+    if len(b) < 6 or not a:
+        return False
+    return a == b or (len(b) >= 8 and a.endswith(b)) or (len(a) >= 8 and b.endswith(a))
+
+
+def load_topups() -> dict:
+    data = read_private_json(TOPUPS_PATH) or {}
+    return {"used": data.get("used") if isinstance(data.get("used"), dict) else {}}
+
+
+def topup_amount(raw) -> float:
+    text = str(raw or "").strip().translate(str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹٫،", "01234567890123456789.."))
+    try:
+        return round(float(re.sub(r"[^\d.]", "", text) or "0"), 2)
+    except ValueError:
+        return 0.0
 
 
 def load_pace() -> dict:
@@ -2626,15 +2696,20 @@ main{padding-bottom:56px}
 <label class="prf prw"><span>رصيد الحساب الجديد</span><input class="fs" name="welcome" dir="ltr" inputmode="decimal" autocomplete="off" value="{{ '%g'|format(welcome) }}"></label>
 <p class="mut prh">يُضاف تلقائيًا لكل من ينشئ حسابًا جديدًا في التطبيق، مرة واحدة لكل جوال. و0 يوقفه.</p>
 <button class="btn wide" style="margin-top:14px">حفظ الأسعار</button></form></details>
-<details class="card prc" id="pay-card"><summary><span class="prc-h">{{ic('key')}}<b>نموذج الدفع</b></span><span class="prc-s"><span>{{ 'محدد' if payment.text or payment.link else 'غير محدد' }}</span>{% if payment.link %}<span>{{ payment.label or 'رابط الدفع' }}</span>{% endif %}</span>{{ic('chev')}}</summary>
-<form method="post" action="/{{admin}}/payment" data-toast="تم حفظ نموذج الدفع"><p class="mut">يظهر للمستخدم عند «شحن رصيد» في التطبيق: طريقة الدفع (الحسابات والأرقام والخطوات)، ورابط إن وُجد. ثم يرسل المستخدم المبلغ ورقم العملية وصورة الإيصال، فتصلك رسالة «طلب شحن رصيد» في «رسائل العملاء».</p>
-<p class="l">طريقة الدفع</p>
-<textarea class="ta" name="text" maxlength="1500" rows="6" placeholder="مثال:&#10;التحويل إلى بنك ... — الحساب: SA00 0000 ...&#10;أو STC Pay: 05xxxxxxxx&#10;ثم أرسل الإيصال من هنا.">{{ payment.text }}</textarea>
-<p class="l">رابط الدفع <small>(اختياري، يبدأ بـ https://)</small></p>
-<input class="fs" name="link" dir="ltr" inputmode="url" autocomplete="off" value="{{ payment.link }}" placeholder="https://">
-<p class="l">اسم زر الرابط <small>(اختياري)</small></p>
-<input class="fs" name="label" maxlength="40" autocomplete="off" value="{{ payment.label }}" placeholder="ادفع الآن">
-<button class="btn wide" style="margin-top:14px">حفظ نموذج الدفع</button></form></details>
+<details class="card prc" id="pay-card"><summary><span class="prc-h">{{ic('key')}}<b>الدفع عبر Binance</b></span><span class="prc-s"><span>{{ ('المعرّف ' ~ pay.binance_id) if pay.binance_id else 'لم يُحدَّد المعرّف' }}</span><span>{{ 'تحقق تلقائي' if pay.auto else 'تحقق يدوي' }}</span></span>{{ic('chev')}}</summary>
+<form method="post" action="/{{admin}}/payment" data-toast="تم الحفظ"><p class="mut">يظهر معرّفك للمستخدم في «شحن رصيد»: يحوّل إليه عبر Binance Pay بعملة USDT، ثم يكتب المبلغ ورقم العملية (Order ID). مع مفتاح Binance API يتحقق الخادم من وصول التحويل إلى حسابك (وارد، بعملة دولارية، بالمبلغ نفسه، ولم يُستخدم من قبل) ويشحن رصيده فورًا. بدون المفتاح يصلك طلبه في «رسائل العملاء» لتتحقق بنفسك.</p>
+<p class="l">معرّف Binance Pay (Binance ID)</p>
+<input class="fs" name="binance_id" dir="ltr" inputmode="numeric" autocomplete="off" value="{{ pay.binance_id }}" placeholder="123456789">
+<p class="l">ملاحظة للمستخدم <small>(اختياري)</small></p>
+<textarea class="ta" name="note" maxlength="500" rows="3" placeholder="مثال: أقل شحن 5$.">{{ pay.note }}</textarea>
+<p class="l">مفتاح Binance API <small>(للتحقق التلقائي، بصلاحية القراءة فقط)</small></p>
+<input class="fs" name="api_key" dir="ltr" autocomplete="off" spellcheck="false" placeholder="{{ 'محفوظ: اتركه فارغًا ليبقى' if pay.auto else 'API Key' }}">
+<p class="l">السر (Secret Key)</p>
+<input class="fs" name="api_secret" type="password" dir="ltr" autocomplete="new-password" spellcheck="false" placeholder="{{ 'محفوظ: اتركه فارغًا ليبقى' if pay.auto else 'Secret Key' }}">
+<p class="mut" style="margin-top:8px">أنشئ المفتاح من Binance ← API Management بصلاحية «Enable Reading» فقط، بلا تداول ولا سحب، ويُفضَّل تقييده بعنوان IP هذا الخادم. يبقى على هذا الخادم ولا يظهر في اللوحة.</p>
+<button class="btn wide" style="margin-top:14px">حفظ</button></form>
+{% if pay.auto %}<div class="row" style="display:flex;gap:8px;margin-top:10px"><form method="post" action="/{{admin}}/binance/test" style="flex:1"><button class="btn ghost wide">اختبار الاتصال</button></form>
+<form method="post" action="/{{admin}}/binance/forget" style="flex:1" data-title="حذف مفتاح Binance؟" data-confirm="يتوقف التحقق التلقائي، وتصلك طلبات الشحن في «رسائل العملاء»." data-yes="حذف" data-kind="danger" data-toast="حُذف المفتاح"><button class="btn ghost wide">حذف المفتاح</button></form></div>{% endif %}</details>
 <details class="card prc"><summary><span class="prc-h">{{ic('sort')}}<b>سرعة التنفيذ</b></span><span class="prc-s"><span>كتابة التعليق <bdi dir="ltr">{{ '%g'|format(pace.typing[0]) }}–{{ '%g'|format(pace.typing[1]) }}</bdi> ث</span><span>بين الأزرار <bdi dir="ltr">{{ '%g'|format(pace.gap[0]) }}–{{ '%g'|format(pace.gap[1]) }}</bdi> ث</span><span>بعد التحميل <bdi dir="ltr">{{ '%g'|format(pace.settle[0]) }}–{{ '%g'|format(pace.settle[1]) }}</bdi> ث</span>{% if pace.in_page_on %}<span>فتح سريع <bdi dir="ltr">{{ pace.in_page[0] }}–{{ pace.in_page[1] }}</bdi> تغريدات</span>{% else %}<span>فتح سريع: متوقف</span>{% endif %}</span>{{ic('chev')}}</summary>
 <form method="post" action="/{{admin}}/pace" data-toast="تم حفظ سرعة التنفيذ"><p class="mut">بالثواني، ويختار التطبيق كل مرة رقمًا عشوائيًا بين «من» و«إلى». تُطبَّق على كل المستخدمين من مهمتهم التالية.</p>
 <p class="l">مدة كتابة التعليق كله</p>
@@ -3312,7 +3387,7 @@ def dashboard():
         owner_link=owner_app_link(request.host), in_owner_app=OWNER_APP_MARK in (request.headers.get("User-Agent") or ""),
         this_host=request.host, relay=MOVE_RELAY.split("//")[-1],
         prices=load_prices(), welcome=load_welcome(), pace=load_pace(), prompt=load_prompt(), one_device=one_device(),
-        payment=load_payment(),
+        pay=public_payment(),
         app_slots=app_panel(codes), app_dl_link=app_download_link(), app_package=APP_PACKAGE,
         script_live=script_live, script_staged=script_staged, script_next=next_version(highest_published_version()),
         script_floor=highest_published_version(), script_pilot=script_pilot, script_pilot_ids=pilot_ids,
@@ -3696,23 +3771,67 @@ def pace_save():
 
 @app.post(f"/{ADMIN}/payment")
 def payment_save():
-    """«نموذج الدفع»: how to pay, and an optional link, shown in the app's «شحن رصيد» window."""
+    """«الدفع عبر Binance»: the Binance Pay ID shown to users, a note, and the API key for checking transfers."""
     if not logged_in():
         return redirect(f"/{ADMIN}")
-    text = str(request.form.get("text") or "").replace("\r\n", "\n").strip()
-    link = str(request.form.get("link") or "").strip()
-    label = re.sub(r"\s+", " ", str(request.form.get("label") or "")).strip()
-    if len(text) > PAYMENT_TEXT_MAX:
-        flash("bad", f"نموذج الدفع حتى {PAYMENT_TEXT_MAX} حرف.")
+    data = load_binance()
+    binance_id = re.sub(r"\s+", "", str(request.form.get("binance_id") or ""))
+    if binance_id and not re.fullmatch(r"\d{5,20}", binance_id):
+        flash("bad", "معرّف Binance Pay أرقام فقط (من 5 إلى 20 رقمًا).")
         return redirect(f"/{ADMIN}")
-    if link and not re.fullmatch(r"https://[^\s<>\"']{3,300}", link):
-        flash("bad", "رابط الدفع يجب أن يبدأ بـ https:// وبلا مسافات.")
+    note = str(request.form.get("note") or "").replace("\r\n", "\n").strip()
+    if len(note) > 500:
+        flash("bad", "الملاحظة حتى 500 حرف.")
         return redirect(f"/{ADMIN}")
-    if len(label) > 40:
-        flash("bad", "اسم زر الرابط حتى 40 حرفًا.")
+    key = str(request.form.get("api_key") or "").strip()
+    secret = str(request.form.get("api_secret") or "").strip()
+    for value, name in ((key, "مفتاح API"), (secret, "السر")):
+        if value and not re.fullmatch(r"[A-Za-z0-9]{16,128}", value):
+            flash("bad", f"{name} غير صالح: انسخه من Binance كما هو.")
+            return redirect(f"/{ADMIN}")
+    if bool(key) != bool(secret) and not (data["key"] and data["secret"]):
+        flash("bad", "اكتب مفتاح API والسر معًا.")
         return redirect(f"/{ADMIN}")
-    write_private_json(PAYMENT_PATH, {"version": 1, "text": text, "link": link, "label": label})
-    flash("ok", "حُفظ نموذج الدفع: يظهر للمستخدمين في «شحن رصيد».")
+    data.update(binance_id=binance_id, note=note)
+    if key:
+        data["key"] = key
+    if secret:
+        data["secret"] = secret
+    write_private_json(BINANCE_PATH, {"version": 1, **data})
+    flash("ok", "حُفظ الدفع عبر Binance: " + ("التحقق تلقائي." if data["key"] and data["secret"] else
+                                            "بلا مفتاح API تصلك طلبات الشحن في «رسائل العملاء» لتتحقق بنفسك."))
+    return redirect(f"/{ADMIN}")
+
+
+@app.post(f"/{ADMIN}/binance/test")
+def binance_test():
+    """Reads the last transfers with the saved key: that it works, and how Binance writes their Order IDs."""
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    data = load_binance()
+    if not (data["key"] and data["secret"]):
+        flash("bad", "احفظ مفتاح API والسر أولًا.")
+        return redirect(f"/{ADMIN}")
+    try:
+        rows = binance_history(data["key"], data["secret"])
+    except BinanceError as exc:
+        flash("bad", f"لم ينجح الاتصال: {exc}")
+        return redirect(f"/{ADMIN}")
+    received = [row for row in rows if topup_amount(row.get("amount")) > 0 and float(row.get("amount") or 0) > 0]
+    last = "، ".join(f"{row.get('transactionId')} ({row.get('amount')} {row.get('currency')})" for row in received[:3])
+    flash("ok", f"الاتصال يعمل: {len(rows)} عملية في آخر {TOPUP_LOOKBACK_DAYS} يومًا، منها {len(received)} واردة."
+                + (f" آخرها: {last}." if last else ""))
+    return redirect(f"/{ADMIN}")
+
+
+@app.post(f"/{ADMIN}/binance/forget")
+def binance_forget():
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    data = load_binance()
+    data.update(key="", secret="")
+    write_private_json(BINANCE_PATH, {"version": 1, **data})
+    flash("ok", "حُذف مفتاح Binance: طلبات الشحن تصلك في «رسائل العملاء».")
     return redirect(f"/{ADMIN}")
 
 
@@ -4751,7 +4870,80 @@ def api_usage():
     row = code_from_token(body.get("token"))
     if not row:
         return api_err("انتهت صلاحية الدخول أو أوقِف الرمز أو نُقل لجهاز آخر. أعد إدخال الرمز.", 200)
-    return api_ok(**usage_by_account(row["id"]), pay=pay_of(row), balance=round(balance_of(row), 4), payment=load_payment())
+    return api_ok(**usage_by_account(row["id"]), pay=pay_of(row), balance=round(balance_of(row), 4), payment=public_payment())
+
+
+@app.post(f"/{API}/topup")
+def api_topup():
+    """«شحن رصيد»: a user's Binance Pay transfer (its amount and Order ID). With the owner's key, checked in the owner's
+    Binance Pay history and, when it is there, the balance topped up at once; without one: «manual» (the app sends it
+    to «رسائل العملاء»)."""
+    body = request.get_json(silent=True) or {}
+    row = code_from_token(body.get("token"))
+    if not row:
+        return api_err("انتهت صلاحية الدخول أو أوقِف الرمز أو نُقل لجهاز آخر. أعد إدخال الرمز.", 200)
+    amount = topup_amount(body.get("amount"))
+    typed = str(body.get("order_id") or "").strip()[:80]
+    if not 0 < amount <= TOPUP_MAX:
+        return api_err("اكتب المبلغ الذي حوّلته بالدولار.")
+    if len(_tx_key(typed)) < 6:
+        return api_err("اكتب رقم العملية (Order ID) من تفاصيل التحويل في Binance.")
+    settings = load_binance()
+    if not (settings["key"] and settings["secret"]):
+        return api_ok(manual=True)
+    now = time.time()
+    with LOCK:
+        tries = [at for at in _topup_tries.get(row["id"], []) if now - at < 3600]
+        if len(tries) >= TOPUP_TRIES_PER_HOUR:
+            return api_err("محاولات كثيرة خلال ساعة. انتظر قليلًا ثم أعد المحاولة.")
+        _topup_tries[row["id"]] = tries + [now]
+        if any(tx_matches(used, typed) for used in load_topups()["used"]):
+            return api_err("رقم العملية هذا استُخدم من قبل لشحن رصيد.")
+    try:
+        rows = binance_history(settings["key"], settings["secret"])
+    except BinanceError as exc:
+        print(f"شحن رصيد: تعذّر التحقق من Binance: {exc}", flush=True)
+        return api_err("تعذّر التحقق من Binance الآن. أعد المحاولة بعد قليل.")
+    found = next((tx for tx in rows if tx_matches(tx.get("transactionId"), typed)), None)
+    try:
+        came = float((found or {}).get("amount") or 0)          # (positive: received; negative: the owner sent it)
+    except (TypeError, ValueError):
+        came = 0.0
+    coin = str((found or {}).get("currency") or "").upper()
+    if not found or came <= 0:
+        return api_err("لم يُعثر على هذا التحويل في حساب صاحب البرنامج بعد. تأكد من رقم العملية، أو انتظر دقيقة ثم أعد المحاولة.")
+    if coin not in TOPUP_COINS:
+        return api_err(f"التحويل بعملة {coin}، والمقبول: {'، '.join(TOPUP_COINS)}.")
+    received = round(came, 2)
+    if abs(received - amount) > 0.01:
+        return api_err("المبلغ الذي كتبته لا يطابق مبلغ هذا التحويل.")
+    tx_id = str(found.get("transactionId") or typed)
+    with LOCK:
+        topups = load_topups()
+        if any(tx_matches(used, tx_id) for used in topups["used"]):
+            return api_err("رقم العملية هذا استُخدم من قبل لشحن رصيد.")
+        codes = load_codes()
+        target = next((item for item in codes if item.get("id") == row["id"]), None)
+        if target is None:
+            return api_err("المستخدم غير موجود.")
+        target["balance"] = round(balance_of(target) + received, 4)
+        ledger = target.get("ledger") if isinstance(target.get("ledger"), list) else []
+        ledger.insert(0, {"at": int(now), "amount": received, "note": f"Binance Pay · {tx_id[-8:]}",
+                          "after": round(target["balance"], 2)})
+        target["ledger"] = ledger[:LEDGER_KEEP]
+        save_codes(codes)
+        topups["used"][tx_id] = {"code_id": row["id"], "amount": received, "coin": coin, "at": int(now)}
+        write_private_json(TOPUPS_PATH, {"version": 1, **topups})
+        support = load_support()
+        support["seq"] += 1
+        support["items"].insert(0, {"id": support["seq"], "code_id": row["id"], "label": row.get("label") or "",
+                                    "text": f"شُحن رصيده تلقائيًا عبر Binance Pay: {money(received)} ({coin}).\nرقم العملية: {tx_id}",
+                                    "files": [], "meta": {}, "at": int(now), "read": False, "replies": [], "kind": "topup"})
+        del support["items"][SUPPORT_MAX:]
+        save_support(support)
+        balance, pay = target["balance"], pay_of(target)
+    print(f"شحن رصيد عبر Binance Pay: {money(received)} لـ {row.get('label') or row['id']}", flush=True)
+    return api_ok(credited=received, balance=round(balance, 4), pay=pay)
 
 
 @app.post(f"/{API}/task-start")

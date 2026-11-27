@@ -663,11 +663,14 @@ EMBEDDED_PAGE = r'''<!doctype html>
     .usage-sheet.topup-box { width: min(390px, 100%); border-radius: 20px; animation: pop 0.22s var(--ease) both; }
     .usage-sheet.topup-box::before { display: none; }
     .topup-balance { margin: 0 0 8px; font-size: 13px; color: var(--text-2); }
-    .topup-how { margin-bottom: 10px; padding: 11px 12px; max-height: 34vh; overflow: auto; white-space: pre-wrap; border-radius: 12px;
-                 border: 1px solid var(--line-2); background: var(--surface-2); color: var(--text); font-size: 13.5px; line-height: 1.8; }
-    .topup-how.empty { color: var(--text-3); }
-    .topup-link { width: 100%; margin-bottom: 8px; min-height: 40px; }
-    .topup-box .help-attach { margin-top: 10px; }
+    .bn-pay { margin-bottom: 8px; padding: 12px; border-radius: 14px; border: 1px solid var(--line-2); background: var(--surface-2); }
+    .bn-label { display: block; font-size: 12.5px; color: var(--text-2); }
+    .bn-id { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 6px 0 8px; }
+    .bn-id b { font: 700 20px/1.3 var(--mono, ui-monospace, monospace); letter-spacing: 0.5px; color: #c99400; }
+    .bn-copy { flex: none; min-height: 34px; }
+    .bn-steps { margin: 0; padding-inline-start: 18px; font-size: 12.5px; line-height: 1.8; color: var(--text-2); }
+    .topup-note { margin: 8px 0 0; font-size: 12.5px; white-space: pre-wrap; color: var(--text); }
+    .topup-none { margin: 0 0 8px; padding: 10px 12px; border-radius: 12px; background: var(--bad-soft); color: var(--bad); font-size: 13px; }
     /* a button that waits for the program shows it is working */
     .btn:disabled::after {
       content: "";
@@ -1893,18 +1896,25 @@ EMBEDDED_PAGE = r'''<!doctype html>
       <button id="topup-close" class="usage-x" type="button" aria-label="إغلاق">×</button>
     </div>
     <p id="topup-balance" class="topup-balance" hidden></p>
-    <div id="topup-how" class="topup-how"></div>
-    <a id="topup-link" class="btn btn-ghost topup-link" href="#" target="_blank" rel="noopener" hidden>ادفع الآن</a>
-    <label class="help-label" for="topup-amount">المبلغ المحوَّل ($)</label>
+    <div id="topup-pay" class="bn-pay">
+      <span class="bn-label">حوّل عبر Binance Pay إلى المعرّف</span>
+      <div class="bn-id"><b id="topup-bid" dir="ltr"></b><button id="topup-copy" class="btn btn-ghost bn-copy ic i-copy" type="button">نسخ</button></div>
+      <ol class="bn-steps">
+        <li>حوّل المبلغ بعملة <b>USDT</b> إلى هذا المعرّف من Binance ← Pay ← إرسال.</li>
+        <li>اكتب المبلغ ورقم العملية (Order ID) من تفاصيل التحويل.</li>
+        <li>اضغط «تحقق وشحن»<span id="topup-auto"> فيُشحن رصيدك فور التأكد من وصول المبلغ</span>.</li>
+      </ol>
+      <p id="topup-note" class="topup-note" hidden></p>
+    </div>
+    <p id="topup-none" class="topup-none" hidden>لم يحدد صاحب البرنامج طريقة الدفع بعد.</p>
+    <label class="help-label" for="topup-amount">المبلغ الذي حوّلته ($)</label>
     <input id="topup-amount" type="text" inputmode="decimal" dir="ltr" maxlength="12" autocomplete="off" placeholder="10">
-    <label class="help-label" for="topup-ref">رقم العملية أو ملاحظة <small>(اختياري)</small></label>
-    <input id="topup-ref" type="text" maxlength="120" autocomplete="off">
-    <input id="topup-file" type="file" accept="image/*" hidden>
-    <button id="topup-attach" class="btn btn-ghost help-attach ic i-clip" type="button">إرفاق صورة الإيصال</button>
+    <label class="help-label" for="topup-ref">رقم العملية (Order ID)</label>
+    <input id="topup-ref" type="text" dir="ltr" maxlength="80" autocomplete="off" spellcheck="false" placeholder="Order ID">
     <p id="topup-status" class="help-status" role="status" hidden></p>
     <div class="usage-foot">
       <button id="topup-cancel" class="btn btn-ghost" type="button">إلغاء</button>
-      <button id="topup-send" class="btn btn-pine ic i-send" type="button">إرسال طلب الشحن</button>
+      <button id="topup-send" class="btn btn-pine" type="button">تحقق وشحن</button>
     </div>
   </div>
 </div>{% endif %}
@@ -2920,16 +2930,16 @@ EMBEDDED_PAGE = r'''<!doctype html>
   const topupBox = document.getElementById("topup-box");
   const topupButton = document.getElementById("usage-topup");
   if (topupBox && topupButton) {
-    const topupHow = document.getElementById("topup-how");
-    const topupLink = document.getElementById("topup-link");
+    const topupPay = document.getElementById("topup-pay");
+    const topupNone = document.getElementById("topup-none");
+    const topupBid = document.getElementById("topup-bid");
+    const topupNote = document.getElementById("topup-note");
+    const topupAuto = document.getElementById("topup-auto");
     const topupBalance = document.getElementById("topup-balance");
     const topupAmount = document.getElementById("topup-amount");
     const topupRef = document.getElementById("topup-ref");
-    const topupFile = document.getElementById("topup-file");
-    const topupAttach = document.getElementById("topup-attach");
     const topupStatus = document.getElementById("topup-status");
     const topupSend = document.getElementById("topup-send");
-    let receipt = null;
     let topupBusy = false;
     const latin = (text) => String(text || "").replace(/[٠-٩]/g, (d) => "٠١٢٣٤٥٦٧٨٩".indexOf(d))
       .replace(/[۰-۹]/g, (d) => "۰۱۲۳۴۵۶۷۸۹".indexOf(d)).replace(/[٫,]/g, ".").replace(/[^\d.]/g, "");
@@ -2938,17 +2948,19 @@ EMBEDDED_PAGE = r'''<!doctype html>
       topupStatus.textContent = text || "";
       topupStatus.className = "help-status" + (kind ? " " + kind : "");
     }
+    function payment() { return (usageData && usageData.payment) || {}; }
     function paintTopup() {
-      const pay = (usageData && usageData.payment) || {};
-      topupHow.textContent = pay.text || "لم يحدد صاحب البرنامج طريقة الدفع بعد. أرسل طلبك وسيتواصل معك.";
-      topupHow.classList.toggle("empty", !pay.text);
-      topupLink.hidden = !pay.link;
-      if (pay.link) { topupLink.href = pay.link; topupLink.textContent = pay.label || "ادفع الآن"; }
+      const pay = payment();
+      topupPay.hidden = !pay.binance_id;
+      topupNone.hidden = !!pay.binance_id;
+      topupBid.textContent = pay.binance_id || "";
+      topupNote.textContent = pay.note || "";
+      topupNote.hidden = !pay.note;
+      topupAuto.hidden = !pay.auto;
+      topupSend.textContent = pay.auto ? "تحقق وشحن" : "إرسال طلب الشحن";
+      topupSend.disabled = topupBusy || !pay.binance_id;
       topupBalance.textContent = usageData && usageData.pay === "prepaid" ? "رصيدك الآن " + money(usageData.balance) + "." : "";
       topupBalance.hidden = !topupBalance.textContent;
-    }
-    function paintReceipt() {
-      topupAttach.textContent = receipt ? "الإيصال: " + (receipt.name || "صورة") : "إرفاق صورة الإيصال";
     }
     function openTopup() {
       paintTopup();
@@ -2962,34 +2974,19 @@ EMBEDDED_PAGE = r'''<!doctype html>
     document.getElementById("topup-cancel").addEventListener("click", closeTopup);
     topupBox.addEventListener("click", (event) => { if (event.target === topupBox) closeTopup(); });
     document.addEventListener("keydown", (event) => { if (event.key === "Escape" && !topupBox.hidden) closeTopup(); });
-    topupAttach.addEventListener("click", () => topupFile.click());
-    topupFile.addEventListener("change", () => {
-      const file = topupFile.files && topupFile.files[0];
-      topupFile.value = "";
-      if (!file) return;
-      if (!(file.type || "").startsWith("image/")) { topupSay("الإيصال صورة فقط.", "is-bad"); return; }
-      if (file.size > 8 * 1048576) { topupSay("صورة الإيصال أكبر من 8 ميجابايت.", "is-bad"); return; }
-      receipt = file;
-      paintReceipt();
-      topupSay("");
+    document.getElementById("topup-copy").addEventListener("click", async () => {
+      const id = topupBid.textContent.trim();
+      let copied = false;
+      try { await navigator.clipboard.writeText(id); copied = true; } catch (_) {}
+      if (!copied) {
+        const field = document.createElement("textarea");
+        field.value = id; field.setAttribute("readonly", ""); field.style.position = "fixed"; field.style.opacity = "0";
+        document.body.appendChild(field); field.select();
+        try { copied = document.execCommand("copy"); } catch (_) {}
+        field.remove();
+      }
+      topupSay(copied ? "نُسخ المعرّف " + id + "." : "انسخ المعرّف يدويًا: " + id, copied ? "is-ok" : "");
     });
-    function uploadReceipt(file) {
-      return new Promise((resolve, reject) => {
-        const request = new XMLHttpRequest();
-        request.open("POST", apiRoot + "/support/upload");
-        request.setRequestHeader("X-CSRF-Token", csrf);
-        request.setRequestHeader("X-File-Type", file.type || "");
-        request.setRequestHeader("X-File-Name", encodeURIComponent(file.name || ""));
-        request.onload = () => {
-          let data = {};
-          try { data = JSON.parse(request.responseText); } catch (_) {}
-          if (request.status === 200 && data.success && data.id) resolve(data.id);
-          else reject(new Error(data.message || "تعذّر تجهيز صورة الإيصال."));
-        };
-        request.onerror = () => reject(new Error("تعذّر تجهيز صورة الإيصال."));
-        request.send(file);
-      });
-    }
     async function topupWait(id) {
       for (;;) {
         await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -3006,29 +3003,34 @@ EMBEDDED_PAGE = r'''<!doctype html>
     topupSend.addEventListener("click", async () => {
       if (topupBusy) return;
       const amount = Number(latin(topupAmount.value));
+      const ref = topupRef.value.trim();
       if (!(amount > 0)) { topupSay("اكتب المبلغ الذي حوّلته.", "is-bad"); topupAmount.focus(); return; }
+      if (ref.replace(/[^A-Za-z0-9]/g, "").length < 6) { topupSay("اكتب رقم العملية (Order ID) من تفاصيل التحويل في Binance.", "is-bad"); topupRef.focus(); return; }
       topupBusy = true;
       topupSend.disabled = true;
       try {
-        const files = [];
-        if (receipt) { topupSay("يجهّز صورة الإيصال…", ""); files.push(await uploadReceipt(receipt)); }
-        const ref = topupRef.value.trim();
-        const text = "طلب شحن رصيد\nالمبلغ: $" + amount + (ref ? "\nرقم العملية: " + ref : "") + (receipt ? "" : "\n(بلا صورة إيصال)");
-        topupSay("يرسل طلب الشحن…", "");
-        const started = await postJson("/support/send", {text, files, kind: "topup"}, 120000);
-        if (!started.success || !started.id) { topupSay(started.message || "تعذّر الإرسال. أعد المحاولة.", "is-bad"); return; }
-        const done = await topupWait(started.id);
-        if (done.state !== "done") { topupSay(done.message || "تعذّر الإرسال. أعد المحاولة.", "is-bad"); return; }
-        topupSay(done.message || "وصل طلب الشحن إلى صاحب البرنامج.", "is-ok");
+        topupSay(payment().auto ? "يتحقق من وصول التحويل…" : "يرسل طلب الشحن…", "");
+        const checked = await postJson("/topup/verify", {amount: String(amount), order_id: ref}, 60000);
+        if (!checked.success) { topupSay(checked.message || "تعذّر التحقق من التحويل.", "is-bad"); return; }
+        if (checked.manual) {
+          // (no automatic check: the transfer goes to the owner, who checks it and tops the balance up)
+          const text = "طلب شحن رصيد عبر Binance Pay\nالمبلغ: $" + amount + "\nرقم العملية: " + ref;
+          const started = await postJson("/support/send", {text, files: [], kind: "topup"}, 120000);
+          if (!started.success || !started.id) { topupSay(started.message || "تعذّر الإرسال. أعد المحاولة.", "is-bad"); return; }
+          const done = await topupWait(started.id);
+          if (done.state !== "done") { topupSay(done.message || "تعذّر الإرسال. أعد المحاولة.", "is-bad"); return; }
+          topupSay("أُرسل طلبك. يتحقق صاحب البرنامج من التحويل ثم يُشحن رصيدك، ويصلك ردّه في التنبيهات.", "is-ok");
+        } else {
+          topupSay("تم شحن رصيدك بـ " + money(checked.credited) + ". رصيدك الآن " + money(checked.balance) + ".", "is-ok");
+          await loadCommentsUsage(true);
+        }
         topupAmount.value = "";
         topupRef.value = "";
-        receipt = null;
-        paintReceipt();
       } catch (error) {
-        topupSay(error.message || "تعذّر الإرسال. أعد المحاولة.", "is-bad");
+        topupSay(error.message || "تعذّر الاتصال. أعد المحاولة.", "is-bad");
       } finally {
         topupBusy = false;
-        topupSend.disabled = false;
+        paintTopup();
       }
     });
   }
@@ -14073,12 +14075,11 @@ def comments_usage(fresh: bool = False) -> dict:
 
 
 def clean_payment(raw) -> dict:
-    """«نموذج الدفع» as the control panel sets it: how to pay, and an optional https link with its button's name."""
+    """«الدفع عبر Binance» as the control panel sets it: the owner's Binance Pay ID, a note, and whether transfers are
+    checked there at once (with the owner's key) or by hand."""
     raw = raw if isinstance(raw, dict) else {}
-    link = str(raw.get("link") or "").strip()
-    return {"text": str(raw.get("text") or "").strip()[:1500],
-            "link": link if re.fullmatch(r"https://[^\s<>\"']{3,300}", link) else "",
-            "label": str(raw.get("label") or "").strip()[:40]}
+    return {"binance_id": re.sub(r"\D", "", str(raw.get("binance_id") or ""))[:20],
+            "note": str(raw.get("note") or "").strip()[:500], "auto": raw.get("auto") is True}
 
 
 def forget_comments_usage() -> None:
@@ -16379,6 +16380,33 @@ def support_upload_endpoint(access_path: str):
     name = unquote(request.headers.get("X-File-Name") or "")[:80]
     write_private_json(SUPPORT_OUTBOX / (file_id + ".json"), {"name": name})
     return jsonify(success=True, id=file_id)
+
+
+@app.post("/<access_path>/topup/verify")
+def topup_verify_endpoint(access_path: str):
+    """«شحن رصيد»: the user's Binance Pay transfer (amount, Order ID), checked by the control server in the owner's
+    Binance Pay history; there, the balance is topped up at once. «manual»: no automatic check, the page sends it
+    to the owner as a top-up request instead."""
+    if not hmac.compare_digest(access_path, ACCESS_PATH):
+        abort(404)
+    data = request.get_json(silent=True) or {}
+    if not csrf_ok(data):
+        return jsonify(success=False, message="انتهت صلاحية الصفحة. أعد تحميلها ثم حاول مجددًا."), 400
+    token = _current_token()
+    if not control_configured() or not token:
+        return jsonify(success=False, message="الشحن غير متاح في هذه النسخة."), 400
+    try:
+        answer = _control_request("topup", {"token": token, "amount": str(data.get("amount") or "")[:20],
+                                            "order_id": str(data.get("order_id") or "")[:80]}, seconds=40)
+    except _ControlUnreachable:
+        return jsonify(success=False, message="تعذّر الوصول إلى الخادم. أعد المحاولة بعد قليل.")
+    except RuntimeError as exc:
+        return jsonify(success=False, message=str(exc) or "تعذّر التحقق من التحويل.")
+    if answer.get("manual"):
+        return jsonify(success=True, manual=True)
+    billing_update(answer)
+    forget_comments_usage()
+    return jsonify(success=True, credited=answer.get("credited"), balance=answer.get("balance"))
 
 
 @app.post("/<access_path>/support/send")

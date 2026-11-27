@@ -1906,7 +1906,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
   <div class="usage-sheet danger-box" role="alertdialog" aria-modal="true" aria-labelledby="fast-title" aria-describedby="fast-note">
     <span class="danger-icon ic i-alert" aria-hidden="true"></span>
     <b id="fast-title" class="danger-title">تحذير</b>
-    <p id="fast-note" class="danger-note">قد يتم تقييد حسابك.</p>
+    <p id="fast-note" class="danger-note">قد يتم تقييد حسابك إذا استمررت في التنفيذ السريع.</p>
     <div class="usage-foot">
       <button id="fast-cancel" class="btn btn-ghost" type="button">إلغاء</button>
       <button id="fast-go" class="btn btn-danger" type="button">تنفيذ سريع</button>

@@ -482,6 +482,32 @@ def save_prices(prices: dict, welcome: float | None = None) -> None:
                                      "welcome": round(float(welcome), 2)})
 
 
+# «خدمات مجانية»: services the owner gives one user for free, whatever their price (set in that user's options).
+# They are not taken from that user's balance, a task of them alone starts with no balance, and they add nothing to
+# that user's cost. What was counted before stays as it was.
+SERVICE_NAMES = {"repost": "الرتويت", "like": "الإعجاب", "bookmark": "المرجعية", "comment": "التعليق"}
+
+
+def free_of(row: dict | None) -> list:
+    """The services this user has for free, in the usual order."""
+    chosen = (row or {}).get("free")
+    return [name for name in SERVICES if isinstance(chosen, list) and name in chosen]
+
+
+def prices_for(row: dict | None, prices: dict | None = None) -> dict:
+    """«أسعار الخدمات» as this user pays them: their free services at 0."""
+    out = dict(load_prices() if prices is None else prices)
+    for name in free_of(row):
+        out[name] = 0.0
+    return out
+
+
+def free_for_app(row: dict | None, prices: dict | None = None) -> list:
+    """What the app shows its user as free for them: their free services that have a price for the others."""
+    prices = load_prices() if prices is None else prices
+    return [name for name in free_of(row) if float(prices.get(name) or 0) > 0]
+
+
 # «رصيد الحساب الجديد»: whoever makes an account in the app starts with this trial balance ($1 until the owner sets
 # another in «أسعار الخدمات»; 0 gives none). Once per phone: a phone that already had an account or a code, or got
 # it before (its account deleted since), starts a new account at $0, so a new account is not a new $1 each time.
@@ -858,10 +884,11 @@ def usage_of(code_id: str, data: dict | None = None) -> dict:
     return {"total": total, "cost": _cost(row, "total"), "accounts": accounts}
 
 
-def usage_by_account(code_id: str) -> dict:
-    """What the app shows its user: the comments of their code and their cost, by X account. Accounts go by
-    their @name: one signed in again (in the app, or after the app was installed again) is the same account,
-    whatever its new key; one whose name was never read stays on its own."""
+def usage_by_account(code_id: str, user: dict | None = None) -> dict:
+    """What the app shows its user: the comments of their code and their cost, by X account, and the prices as this
+    user pays them (with what is free for them). Accounts go by their @name: one signed in again (in the app, or
+    after the app was installed again) is the same account, whatever its new key; one whose name was never read
+    stays on its own."""
     row = load_usage().get(code_id) or {"total": 0, "accounts": {}}
     merged: dict[str, dict] = {}
     for key, value in (row.get("accounts") or {}).items():
@@ -877,8 +904,10 @@ def usage_by_account(code_id: str) -> dict:
         ({"name": slot["name"], "n": slot["n"], "cost": round(slot["cost"], 2)} for slot in merged.values()),
         key=lambda item: (-item["cost"], -item["n"]))
     total = int(row.get("total") or 0)
-    prices = load_prices()
-    return {"total": total, "cost": _cost(row, "total"), "price": prices["comment"], "prices": prices, "accounts": accounts}
+    base = load_prices()
+    prices = prices_for(user, base)
+    return {"total": total, "cost": _cost(row, "total"), "price": prices["comment"], "prices": prices,
+            "free": free_for_app(user, base), "accounts": accounts}
 
 
 # ----------------------------------------------------------------------------- how each user pays
@@ -2511,7 +2540,9 @@ html.loading .ldpill{display:flex}
 .prg{display:grid;grid-template-columns:1fr 1fr;gap:10px}.prw{margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}.prc .prh{margin:6px 0 0;font-size:12px}.prf{display:grid;gap:6px;font-size:13px;font-weight:500;color:var(--mut)}.prf .fs{height:44px;font-variant-numeric:tabular-nums}
 .tg{display:inline-block;margin-inline-start:6px;padding:1px 7px;border-radius:99px;font-size:11px;font-weight:600;vertical-align:2px;background:var(--soft);color:var(--mut);border:1px solid var(--line)}
 .tg.pp{background:var(--prisoft);color:var(--pri);border-color:transparent}
-.bal b{color:var(--pri)}.bal.low b{color:var(--bad)}
+.bal b{color:var(--pri)}.bal.low b{color:var(--bad)}.fre b{color:var(--pri)}
+.frg{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-top:12px}.frg .opt{min-height:56px;padding:8px 12px}
+.frh{margin-top:12px;font-size:12.5px}
 .led{margin-top:8px;font-size:13px}.led summary{cursor:pointer;color:var(--mut);min-height:32px;display:flex;align-items:center}
 .led ul{list-style:none;margin:4px 0 0;padding:0;display:grid;gap:6px}.led li{display:grid;grid-template-columns:1fr auto;gap:0 10px;padding:8px 10px;border-radius:10px;background:var(--soft)}
 .led li small{grid-column:1/-1;color:var(--mut);font-size:11.5px}.led .pl{color:var(--pri)}.led .mi{color:var(--bad)}
@@ -2686,6 +2717,7 @@ main{padding-bottom:56px}
 <symbol id="i-msg" viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></symbol>
 <symbol id="i-bell" viewBox="0 0 24 24"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9M13.73 21a2 2 0 0 1-3.46 0"/></symbol>
 <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></symbol>
+<symbol id="i-gift" viewBox="0 0 24 24"><path d="M20 12v10H4V12M2 7h20v5H2zM12 22V7M12 7H7.5a2.5 2.5 0 0 1 0-5C11 2 12 7 12 7zM12 7h4.5a2.5 2.5 0 0 0 0-5C13 2 12 7 12 7z"/></symbol>
 </defs></svg>
 
 <div class="ldbar" aria-hidden="true"></div><div class="ldpill" role="status" aria-live="polite">جارٍ التنفيذ…</div>
@@ -2728,7 +2760,7 @@ main{padding-bottom:56px}
 </section>
 {% set pn = {'comment': 'تعليق', 'like': 'إعجاب', 'repost': 'إعادة نشر', 'bookmark': 'مرجعية'} %}
 <details class="card prc"><summary><span class="prc-h">{{ic('key')}}<b>أسعار الخدمات</b></span><span class="prc-s">{% for k in ['comment', 'like', 'repost', 'bookmark'] %}<span>{{pn[k]}} <bdi dir="ltr">${{ '%g'|format(prices[k]) }}</bdi></span>{% endfor %}<span>حساب جديد <bdi dir="ltr">${{ '%g'|format(welcome) }}</bdi></span></span>{{ic('chev')}}</summary>
-<form method="post" action="/{{admin}}/prices" data-toast="تم حفظ الأسعار"><p class="mut">سعر كل خدمة ناجحة بالدولار، و0 للمجانية. «آجل»: تُجمع التكلفة. «مسبق»: تُخصم من الرصيد، ولا تبدأ مهمة إن لم يكفِ لأرخص خدماتها؛ والمهمة التي بدأت تكمل إلى آخرها ولو نفد الرصيد في نصها (يصير بالسالب، وتسدّه الشحنة التالية). السعر الجديد يُطبَّق من الآن، وما حُسب قبله يبقى.</p>
+<form method="post" action="/{{admin}}/prices" data-toast="تم حفظ الأسعار"><p class="mut">سعر كل خدمة ناجحة بالدولار، و0 للمجانية. «آجل»: تُجمع التكلفة. «مسبق»: تُخصم من الرصيد، ولا تبدأ مهمة إن لم يكفِ لأرخص خدماتها؛ والمهمة التي بدأت تكمل إلى آخرها ولو نفد الرصيد في نصها (يصير بالسالب، وتسدّه الشحنة التالية). السعر الجديد يُطبَّق من الآن، وما حُسب قبله يبقى. ولتجعل خدمة مجانية لمستخدم بعينه: خياراته ← «خدمات مجانية».</p>
 <div class="prg">{% for k in ['comment', 'like', 'repost', 'bookmark'] %}<label class="prf"><span>{{pn[k]}}</span><input class="fs" name="{{k}}" dir="ltr" inputmode="decimal" autocomplete="off" value="{{ '%g'|format(prices[k]) }}"></label>{% endfor %}</div>
 <label class="prf prw"><span>رصيد الحساب الجديد</span><input class="fs" name="welcome" dir="ltr" inputmode="decimal" autocomplete="off" value="{{ '%g'|format(welcome) }}"></label>
 <p class="mut prh">يُضاف تلقائيًا لكل من ينشئ حسابًا جديدًا في التطبيق، مرة واحدة لكل جوال. و0 يوقفه.</p>
@@ -2807,12 +2839,12 @@ if(j.ok){show(j.comment,false,'\u2066'+j.chars+' / '+j.limit+'\u2069 حرف',j.t
 
 <div class="list" id="list">
 {% for c in codes %}{% set hue = (c.id[:2]|int(0,16)) * 360 // 256 %}
-<article class="u{{ '' if c.active else ' off' }}" data-id="{{c.id}}" data-s="{{ 'on' if c.active else 'off' }}" data-name="{{c.label}}" data-code="{{c.code}}" data-bound="{{ '1' if c.device_count else '' }}" data-pay="{{c.pay}}" data-bal="{{ usd(c.balance) }}" data-acct="{{c.account_user}}" data-n="{{c.usage.total}}" data-x="{{ c.acts.repost + c.acts.like + c.acts.bookmark }}" data-seen="{{c.last_seen or 0}}" data-q="{{ (c.label ~ ' ' ~ c.code ~ ' ' ~ c.code|replace('-','') ~ ' ' ~ c.usage.accounts|map(attribute='name')|join(' '))|lower }}">
+<article class="u{{ '' if c.active else ' off' }}" data-id="{{c.id}}" data-s="{{ 'on' if c.active else 'off' }}" data-name="{{c.label}}" data-code="{{c.code}}" data-bound="{{ '1' if c.device_count else '' }}" data-pay="{{c.pay}}" data-bal="{{ usd(c.balance) }}" data-free="{{ c.free|join(',') }}" data-acct="{{c.account_user}}" data-n="{{c.usage.total}}" data-x="{{ c.acts.repost + c.acts.like + c.acts.bookmark }}" data-seen="{{c.last_seen or 0}}" data-q="{{ (c.label ~ ' ' ~ c.code ~ ' ' ~ c.code|replace('-','') ~ ' ' ~ c.usage.accounts|map(attribute='name')|join(' '))|lower }}">
 <div class="who"><div class="av" style="--h:{{hue}}" aria-hidden="true">{{ (c.label or '؟')[:1] }}</div>
 <div class="nm"><h3>{{ c.label or 'بدون اسم' }}{% if c.account_user %}<span class="tg">حساب</span>{% endif %}{% if c.pay == 'prepaid' %}<span class="tg pp">مسبق</span>{% endif %}</h3><p><span class="st">{{ 'يعمل' if c.active else 'موقوف' }}</span><span>{% if c.last_seen %}آخر دخول {{c.last_seen_text}}{% else %}لم يدخل بعد{% endif %}</span></p></div></div>
 <form method="post" action="/{{admin}}/code/toggle" data-toast="{{ 'تم إيقاف الرمز' if c.active else 'تم تشغيل الرمز' }}"><input type="hidden" name="id" value="{{c.id}}"><button class="sw{{ ' on' if c.active else '' }}" role="switch" aria-checked="{{ 'true' if c.active else 'false' }}" aria-label="رمز {{ c.label or 'بدون اسم' }} يعمل"><i></i></button></form>
 <div class="cr"><button type="button" class="code" data-copy="{{c.code}}" aria-label="نسخ الرمز {{c.code}}"><bdi>{{c.code}}</bdi>{{ic('copy')}}</button><button type="button" class="ib" data-more aria-label="خيارات {{ c.label or 'المستخدم' }}">{{ic('more')}}</button></div>
-{% set facts %}{% if c.pay == 'prepaid' %}<span class="bal{{ ' low' if c.balance < 0.05 else '' }}" title="الرصيد المسبق">رصيد <b dir="ltr">{{ usd(c.balance) }}</b></span>{% endif %}<span><b>{{ '{:,}'.format(c.usage.total) }}</b> تعليق</span><span title="التكلفة التقديرية"><b>${{ '%.2f'|format(c.usage.cost) }}</b></span><span class="dev{{ ' on' if c.device_count else '' }}">{{ic('phone')}}{{c.devices_text}}</span>{% endset %}
+{% set facts %}{% if c.pay == 'prepaid' %}<span class="bal{{ ' low' if c.balance < 0.05 else '' }}" title="الرصيد المسبق">رصيد <b dir="ltr">{{ usd(c.balance) }}</b></span>{% endif %}{% if c.free %}<span class="fre" title="خدمات مجانية لهذا المستخدم">مجاني <b>{% for k in c.free %}{{ svc[k] }}{% if not loop.last %} · {% endif %}{% endfor %}</b></span>{% endif %}<span><b>{{ '{:,}'.format(c.usage.total) }}</b> تعليق</span><span title="التكلفة التقديرية"><b>${{ '%.2f'|format(c.usage.cost) }}</b></span><span class="dev{{ ' on' if c.device_count else '' }}">{{ic('phone')}}{{c.devices_text}}</span>{% endset %}
 {% if c.usage.accounts %}<details class="acc"><summary class="facts" title="التعليقات حسب حساب X">{{facts}}{{ic('chev')}}</summary>
 <p class="alh">حسابات X ({{c.usage.accounts|length}})</p><ul class="al">
 {% for a in c.usage.accounts %}<li><b><bdi>{{ ('@' ~ a.name) if a.name else ('#' ~ a.id[:8]) }}</bdi></b><span>{{ '{:,}'.format(a.n) }} تعليق</span><span>${{ '%.2f'|format(a.cost) }}</span><div class="pg"><i style="width:{{ ((a.n * 100 / c.usage.total)|round|int) if c.usage.total else 0 }}%"></i></div></li>{% endfor %}
@@ -3081,6 +3113,7 @@ f.addEventListener('change',sync);sync()})();</script>{% endif %}
 <form id="sh-release" method="post" action="/{{admin}}/code/release" data-title="تحرير الأجهزة؟" data-confirm="يخرج الرمز من كل جوال دخل به، ويدخل صاحبه من جديد على الجوال الذي يريده." data-yes="تحرير الأجهزة" data-toast="تم تحرير الأجهزة"><input type="hidden" name="id"><button>{{ic('phone')}}<span>تحرير الأجهزة<small>يخرج من كل جوالاته، ليدخل من جديد على ما يريد</small></span></button></form>
 <form id="sh-pay" method="post" action="/{{admin}}/code/pay" data-toast="تم تغيير نوع الدفع"><input type="hidden" name="id"><input type="hidden" name="pay" value="prepaid"><button>{{ic('key')}}<span id="sh-pay-t">تحويل إلى دفع مسبق</span></button></form>
 <button type="button" id="sh-bal">{{ic('plus')}}<span>إضافة رصيد<small>تجريبي أو شحن، ويُخصم حسب أسعار الخدمات</small></span></button>
+<button type="button" id="sh-free">{{ic('gift')}}<span>خدمات مجانية<small id="sh-free-t">اختر ما يكون مجانيًا لهذا المستخدم وحده</small></span></button>
 <button type="button" id="sh-pw">{{ic('lock')}}<span>تعيين كلمة سر جديدة<small>لصاحب حساب نسي كلمة سره</small></span></button>
 <form id="sh-reset" method="post" action="/{{admin}}/code/reset-cost" data-title="تصفير التكلفة؟" data-confirm="سيُصفَّر عدّاد التعليقات والتكلفة لهذا المستخدم فقط، ويبقى محسوبًا في «منذ البداية» أعلى الصفحة." data-yes="تصفير التكلفة" data-kind="danger" data-toast="تم تصفير التكلفة"><input type="hidden" name="id"><button>{{ic('reset')}}تصفير التكلفة</button></form>
 <hr>
@@ -3104,6 +3137,10 @@ f.addEventListener('change',sync);sync()})();</script>{% endif %}
 <label class="l" for="bal-a">المبلغ بالدولار <small>(بإشارة سالب للخصم)</small></label><input id="bal-a" class="fs" name="amount" dir="ltr" inputmode="decimal" autocomplete="off" placeholder="2.00" required>
 <label class="l" for="bal-n">الوصف <small>(اختياري)</small></label><input id="bal-n" class="fs" name="note" maxlength="60" autocomplete="off" placeholder="رصيد تجريبي">
 <div class="da"><button type="button" class="btn ghost" data-close>إلغاء</button><button class="btn">إضافة</button></div></form></dialog>
+<dialog id="fre" class="ask" aria-labelledby="fre-t"><form class="dg" method="post" action="/{{admin}}/code/free" data-toast="تم حفظ الخدمات المجانية"><input type="hidden" name="id"><h3 id="fre-t">خدمات مجانية</h3><p class="mut" id="fre-for"></p>
+<div class="frg">{% for k in ['repost', 'like', 'bookmark', 'comment'] %}<label class="opt"><input type="checkbox" name="{{k}}" value="1"><span><b>{{svc[k]}}</b><small>{% if prices[k] > 0 %}سعرها للباقين <bdi dir="ltr">${{ '%g'|format(prices[k]) }}</bdi>{% else %}مجانية للجميع الآن{% endif %}</small></span><span class="ck">{{ic('check')}}</span></label>{% endfor %}</div>
+<p class="mut frh">لا يُخصم ثمنها من رصيده ولا تُحسب في تكلفته، وتبدأ مهمة بها وحدها ولو كان رصيده صفرًا. ما حُسب قبل ذلك يبقى كما هو.</p>
+<div class="da"><button type="button" class="btn ghost" data-close>إلغاء</button><button class="btn">حفظ</button></div></form></dialog>
 <dialog id="pwd" class="ask" aria-labelledby="pwd-t"><form class="dg" method="post" action="/{{admin}}/code/password" data-toast="تم تعيين كلمة السر"><input type="hidden" name="id"><h3 id="pwd-t">كلمة سر جديدة</h3><p class="mut" id="pwd-for"></p>
 <label class="l" for="pwd-p">كلمة السر الجديدة <small>(6 أحرف على الأقل)</small></label><input id="pwd-p" class="fs" name="password" dir="ltr" minlength="6" maxlength="128" autocomplete="new-password" required>
 <div class="da"><button type="button" class="btn ghost" data-close>إلغاء</button><button class="btn">حفظ</button></div></form></dialog>
@@ -3275,7 +3312,12 @@ $('#sh-release').hidden=!d.bound;$('#sh-reset').hidden=!+d.n;
 var pre=d.pay==='prepaid';$('input[name=pay]',$('#sh-pay')).value=pre?'later':'prepaid';
 $('#sh-pay-t').innerHTML=pre?'تحويل إلى «آجل»<small>تُحسب التكلفة ويدفعها لاحقًا، ولا يُخصم من الرصيد</small>':'تحويل إلى «دفع مسبق»<small>لا تبدأ مهمة بخدمات مدفوعة بلا رصيد (الرصيد ⁦'+(d.bal||'$0.00')+'⁩)</small>';
 $('#sh-pw').hidden=!d.acct;
+$('#sh-free-t').textContent=d.free?'مجاني له الآن: '+d.free.split(',').map(function(k){return SV[k]||k}).join('، '):'اختر ما يكون مجانيًا لهذا المستخدم وحده';
 sheet.showModal()}
+var SV={repost:'الرتويت',like:'الإعجاب',bookmark:'المرجعية',comment:'التعليق'};
+$('#sh-free').onclick=function(){sheet.close();var g=$('#fre'),on=(cur.dataset.free||'').split(',');$('input[name=id]',g).value=cur.dataset.id;
+$$('input[type=checkbox]',g).forEach(function(i){i.checked=on.indexOf(i.name)>=0});
+$('#fre-for').textContent='لـ '+(cur.dataset.name||'هذا المستخدم')+' وحده، مهما كانت «أسعار الخدمات». اختر ما يكون مجانيًا له:';g.showModal()};
 $('#sh-bal').onclick=function(){sheet.close();var g=$('#bal');$('input[name=id]',g).value=cur.dataset.id;
 $('#bal-now').textContent=(cur.dataset.name||'المستخدم')+' · الرصيد الآن ⁦'+(cur.dataset.bal||'$0.00')+'⁩'+(cur.dataset.pay==='prepaid'?'':' (هذا المستخدم «آجل»؛ حوّله إلى «مسبق» ليُستخدم رصيده)');
 var a=$('#bal-a');a.value='';$('#bal-n').value='';g.showModal();a.focus()};
@@ -3386,6 +3428,7 @@ def dashboard():
     for r in rows:
         r["pay"] = pay_of(r)
         r["balance"] = balance_of(r)
+        r["free"] = free_of(r)
         r["account_user"] = str((r.get("account") or {}).get("user") or "")
         r["ledger"] = [dict(e, when=seen_text({"last_seen": int(e.get("at") or 0)}))
                        for e in (r.get("ledger") if isinstance(r.get("ledger"), list) else [])[:6] if isinstance(e, dict)]
@@ -3429,7 +3472,7 @@ def dashboard():
         backup_when=seen_text({"last_seen": last_backup}) if last_backup else "",
         owner_link=owner_app_link(request.host), in_owner_app=OWNER_APP_MARK in (request.headers.get("User-Agent") or ""),
         this_host=request.host, relay=MOVE_RELAY.split("//")[-1],
-        prices=load_prices(), welcome=load_welcome(), pace=load_pace(), prompt=load_prompt(), one_device=one_device(),
+        prices=load_prices(), svc=SERVICE_NAMES, welcome=load_welcome(), pace=load_pace(), prompt=load_prompt(), one_device=one_device(),
         pay=dict(public_payment(), has_key=bool(load_binance()["key"]), blocked=binance_blocked(load_binance())),
         app_slots=app_panel(codes), app_dl_link=app_download_link(), app_package=APP_PACKAGE,
         script_live=script_live, script_staged=script_staged, script_next=next_version(highest_published_version()),
@@ -3964,6 +4007,27 @@ def code_pay():
         for row in codes:
             if row.get("id") == code_id:
                 row["pay"] = pay
+        save_codes(codes)
+    return redirect(f"/{ADMIN}")
+
+
+@app.post(f"/{ADMIN}/code/free")
+def code_free():
+    """«خدمات مجانية» for one user: the services ticked are free for them from now on (what was counted stays)."""
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    code_id = request.form.get("id")
+    chosen = [name for name in SERVICES if request.form.get(name) == "1"]
+    with LOCK:
+        codes = load_codes()
+        row = next((item for item in codes if item.get("id") == code_id), None)
+        if row is None:
+            flash("bad", "المستخدم غير موجود.")
+            return redirect(f"/{ADMIN}")
+        if chosen:
+            row["free"] = chosen
+        else:
+            row.pop("free", None)
         save_codes(codes)
     return redirect(f"/{ADMIN}")
 
@@ -4971,7 +5035,7 @@ def api_usage():
     row = code_from_token(body.get("token"))
     if not row:
         return api_err("انتهت صلاحية الدخول أو أوقِف الرمز أو نُقل لجهاز آخر. أعد إدخال الرمز.", 200)
-    return api_ok(**usage_by_account(row["id"]), pay=pay_of(row), balance=round(balance_of(row), 4), payment=public_payment())
+    return api_ok(**usage_by_account(row["id"], row), pay=pay_of(row), balance=round(balance_of(row), 4), payment=public_payment())
 
 
 @app.post(f"/{API}/topup")
@@ -5059,14 +5123,15 @@ def api_task_start():
     row = code_from_token(body.get("token"))
     if not row:
         return api_err("انتهت صلاحية الدخول أو أوقِف الرمز أو نُقل لجهاز آخر. أعد إدخال الرمز.", 200)
-    prices = load_prices()
+    base = load_prices()
+    prices = prices_for(row, base)                  # (this user's free services cost them nothing)
     services = [name for name in body.get("services") if name in SERVICES] if isinstance(body.get("services"), list) else []
     paid = [prices[name] for name in services if prices[name] > 0]
     balance = balance_of(row)
     if pay_of(row) == PAY_PREPAID and paid and balance + 1e-9 < min(paid):
         return api_err(f"رصيدك {money(balance)} لا يكفي لبدء مهمة جديدة. اطلب من صاحب البرنامج شحن رصيدك.")
     return api_ok(**{"pass": make_task_pass(row["id"]), "pay": pay_of(row), "balance": round(balance, 4), "prices": prices,
-                     "pace": load_pace()})
+                     "free": free_for_app(row, base), "pace": load_pace()})
 
 
 @app.post(f"/{API}/charge")
@@ -5079,7 +5144,8 @@ def api_charge():
         return api_err("انتهت صلاحية الدخول أو أوقِف الرمز أو نُقل لجهاز آخر. أعد إدخال الرمز.", 200)
     items = body.get("items") if isinstance(body.get("items"), list) else []
     items = [item for item in items[:500] if isinstance(item, dict)]
-    prices = load_prices()
+    base = load_prices()
+    prices = prices_for(row, base)                  # (counted, at 0, when free for this user)
     cost = record_actions(row["id"], items, prices) if items else 0.0
     with LOCK:
         codes = load_codes()
@@ -5087,7 +5153,8 @@ def api_charge():
         if cost > 0 and pay_of(target) == PAY_PREPAID:
             target["balance"] = round(balance_of(target) - cost, 4)
             save_codes(codes)
-    return api_ok(pay=pay_of(target), balance=round(balance_of(target), 4), prices=prices, charged=cost)
+    return api_ok(pay=pay_of(target), balance=round(balance_of(target), 4), prices=prices, free=free_for_app(row, base),
+                  charged=cost)
 
 
 @app.post(f"/{API}/stats")
@@ -5354,7 +5421,7 @@ def api_comment():
     before = body.get("before") if isinstance(body.get("before"), list) else []
     if not tweet_text and not image:
         return api_err("لا نص ولا صورة للتغريدة.")
-    price = load_prices()["comment"]
+    price = prices_for(row)["comment"]              # (0 when comments are free for this user)
     refused = take_comment_price(row["id"], price, task_pass_ok(row["id"], body.get("pass")))   # («مسبق»: held first)
     if refused:
         return api_err(refused)

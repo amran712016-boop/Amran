@@ -926,6 +926,23 @@ EMBEDDED_PAGE = r'''<!doctype html>
     .c-like { --tint: var(--c-like); }
     .c-bookmark { --tint: var(--c-bookmark); }
     .c-comment { --tint: var(--c-comment); }
+    /* «خدمات مجانية»: a service the owner gave this user for free */
+    .choices .choice.free::before {
+      content: "مجاني";
+      position: absolute;
+      top: -7px;
+      left: 50%;
+      transform: translateX(-50%);
+      padding: 0 6px;
+      border-radius: 99px;
+      border: 1px solid var(--ok-line);
+      background: var(--ok-soft);
+      color: var(--ok);
+      font-size: 9.5px;
+      font-weight: 700;
+      line-height: 12px;
+      white-space: nowrap;
+    }
 
     .reply-voice { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
     .voice-label { font-size: 12px; font-weight: 500; color: var(--text-2); white-space: nowrap; }
@@ -2843,12 +2860,26 @@ EMBEDDED_PAGE = r'''<!doctype html>
     const text = Math.abs(size * 100 - Math.round(size * 100)) < 1e-6 ? size.toFixed(2) : size.toFixed(4).replace(/0+$/, "");
     return "\u2066" + (amount < 0 ? "−$" : "$") + text + "\u2069";
   }
-  // «أسعار الخدمات»: the paid ones, as the owner set them (a price like 0.005 keeps its digits).
-  function priceList(prices, commentPrice) {
-    const names = {comment: "تعليق", like: "إعجاب", repost: "إعادة نشر", bookmark: "مرجعية"};
+  // «أسعار الخدمات»: the paid ones, as the owner set them (a price like 0.005 keeps its digits), and the ones the
+  // owner gave this user for free («خدمات مجانية»).
+  const SERVICE_WORDS = {comment: "تعليق", like: "إعجاب", repost: "إعادة نشر", bookmark: "مرجعية"};
+  function freeText(free) {
+    const mine = Object.keys(SERVICE_WORDS).filter((key) => (free || []).includes(key));
+    return mine.length ? "مجانية لك: " + mine.map((key) => SERVICE_WORDS[key]).join(" · ") + "." : "";
+  }
+  function priceList(prices, commentPrice, free) {
     const all = Object.assign({comment: commentPrice}, prices || {});
-    const paid = Object.keys(names).filter((key) => Number(all[key] || 0) > 0);
-    return paid.length ? "الأسعار: " + paid.map((key) => names[key] + " " + money(all[key])).join(" · ") + "." : "الخدمات مجانية.";
+    const paid = Object.keys(SERVICE_WORDS).filter((key) => Number(all[key] || 0) > 0);
+    if (!paid.length) return (free || []).length ? "الخدمات كلها مجانية لك." : "الخدمات مجانية.";
+    const text = "الأسعار: " + paid.map((key) => SERVICE_WORDS[key] + " " + money(all[key])).join(" · ") + ".";
+    return freeText(free) ? text + " " + freeText(free) : text;
+  }
+  // The tiles of «الإجراءات» say which services are free for this user.
+  function markFreeChoices(free) {
+    ["repost", "like", "bookmark", "comment"].forEach((key) => {
+      const tile = document.querySelector(".choices .c-" + key);
+      if (tile) tile.classList.toggle("free", (free || []).includes(key));
+    });
   }
   function renderUsage() {
     if (!usageData) return;
@@ -2897,13 +2928,15 @@ EMBEDDED_PAGE = r'''<!doctype html>
     });
     document.getElementById("usage-total-n").textContent = Number(usageData.total || 0).toLocaleString("en-US");
     document.getElementById("usage-total-cost").textContent = money(usageData.cost);
-    const price = Number(usageData.price || 0.01);
-    const priceText = priceList(prices, price);
+    const price = usageData.price == null ? 0.01 : Number(usageData.price);
+    const free = Array.isArray(usageData.free) ? usageData.free : [];
+    const priceText = priceList(prices, price, free);
+    markFreeChoices(free);
     usageNote.textContent = prepaid
       ? "رصيدك " + money(usageData.balance) + ". " + priceText + " بلا رصيد لا تبدأ مهمة جديدة، والمهمة التي بدأت تكمل إلى آخرها ولو نفد الرصيد في نصها"
         + (Number(usageData.balance || 0) < -0.004 ? " (ما زاد عليه يُخصم من الشحنة القادمة)" : "") + ". للشحن راسل صاحب البرنامج."
       : usageData.source === "control"
-      ? (usageData.stale ? "آخر قراءة من لوحة التحكم (الخادم غير متاح الآن)." : "")
+      ? [usageData.stale ? "آخر قراءة من لوحة التحكم (الخادم غير متاح الآن)." : "", freeText(free)].filter(Boolean).join(" ")
       : "محسوبة في هذه النسخة: " + money(price) + " لكل تعليق.";
     usageNote.hidden = !usageNote.textContent;
   }
@@ -14065,10 +14098,16 @@ def comments_usage(fresh: bool = False) -> dict:
     for row in answer.get("accounts") or []:
         if isinstance(row, dict):
             accounts.append({"name": str(row.get("name") or "")[:40], "n": int(row.get("n") or 0), "cost": round(float(row.get("cost") or 0), 2)})
+    try:                                         # (0 is a price too: comments free for this user)
+        price = max(0.0, float(answer["price"])) if answer.get("price") is not None else GEMINI_PRICE_PER_COMMENT
+    except (TypeError, ValueError):
+        price = GEMINI_PRICE_PER_COMMENT
+    free = answer.get("free") if isinstance(answer.get("free"), list) else []
     data = {"success": True, "source": "control", "total": int(answer.get("total") or 0), "cost": round(float(answer.get("cost") or 0), 2),
-            "price": float(answer.get("price") or GEMINI_PRICE_PER_COMMENT), "accounts": accounts, "stale": False,
+            "price": price, "accounts": accounts, "stale": False,
             "pay": "prepaid" if answer.get("pay") == "prepaid" else "later", "balance": round(float(answer.get("balance") or 0), 4),
             "prices": answer.get("prices") if isinstance(answer.get("prices"), dict) else {},
+            "free": [name for name in ACTION_NAMES if name in free],      # («خدمات مجانية»: given by the owner)
             "payment": clean_payment(answer.get("payment"))}
     with _comments_usage_lock:
         _comments_usage_cache.update(at=time.monotonic(), data=data)

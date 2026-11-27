@@ -15358,7 +15358,7 @@ import ssl as _ssl
 CONTROL_LINK = "https://217.216.77.23:8443/yPyHqJkUQvv52HD7xxuomYeST1xigjf0mLPoFJHq#b8a830644e5ed5eb80bf2ee7005ec4c29d7a60ad7f47ab3eee899bb04ac47a46"
 # «مفتاح الربط العام» from the control panel's «الربط» tab (public, safe to show): built into the app, so even a new
 # install follows the owner's signed move order when the server above can no longer be reached. "" when not set.
-MOVE_KEY = ""
+MOVE_KEY = "fdf9e5d6613cfaca436ba7a8a9e3254b44857d374a1a6830ba08fff45ce19917"
 _CONTROL_RE = re.compile(r"https://(\[[0-9A-Fa-f:]{2,39}\]|[A-Za-z0-9](?:[A-Za-z0-9.\-]{0,251}[A-Za-z0-9])?)(?::(\d{1,5}))?/([A-Za-z0-9_\-]{16,64})/?#([0-9a-fA-F]{64})")
 UNLOCK_PATH = DATA_DIR / "unlock.json"
 _unlock_lock = threading.Lock()

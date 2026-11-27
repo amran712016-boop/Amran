@@ -659,6 +659,15 @@ EMBEDDED_PAGE = r'''<!doctype html>
     .danger-note { margin: 0; font-size: 15px; line-height: 1.7; color: var(--text); }
     .btn-danger { color: #fff; background: var(--bad); border-color: var(--bad); box-shadow: 0 8px 18px -10px rgba(217, 45, 32, 0.9); }
     @keyframes pop { from { opacity: 0; transform: scale(0.94); } to { opacity: 1; transform: none; } }
+    /* «شحن رصيد»: in the middle of the page too */
+    .usage-sheet.topup-box { width: min(390px, 100%); border-radius: 20px; animation: pop 0.22s var(--ease) both; }
+    .usage-sheet.topup-box::before { display: none; }
+    .topup-balance { margin: 0 0 8px; font-size: 13px; color: var(--text-2); }
+    .topup-how { margin-bottom: 10px; padding: 11px 12px; max-height: 34vh; overflow: auto; white-space: pre-wrap; border-radius: 12px;
+                 border: 1px solid var(--line-2); background: var(--surface-2); color: var(--text); font-size: 13.5px; line-height: 1.8; }
+    .topup-how.empty { color: var(--text-3); }
+    .topup-link { width: 100%; margin-bottom: 8px; min-height: 40px; }
+    .topup-box .help-attach { margin-top: 10px; }
     /* a button that waits for the program shows it is working */
     .btn:disabled::after {
       content: "";
@@ -1877,6 +1886,28 @@ EMBEDDED_PAGE = r'''<!doctype html>
     </div>
   </div>
 </div>
+{% if control_on %}<div id="topup-box" class="pc-backdrop pc-center" hidden>
+  <div class="usage-sheet topup-box" role="dialog" aria-modal="true" aria-labelledby="topup-title">
+    <div class="usage-head">
+      <b id="topup-title">شحن رصيد</b>
+      <button id="topup-close" class="usage-x" type="button" aria-label="إغلاق">×</button>
+    </div>
+    <p id="topup-balance" class="topup-balance" hidden></p>
+    <div id="topup-how" class="topup-how"></div>
+    <a id="topup-link" class="btn btn-ghost topup-link" href="#" target="_blank" rel="noopener" hidden>ادفع الآن</a>
+    <label class="help-label" for="topup-amount">المبلغ المحوَّل ($)</label>
+    <input id="topup-amount" type="text" inputmode="decimal" dir="ltr" maxlength="12" autocomplete="off" placeholder="10">
+    <label class="help-label" for="topup-ref">رقم العملية أو ملاحظة <small>(اختياري)</small></label>
+    <input id="topup-ref" type="text" maxlength="120" autocomplete="off">
+    <input id="topup-file" type="file" accept="image/*" hidden>
+    <button id="topup-attach" class="btn btn-ghost help-attach ic i-clip" type="button">إرفاق صورة الإيصال</button>
+    <p id="topup-status" class="help-status" role="status" hidden></p>
+    <div class="usage-foot">
+      <button id="topup-cancel" class="btn btn-ghost" type="button">إلغاء</button>
+      <button id="topup-send" class="btn btn-pine ic i-send" type="button">إرسال طلب الشحن</button>
+    </div>
+  </div>
+</div>{% endif %}
 <div id="phone-check-box" class="pc-backdrop" hidden>
   <div class="pc-term" role="dialog" aria-modal="true" aria-labelledby="pc-title">
     <div class="pc-bar">
@@ -2884,12 +2915,123 @@ EMBEDDED_PAGE = r'''<!doctype html>
   usagePill.addEventListener("click", openUsage);
   document.getElementById("usage-close").addEventListener("click", closeUsage);
   document.getElementById("usage-done").addEventListener("click", closeUsage);
-  // «شحن رصيد»: a message to the program's owner (the «المساعدة» sheet, as a top-up request)
+  // «شحن رصيد»: a window in the middle of the page: how to pay (the owner's «نموذج الدفع», from the control panel),
+  // then the amount, the transfer's number and its receipt, sent to the owner as a top-up request («رسائل العملاء»).
+  const topupBox = document.getElementById("topup-box");
   const topupButton = document.getElementById("usage-topup");
-  if (topupButton) topupButton.addEventListener("click", () => {
-    closeUsage();
-    if (window.__groupsHelp) window.__groupsHelp.open("topup");
-  });
+  if (topupBox && topupButton) {
+    const topupHow = document.getElementById("topup-how");
+    const topupLink = document.getElementById("topup-link");
+    const topupBalance = document.getElementById("topup-balance");
+    const topupAmount = document.getElementById("topup-amount");
+    const topupRef = document.getElementById("topup-ref");
+    const topupFile = document.getElementById("topup-file");
+    const topupAttach = document.getElementById("topup-attach");
+    const topupStatus = document.getElementById("topup-status");
+    const topupSend = document.getElementById("topup-send");
+    let receipt = null;
+    let topupBusy = false;
+    const latin = (text) => String(text || "").replace(/[٠-٩]/g, (d) => "٠١٢٣٤٥٦٧٨٩".indexOf(d))
+      .replace(/[۰-۹]/g, (d) => "۰۱۲۳۴۵۶۷۸۹".indexOf(d)).replace(/[٫,]/g, ".").replace(/[^\d.]/g, "");
+    function topupSay(text, kind) {
+      topupStatus.hidden = !text;
+      topupStatus.textContent = text || "";
+      topupStatus.className = "help-status" + (kind ? " " + kind : "");
+    }
+    function paintTopup() {
+      const pay = (usageData && usageData.payment) || {};
+      topupHow.textContent = pay.text || "لم يحدد صاحب البرنامج طريقة الدفع بعد. أرسل طلبك وسيتواصل معك.";
+      topupHow.classList.toggle("empty", !pay.text);
+      topupLink.hidden = !pay.link;
+      if (pay.link) { topupLink.href = pay.link; topupLink.textContent = pay.label || "ادفع الآن"; }
+      topupBalance.textContent = usageData && usageData.pay === "prepaid" ? "رصيدك الآن " + money(usageData.balance) + "." : "";
+      topupBalance.hidden = !topupBalance.textContent;
+    }
+    function paintReceipt() {
+      topupAttach.textContent = receipt ? "الإيصال: " + (receipt.name || "صورة") : "إرفاق صورة الإيصال";
+    }
+    function openTopup() {
+      paintTopup();
+      if (!topupBusy) topupSay("");
+      topupBox.hidden = false;
+      Promise.resolve(loadCommentsUsage(true)).then(paintTopup, () => {});
+    }
+    function closeTopup() { topupBox.hidden = true; }
+    topupButton.addEventListener("click", () => { closeUsage(); openTopup(); });
+    document.getElementById("topup-close").addEventListener("click", closeTopup);
+    document.getElementById("topup-cancel").addEventListener("click", closeTopup);
+    topupBox.addEventListener("click", (event) => { if (event.target === topupBox) closeTopup(); });
+    document.addEventListener("keydown", (event) => { if (event.key === "Escape" && !topupBox.hidden) closeTopup(); });
+    topupAttach.addEventListener("click", () => topupFile.click());
+    topupFile.addEventListener("change", () => {
+      const file = topupFile.files && topupFile.files[0];
+      topupFile.value = "";
+      if (!file) return;
+      if (!(file.type || "").startsWith("image/")) { topupSay("الإيصال صورة فقط.", "is-bad"); return; }
+      if (file.size > 8 * 1048576) { topupSay("صورة الإيصال أكبر من 8 ميجابايت.", "is-bad"); return; }
+      receipt = file;
+      paintReceipt();
+      topupSay("");
+    });
+    function uploadReceipt(file) {
+      return new Promise((resolve, reject) => {
+        const request = new XMLHttpRequest();
+        request.open("POST", apiRoot + "/support/upload");
+        request.setRequestHeader("X-CSRF-Token", csrf);
+        request.setRequestHeader("X-File-Type", file.type || "");
+        request.setRequestHeader("X-File-Name", encodeURIComponent(file.name || ""));
+        request.onload = () => {
+          let data = {};
+          try { data = JSON.parse(request.responseText); } catch (_) {}
+          if (request.status === 200 && data.success && data.id) resolve(data.id);
+          else reject(new Error(data.message || "تعذّر تجهيز صورة الإيصال."));
+        };
+        request.onerror = () => reject(new Error("تعذّر تجهيز صورة الإيصال."));
+        request.send(file);
+      });
+    }
+    async function topupWait(id) {
+      for (;;) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        let data;
+        try {
+          const response = await fetchWithTimeout(apiRoot + "/support/status", {headers: {"X-CSRF-Token": csrf}, cache: "no-store"});
+          data = await response.json();
+        } catch (_) { continue; }
+        if (!data || data.id !== id) return {state: "failed", message: "انقطع الإرسال. أعد المحاولة."};
+        if (data.state === "sending") { topupSay(data.message, ""); continue; }
+        return data;
+      }
+    }
+    topupSend.addEventListener("click", async () => {
+      if (topupBusy) return;
+      const amount = Number(latin(topupAmount.value));
+      if (!(amount > 0)) { topupSay("اكتب المبلغ الذي حوّلته.", "is-bad"); topupAmount.focus(); return; }
+      topupBusy = true;
+      topupSend.disabled = true;
+      try {
+        const files = [];
+        if (receipt) { topupSay("يجهّز صورة الإيصال…", ""); files.push(await uploadReceipt(receipt)); }
+        const ref = topupRef.value.trim();
+        const text = "طلب شحن رصيد\nالمبلغ: $" + amount + (ref ? "\nرقم العملية: " + ref : "") + (receipt ? "" : "\n(بلا صورة إيصال)");
+        topupSay("يرسل طلب الشحن…", "");
+        const started = await postJson("/support/send", {text, files, kind: "topup"}, 120000);
+        if (!started.success || !started.id) { topupSay(started.message || "تعذّر الإرسال. أعد المحاولة.", "is-bad"); return; }
+        const done = await topupWait(started.id);
+        if (done.state !== "done") { topupSay(done.message || "تعذّر الإرسال. أعد المحاولة.", "is-bad"); return; }
+        topupSay(done.message || "وصل طلب الشحن إلى صاحب البرنامج.", "is-ok");
+        topupAmount.value = "";
+        topupRef.value = "";
+        receipt = null;
+        paintReceipt();
+      } catch (error) {
+        topupSay(error.message || "تعذّر الإرسال. أعد المحاولة.", "is-bad");
+      } finally {
+        topupBusy = false;
+        topupSend.disabled = false;
+      }
+    });
+  }
   usageBox.addEventListener("click", (event) => { if (event.target === usageBox) closeUsage(); });
 
   function shortPath(url) {
@@ -3403,17 +3545,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
       helpList.hidden = !helpFiles.length;
       helpAttach.disabled = helpBusy || helpFiles.length >= HELP_MAX_FILES;
     }
-    const helpParts = [document.getElementById("help-title"), document.getElementById("help-note"), document.getElementById("help-label")];
-    const helpTexts = {
-      help: [...helpParts.map((node) => node.textContent), helpText.placeholder],
-      topup: ["شحن رصيد", "اكتب المبلغ الذي تريد شحنه، وأرفق صورة التحويل إن وُجدت. تصل رسالتك إلى صاحب البرنامج، ويصلك ردّه في قائمة التنبيهات.",
-              "الرسالة", "مثال: أريد شحن رصيدي بمبلغ 10$."]
-    };
-    function openHelp(mode) {
-      const texts = helpTexts[mode === "topup" ? "topup" : "help"];
-      helpParts.forEach((node, index) => { node.textContent = texts[index]; });
-      helpText.placeholder = texts[3];
-      if (mode === "topup" && !helpText.value.trim()) helpText.value = "أريد شحن رصيدي بمبلغ: ";
+    function openHelp() {
       helpBox.hidden = false;
       if (!helpBusy) helpSay("");
       setTimeout(() => { helpText.focus(); const end = helpText.value.length; helpText.setSelectionRange(end, end); }, 50);
@@ -13933,10 +14065,20 @@ def comments_usage(fresh: bool = False) -> dict:
     data = {"success": True, "source": "control", "total": int(answer.get("total") or 0), "cost": round(float(answer.get("cost") or 0), 2),
             "price": float(answer.get("price") or GEMINI_PRICE_PER_COMMENT), "accounts": accounts, "stale": False,
             "pay": "prepaid" if answer.get("pay") == "prepaid" else "later", "balance": round(float(answer.get("balance") or 0), 4),
-            "prices": answer.get("prices") if isinstance(answer.get("prices"), dict) else {}}
+            "prices": answer.get("prices") if isinstance(answer.get("prices"), dict) else {},
+            "payment": clean_payment(answer.get("payment"))}
     with _comments_usage_lock:
         _comments_usage_cache.update(at=time.monotonic(), data=data)
     return data
+
+
+def clean_payment(raw) -> dict:
+    """«نموذج الدفع» as the control panel sets it: how to pay, and an optional https link with its button's name."""
+    raw = raw if isinstance(raw, dict) else {}
+    link = str(raw.get("link") or "").strip()
+    return {"text": str(raw.get("text") or "").strip()[:1500],
+            "link": link if re.fullmatch(r"https://[^\s<>\"']{3,300}", link) else "",
+            "label": str(raw.get("label") or "").strip()[:40]}
 
 
 def forget_comments_usage() -> None:
@@ -16164,7 +16306,7 @@ def support_meta() -> dict:
     return meta
 
 
-def _support_send(send_id: str, text: str, ids: list[str]) -> None:
+def _support_send(send_id: str, text: str, ids: list[str], kind: str = "help") -> None:
     token = _current_token()
     try:
         if not token:
@@ -16177,9 +16319,10 @@ def _support_send(send_id: str, text: str, ids: list[str]) -> None:
             body = {"token": token, "name": name, "data": base64.b64encode(path.read_bytes()).decode("ascii")}
             sent.append(str(_control_request("support-file", body, seconds=300).get("file") or ""))
         _support_set(state="sending", message="يرسل الرسالة…")
-        _control_request("support", {"token": token, "text": text, "files": [f for f in sent if f], "meta": support_meta()},
-                         seconds=60)
-        _support_set(state="done", message="وصلت رسالتك إلى صاحب البرنامج. يصلك ردّه في قائمة التنبيهات.")
+        _control_request("support", {"token": token, "text": text, "files": [f for f in sent if f], "meta": support_meta(),
+                                     "kind": kind}, seconds=60)
+        _support_set(state="done", message=("وصل طلب الشحن إلى صاحب البرنامج. يصلك ردّه في قائمة التنبيهات." if kind == "topup"
+                                            else "وصلت رسالتك إلى صاحب البرنامج. يصلك ردّه في قائمة التنبيهات."))
         print("أُرسلت رسالة «مساعدة» إلى صاحب البرنامج.", flush=True)
     except (RuntimeError, OSError) as exc:
         _support_set(state="failed", message="لم تُرسل الرسالة: " + (str(exc) or "خطأ غير متوقع."))
@@ -16257,7 +16400,8 @@ def support_send_endpoint(access_path: str):
             return jsonify(success=False, message="رسالة سابقة تُرسل الآن. انتظر انتهاءها."), 409
         send_id = secrets.token_hex(8)
         _support_state.update(id=send_id, state="sending", message="يبدأ الإرسال…")
-    threading.Thread(target=_support_send, args=(send_id, text, ids), name="support-send", daemon=True).start()
+    kind = "topup" if data.get("kind") == "topup" else "help"       # («شحن رصيد»: a top-up request)
+    threading.Thread(target=_support_send, args=(send_id, text, ids, kind), name="support-send", daemon=True).start()
     return jsonify(success=True, id=send_id)
 
 

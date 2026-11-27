@@ -579,6 +579,21 @@ PACE_LIMITS = {"typing": 60.0, "gap": 10.0, "settle": 10.0, "in_page": 50}
 # one is loaded in full: whole numbers, from 1)
 
 
+# «نموذج الدفع»: what a user sees in the app's «شحن رصيد» window: how to pay (accounts, numbers, steps), and an
+# optional link with its button's name. The user then sends the amount, the transfer's number and its receipt
+# (as a message marked «طلب شحن رصيد» in «رسائل العملاء»).
+PAYMENT_PATH = DATA_DIR / "payment.json"
+PAYMENT_TEXT_MAX = 1500
+
+
+def load_payment() -> dict:
+    data = read_private_json(PAYMENT_PATH) or {}
+    link = str(data.get("link") or "").strip()
+    return {"text": str(data.get("text") or "").strip()[:PAYMENT_TEXT_MAX],
+            "link": link if re.fullmatch(r"https://[^\s<>\"']{3,300}", link) else "",
+            "label": str(data.get("label") or "").strip()[:40]}
+
+
 def load_pace() -> dict:
     data = read_private_json(PACE_PATH) or {}
     out = {}
@@ -2444,6 +2459,7 @@ input[type=file].fs{height:auto;padding:10px 12px;width:100%;margin-bottom:4px}
 .mh{display:flex;gap:12px;align-items:center;min-width:0}
 .mh p{font-size:12.5px;color:var(--mut)}
 .nw{display:inline-block;vertical-align:middle;border-radius:99px;padding:0 9px;font-size:11.5px;font-weight:600;background:var(--prisoft);color:var(--pri)}
+.nw.tp{background:#fef0c7;color:#93370d}
 .mt{white-space:pre-wrap;overflow-wrap:anywhere;font-size:15px;line-height:1.75}
 .mf{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px}
 .mi{display:block;border-radius:12px;overflow:hidden;border:1px solid var(--line);background:var(--soft);aspect-ratio:3/4}
@@ -2610,6 +2626,15 @@ main{padding-bottom:56px}
 <label class="prf prw"><span>رصيد الحساب الجديد</span><input class="fs" name="welcome" dir="ltr" inputmode="decimal" autocomplete="off" value="{{ '%g'|format(welcome) }}"></label>
 <p class="mut prh">يُضاف تلقائيًا لكل من ينشئ حسابًا جديدًا في التطبيق، مرة واحدة لكل جوال. و0 يوقفه.</p>
 <button class="btn wide" style="margin-top:14px">حفظ الأسعار</button></form></details>
+<details class="card prc" id="pay-card"><summary><span class="prc-h">{{ic('key')}}<b>نموذج الدفع</b></span><span class="prc-s"><span>{{ 'محدد' if payment.text or payment.link else 'غير محدد' }}</span>{% if payment.link %}<span>{{ payment.label or 'رابط الدفع' }}</span>{% endif %}</span>{{ic('chev')}}</summary>
+<form method="post" action="/{{admin}}/payment" data-toast="تم حفظ نموذج الدفع"><p class="mut">يظهر للمستخدم عند «شحن رصيد» في التطبيق: طريقة الدفع (الحسابات والأرقام والخطوات)، ورابط إن وُجد. ثم يرسل المستخدم المبلغ ورقم العملية وصورة الإيصال، فتصلك رسالة «طلب شحن رصيد» في «رسائل العملاء».</p>
+<p class="l">طريقة الدفع</p>
+<textarea class="ta" name="text" maxlength="1500" rows="6" placeholder="مثال:&#10;التحويل إلى بنك ... — الحساب: SA00 0000 ...&#10;أو STC Pay: 05xxxxxxxx&#10;ثم أرسل الإيصال من هنا.">{{ payment.text }}</textarea>
+<p class="l">رابط الدفع <small>(اختياري، يبدأ بـ https://)</small></p>
+<input class="fs" name="link" dir="ltr" inputmode="url" autocomplete="off" value="{{ payment.link }}" placeholder="https://">
+<p class="l">اسم زر الرابط <small>(اختياري)</small></p>
+<input class="fs" name="label" maxlength="40" autocomplete="off" value="{{ payment.label }}" placeholder="ادفع الآن">
+<button class="btn wide" style="margin-top:14px">حفظ نموذج الدفع</button></form></details>
 <details class="card prc"><summary><span class="prc-h">{{ic('sort')}}<b>سرعة التنفيذ</b></span><span class="prc-s"><span>كتابة التعليق <bdi dir="ltr">{{ '%g'|format(pace.typing[0]) }}–{{ '%g'|format(pace.typing[1]) }}</bdi> ث</span><span>بين الأزرار <bdi dir="ltr">{{ '%g'|format(pace.gap[0]) }}–{{ '%g'|format(pace.gap[1]) }}</bdi> ث</span><span>بعد التحميل <bdi dir="ltr">{{ '%g'|format(pace.settle[0]) }}–{{ '%g'|format(pace.settle[1]) }}</bdi> ث</span>{% if pace.in_page_on %}<span>فتح سريع <bdi dir="ltr">{{ pace.in_page[0] }}–{{ pace.in_page[1] }}</bdi> تغريدات</span>{% else %}<span>فتح سريع: متوقف</span>{% endif %}</span>{{ic('chev')}}</summary>
 <form method="post" action="/{{admin}}/pace" data-toast="تم حفظ سرعة التنفيذ"><p class="mut">بالثواني، ويختار التطبيق كل مرة رقمًا عشوائيًا بين «من» و«إلى». تُطبَّق على كل المستخدمين من مهمتهم التالية.</p>
 <p class="l">مدة كتابة التعليق كله</p>
@@ -2756,7 +2781,7 @@ if(j.ok){show(j.comment,false,'\u2066'+j.chars+' / '+j.limit+'\u2069 حرف',j.t
 {% if messages %}<div class="ml">{% for m in messages %}{% set hue = ((m.code_id or '00')[:2]|int(0,16)) * 360 // 256 %}
 <article class="msg{{ '' if m.read else ' new' }}" id="m{{m.id}}">
 <div class="mh"><div class="av" style="--h:{{hue}}" aria-hidden="true">{{ (m.who or '؟')[:1] }}</div>
-<div class="nm"><h3>{{m.who}}{% if not m.read %} <span class="nw">جديدة</span>{% endif %}</h3><p>{% if m.code %}<bdi>{{m.code}}</bdi> · {% endif %}{{m.ago}} · <span dir="ltr">{{m.when}}</span></p></div></div>
+<div class="nm"><h3>{{m.who}}{% if m.kind == 'topup' %} <span class="nw tp">طلب شحن رصيد</span>{% endif %}{% if not m.read %} <span class="nw">جديدة</span>{% endif %}</h3><p>{% if m.code %}<bdi>{{m.code}}</bdi> · {% endif %}{{m.ago}} · <span dir="ltr">{{m.when}}</span></p></div></div>
 {% if m.text %}<p class="mt">{{m.text}}</p>{% endif %}
 {% if m.files %}<div class="mf">{% for f in m.files %}{% set url = '/' ~ admin ~ '/support/' ~ m.id ~ '/' ~ loop.index0 %}{% if (f.type or '').startswith('image/') %}<a class="mi" href="{{url}}" target="_blank" rel="noopener" aria-label="فتح الصورة {{loop.index}}"><img src="{{url}}" alt="صورة {{loop.index}} من المستخدم" loading="lazy"></a>{% else %}<video class="mv" src="{{url}}" controls preload="none" playsinline aria-label="فيديو {{loop.index}} من المستخدم"></video>{% endif %}{% endfor %}</div>{% endif %}
 {% if m.meta and (m.meta.version or m.meta.device or m.meta.has_log or m.meta.log) %}<details class="acc mm{{ ' lazy' if m.meta.has_log else '' }}"{% if m.meta.has_log %} data-src="/{{admin}}/support/{{m.id}}/log"{% endif %}><summary class="axs"><span>معلومات الجهاز والسجل</span>{{ic('chev')}}</summary>
@@ -3287,6 +3312,7 @@ def dashboard():
         owner_link=owner_app_link(request.host), in_owner_app=OWNER_APP_MARK in (request.headers.get("User-Agent") or ""),
         this_host=request.host, relay=MOVE_RELAY.split("//")[-1],
         prices=load_prices(), welcome=load_welcome(), pace=load_pace(), prompt=load_prompt(), one_device=one_device(),
+        payment=load_payment(),
         app_slots=app_panel(codes), app_dl_link=app_download_link(), app_package=APP_PACKAGE,
         script_live=script_live, script_staged=script_staged, script_next=next_version(highest_published_version()),
         script_floor=highest_published_version(), script_pilot=script_pilot, script_pilot_ids=pilot_ids,
@@ -3665,6 +3691,28 @@ def pace_save():
                 + (f"والفتح السريع مشغّل: تحميل الصفحة كاملة بعد {pace['in_page'][0]} إلى {pace['in_page'][1]} تغريدات. "
                    if pace.get("in_page_on") else "والفتح السريع متوقف: كل تغريدة تُحمَّل كاملة. ")
                 + "تُطبَّق على كل المستخدمين من مهمتهم التالية.")
+    return redirect(f"/{ADMIN}")
+
+
+@app.post(f"/{ADMIN}/payment")
+def payment_save():
+    """«نموذج الدفع»: how to pay, and an optional link, shown in the app's «شحن رصيد» window."""
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    text = str(request.form.get("text") or "").replace("\r\n", "\n").strip()
+    link = str(request.form.get("link") or "").strip()
+    label = re.sub(r"\s+", " ", str(request.form.get("label") or "")).strip()
+    if len(text) > PAYMENT_TEXT_MAX:
+        flash("bad", f"نموذج الدفع حتى {PAYMENT_TEXT_MAX} حرف.")
+        return redirect(f"/{ADMIN}")
+    if link and not re.fullmatch(r"https://[^\s<>\"']{3,300}", link):
+        flash("bad", "رابط الدفع يجب أن يبدأ بـ https:// وبلا مسافات.")
+        return redirect(f"/{ADMIN}")
+    if len(label) > 40:
+        flash("bad", "اسم زر الرابط حتى 40 حرفًا.")
+        return redirect(f"/{ADMIN}")
+    write_private_json(PAYMENT_PATH, {"version": 1, "text": text, "link": link, "label": label})
+    flash("ok", "حُفظ نموذج الدفع: يظهر للمستخدمين في «شحن رصيد».")
     return redirect(f"/{ADMIN}")
 
 
@@ -4703,7 +4751,7 @@ def api_usage():
     row = code_from_token(body.get("token"))
     if not row:
         return api_err("انتهت صلاحية الدخول أو أوقِف الرمز أو نُقل لجهاز آخر. أعد إدخال الرمز.", 200)
-    return api_ok(**usage_by_account(row["id"]), pay=pay_of(row), balance=round(balance_of(row), 4))
+    return api_ok(**usage_by_account(row["id"]), pay=pay_of(row), balance=round(balance_of(row), 4), payment=load_payment())
 
 
 @app.post(f"/{API}/task-start")
@@ -4836,7 +4884,7 @@ def api_support():
                            "size": int(info.get("size") or 0)})
         data["items"].insert(0, light_support({"id": message_id, "code_id": row["id"], "label": row.get("label") or "",
                                                "text": text, "files": stored, "meta": meta, "at": now, "read": False,
-                                               "replies": []}))
+                                               "replies": [], "kind": "topup" if body.get("kind") == "topup" else "help"}))
         dropped = data["items"][SUPPORT_MAX:]
         del data["items"][SUPPORT_MAX:]
         save_support(data)

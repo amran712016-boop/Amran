@@ -429,6 +429,10 @@ EMBEDDED_PAGE = r'''<!doctype html>
       box-shadow: 0 8px 18px -6px rgba(91, 140, 255, 0.75), inset 0 1px 0 rgba(255, 255, 255, 0.4);
     }
     .mark .i { width: 19px; height: 19px; }
+    /* the balance (or the comments' cost) at the top, beside the user's name */
+    .brand-balance { flex: none; height: 36px; padding-inline: 11px 7px; gap: 7px; font-size: 12px; font-weight: 600;
+                     background: rgba(255, 255, 255, 0.12); border-color: rgba(255, 255, 255, 0.22); }
+    .brand-balance .usage-cost { height: 22px; padding: 0 8px; font-size: 11.5px; }
     .brand-text { min-width: 0; display: grid; gap: 1px; }
     .eyebrow {
       display: flex;
@@ -1581,7 +1585,10 @@ EMBEDDED_PAGE = r'''<!doctype html>
   <main class="page">
     <header class="mast">
       <div class="brand">
-        <span class="mark" aria-hidden="true"><i class="i i-zap"></i></span>
+        <button id="usage-pill" class="chip usage-pill brand-balance" type="button" aria-haspopup="dialog" title="الرصيد والتكلفة">
+          <span id="usage-count">التعليقات (0)</span>
+          <bdi id="usage-cost" class="usage-cost" dir="ltr">$0.00</bdi>
+        </button>
         <div class="brand-text">
           <p class="eyebrow">من قروب الدردشة <span id="net-state" class="net" data-state="ok" role="status" aria-live="polite"><i aria-hidden="true"></i><span id="net-text">متصل</span></span></p>
           <h1>{% if app_user %}<bdi>{{ app_user }}</bdi>{% else %}تنفيذ على تغريدات القروب{% endif %}</h1>
@@ -1596,10 +1603,6 @@ EMBEDDED_PAGE = r'''<!doctype html>
       <div class="mast-links">
         {% if not tweets_in_content %}<a class="chip ic i-list" href="{{ api_root }}/tweets">عرض التغريدات</a>{% endif %}
         {% if content_ready %}<a class="chip ic i-sparkle" href="{{ api_root }}/content">إنشاء محتوى</a>{% endif %}
-        <button id="usage-pill" class="chip usage-pill ic i-msg" type="button" aria-haspopup="dialog" title="التعليقات والتكلفة لكل حساب">
-          <span id="usage-count">التعليقات (0)</span>
-          <bdi id="usage-cost" class="usage-cost" dir="ltr">$0.00</bdi>
-        </button>
         {% if control_on and not in_app %}<button id="help-open" class="chip help-open ic i-headset" type="button" aria-haspopup="dialog">مساعدة</button>{% endif %}
       </div>
     </header>
@@ -1818,8 +1821,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
       <b id="help-title">المساعدة</b>
       <button id="help-close" class="usage-x" type="button" aria-label="إغلاق">×</button>
     </div>
-    <p class="usage-note">صف المشكلة التي تواجهك، وأرفق صورًا أو فيديو قصيرًا إن أمكن. تصل رسالتك إلى صاحب البرنامج، ويصلك ردّه في قائمة التنبيهات.</p>
-    <label class="help-label" for="help-text">وصف المشكلة</label>
+    <p id="help-note" class="usage-note">صف المشكلة التي تواجهك، وأرفق صورًا أو فيديو قصيرًا إن أمكن. تصل رسالتك إلى صاحب البرنامج، ويصلك ردّه في قائمة التنبيهات.</p>
+    <label id="help-label" class="help-label" for="help-text">وصف المشكلة</label>
     <textarea id="help-text" class="help-text" rows="5" maxlength="2000" placeholder="مثال: المهمة تتوقف عند التغريدة ١٣ وتظهر رسالة «تعذّر فتح التغريدة»."></textarea>
     <input id="help-files" type="file" accept="image/*,video/*" multiple hidden>
     <button id="help-attach" class="btn btn-ghost help-attach ic i-clip" type="button">إرفاق صور أو فيديو</button>
@@ -1869,7 +1872,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
       <tfoot><tr><th>المجموع</th><th class="num" id="usage-total-n">0</th><th class="num" id="usage-total-cost">$0.00</th></tr></tfoot>
     </table>
     <div class="usage-foot">
-      <button id="usage-refresh" class="btn btn-ghost ic i-rotate" type="button">تحديث</button>
+      {% if control_on %}<button id="usage-topup" class="btn btn-ghost" type="button">شحن رصيد</button>{% endif %}
       <button id="usage-done" class="btn btn-pine" type="button">إغلاق</button>
     </div>
   </div>
@@ -2881,7 +2884,12 @@ EMBEDDED_PAGE = r'''<!doctype html>
   usagePill.addEventListener("click", openUsage);
   document.getElementById("usage-close").addEventListener("click", closeUsage);
   document.getElementById("usage-done").addEventListener("click", closeUsage);
-  document.getElementById("usage-refresh").addEventListener("click", () => loadCommentsUsage(true));
+  // «شحن رصيد»: a message to the program's owner (the «المساعدة» sheet, as a top-up request)
+  const topupButton = document.getElementById("usage-topup");
+  if (topupButton) topupButton.addEventListener("click", () => {
+    closeUsage();
+    if (window.__groupsHelp) window.__groupsHelp.open("topup");
+  });
   usageBox.addEventListener("click", (event) => { if (event.target === usageBox) closeUsage(); });
 
   function shortPath(url) {
@@ -3395,10 +3403,20 @@ EMBEDDED_PAGE = r'''<!doctype html>
       helpList.hidden = !helpFiles.length;
       helpAttach.disabled = helpBusy || helpFiles.length >= HELP_MAX_FILES;
     }
-    function openHelp() {
+    const helpParts = [document.getElementById("help-title"), document.getElementById("help-note"), document.getElementById("help-label")];
+    const helpTexts = {
+      help: [...helpParts.map((node) => node.textContent), helpText.placeholder],
+      topup: ["شحن رصيد", "اكتب المبلغ الذي تريد شحنه، وأرفق صورة التحويل إن وُجدت. تصل رسالتك إلى صاحب البرنامج، ويصلك ردّه في قائمة التنبيهات.",
+              "الرسالة", "مثال: أريد شحن رصيدي بمبلغ 10$."]
+    };
+    function openHelp(mode) {
+      const texts = helpTexts[mode === "topup" ? "topup" : "help"];
+      helpParts.forEach((node, index) => { node.textContent = texts[index]; });
+      helpText.placeholder = texts[3];
+      if (mode === "topup" && !helpText.value.trim()) helpText.value = "أريد شحن رصيدي بمبلغ: ";
       helpBox.hidden = false;
       if (!helpBusy) helpSay("");
-      setTimeout(() => helpText.focus(), 50);
+      setTimeout(() => { helpText.focus(); const end = helpText.value.length; helpText.setSelectionRange(end, end); }, 50);
     }
     function closeHelp() { helpBox.hidden = true; }
     function resetHelp() {

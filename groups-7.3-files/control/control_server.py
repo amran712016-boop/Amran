@@ -286,7 +286,7 @@ def republish_moves_in_background() -> None:
 # ---- «نسخة احتياطية»: all the server's data in one file, encrypted with the control panel's password ----
 BACKUP_FILES = ("secrets.json", "codes.json", "keys.json", "usage.json", "notices.json", "acts.json", "support.json",
                 "move.json", "prices.json", "welcomed.json", "lifetime.json", "pace.json", "history.json", "prompt.json",
-                "devices.json", "activity.json", "server.crt", "server.key")
+                "devices.json", "activity.json", "income.json", "server.crt", "server.key")
 BACKUP_LEDGER = re.compile(r"ledger/[0-9A-Za-z_-]{1,64}\.jsonl\.gz")     # («سجل الرصيد»: each user's, compressed)
 BACKUP_MAGIC = b"GGBAK1"
 
@@ -786,6 +786,7 @@ def record_comment(code_id: str, account: str, name: str, price: float = COST_PE
             who["name"] = name[:40]
         write_private_json(USAGE_PATH, usage)
         history_add({"comment": 1})
+    income_add(price)
 
 
 def record_actions(code_id: str, items: list, prices: dict, charged: list | None = None) -> float:
@@ -833,6 +834,7 @@ def record_actions(code_id: str, items: list, prices: dict, charged: list | None
                 known.add(report)
         code["seen"] = seen[-3000:]
         write_private_json(USAGE_PATH, usage)
+    income_add(added)
     return round(added, 4)
 
 
@@ -1251,6 +1253,76 @@ def forget_activity(code_id: str) -> None:
     with _activity_lock:
         if _activity.pop(code_id, None) is not None:
             write_private_json(ACTIVITY_PATH, {"version": 1, "users": _activity})
+
+
+# ----------------------------------------------------------------------------- «دخل اليوم»
+# What the users spent (every paid service, «آجل» and «مسبق», as «إجمالي الدخل» counts it) in quarter-hour slots
+# of the last two days, so the panel's page sums today's from the owner's own midnight, in the owner's time zone
+# (every time zone's midnight falls on a quarter hour). Started once from «سجل الرصيد», which has the times.
+INCOME_PATH = DATA_DIR / "income.json"
+INCOME_SLOT = 900
+INCOME_SLOTS_KEPT = 2 * 24 * 4 + 8
+_income: dict | None = None
+_income_lock = threading.Lock()
+
+
+def _income_unlocked() -> dict:
+    global _income
+    if _income is None:
+        slots = (read_private_json(INCOME_PATH) or {}).get("slots")
+        _income = {}
+        for key, value in (slots.items() if isinstance(slots, dict) else []):
+            try:
+                _income[int(key)] = float(value)
+            except (TypeError, ValueError):
+                continue
+    return _income
+
+
+def _income_save_unlocked() -> None:
+    newest = int(time.time() // INCOME_SLOT)
+    for key in [key for key in _income if newest - key >= INCOME_SLOTS_KEPT]:
+        _income.pop(key, None)
+    write_private_json(INCOME_PATH, {"version": 1, "slots": {str(key): round(value, 4) for key, value in sorted(_income.items())}})
+
+
+def income_add(amount: float, at: float | None = None) -> None:
+    """Something was spent just now (a comment, a charged service)."""
+    if not amount or amount <= 0:
+        return
+    slot = int((time.time() if at is None else at) // INCOME_SLOT)
+    with _income_lock:
+        slots = _income_unlocked()
+        slots[slot] = round(slots.get(slot, 0.0) + float(amount), 4)
+        _income_save_unlocked()
+
+
+def income_slots() -> dict:
+    with _income_lock:
+        return dict(_income_unlocked())
+
+
+def _income_from_ledgers() -> None:
+    """Once, before this was kept: the last two days' paid services from each user's «سجل الرصيد»."""
+    if INCOME_PATH.exists():
+        return
+    since = time.time() - 2 * 86400
+    with _income_lock:
+        slots = _income_unlocked()
+        for path in sorted(LEDGER_DIR.glob("*.jsonl")) if LEDGER_DIR.is_dir() else []:
+            for line in _ledger_lines(path):
+                try:
+                    row = json.loads(line)
+                    at, amount = float(row.get("at") or 0), float(row.get("amount") or 0)
+                except (ValueError, TypeError, AttributeError):
+                    continue
+                if row.get("kind") == "service" and at >= since and amount < 0:
+                    slot = int(at // INCOME_SLOT)
+                    slots[slot] = round(slots.get(slot, 0.0) - amount, 4)
+        _income_save_unlocked()
+
+
+_income_from_ledgers()
 
 
 # ----------------------------------------------------------------------------- accounts (a name and a password)
@@ -2679,8 +2751,8 @@ input::placeholder{color:var(--mut);opacity:.8}
 .hta{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end}.hta form{margin:0}
 .setb{display:grid;gap:8px;padding-bottom:12px}.setb .card{margin:0;border-radius:12px;background:var(--soft)}.setb .prc{padding:0 12px}
 @media(max-width:599px){.hero{padding:12px 14px 0;margin-top:12px;border-radius:16px}.tot b{font-size:32px}.hb{height:34px;padding:0 10px;font-size:12.5px}.ratio{margin-top:10px;height:6px}.rl{margin-top:5px;font-size:12px}.kp{margin-top:10px}.kp div{padding:7px 0 8px;padding-inline-start:10px}.kp dt{font-size:11px}.kp dd{font-size:16px}.kpa{font-size:10px}}
-.hm{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:12px}.hm div{display:grid;gap:1px;min-width:0;padding:9px 12px;border-radius:12px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12)}.hm span{font-size:12px;color:#a3cbc6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.hm b{font-size:20px;font-weight:600;line-height:1.3;font-variant-numeric:tabular-nums;color:#fff;overflow:hidden;text-overflow:ellipsis}.hm small{font-size:11px;color:#a3cbc6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-@media(max-width:599px){.hm{gap:6px}.hm div{padding:8px 9px}.hm span{font-size:11px}.hm b{font-size:16px}.hm small{font-size:10px}}
+.hm{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:12px}.hm div{display:grid;gap:1px;min-width:0;padding:9px 12px;border-radius:12px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12)}.hm span{font-size:12px;color:#a3cbc6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.hm b{font-size:20px;font-weight:600;line-height:1.3;font-variant-numeric:tabular-nums;color:#fff;overflow:hidden;text-overflow:ellipsis}.hm small{font-size:11px;color:#a3cbc6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+@media(max-width:599px){.hm{gap:6px;grid-template-columns:1fr 1fr}.hm div{padding:8px 10px}.hm span{font-size:11.5px}.hm b{font-size:18px}.hm small{font-size:10.5px}}
 .idle{margin-top:14px}.idle>summary .prc-h .tg{margin:0}.idle .list{padding-bottom:12px}.idle .u{background:var(--soft)}
 .nm .st{font-size:0;gap:0}.ls{display:inline-flex;align-items:center;gap:3px}.ls .i{width:12px;height:12px}
 @media(max-width:599px){.hbt{display:none}.hta .hb{width:36px;padding:0;justify-content:center}}
@@ -3043,6 +3115,7 @@ main{padding-bottom:56px}
 <div class="rl"><span><b>{{stats.active}}</b> يعمل</span><span><b>{{stats.users - stats.active}}</b> موقوف</span></div>
 <div class="hm"><div><span>أرصدة المسبق</span><b dir="ltr">{{ usd(stats.balance) }}</b><small>{% if stats.debt < 0 %}بالسالب <bdi dir="ltr">{{ usd(stats.debt) }}</bdi>{% else %}عند {{stats.prepaid_n}} مستخدم{% endif %}</small></div>
 <div><span>ديون الآجل</span><b dir="ltr">${{ '%.2f'|format(stats.later_debt) }}</b><small>على {{stats.later_n}} مستخدم</small></div>
+<div><span>دخل اليوم</span><b dir="ltr" id="inc-today" data-slots="{{ stats.income_slots }}">${{ '%.2f'|format(stats.income_today) }}</b><small>منذ منتصف الليل</small></div>
 <div><span>إجمالي الدخل</span><b dir="ltr">${{ '%.2f'|format(stats.all_cost) }}</b><small>منذ البداية</small></div></div>
 </div>
 <dl class="kp">
@@ -3625,6 +3698,11 @@ function old(){var a=D.createElement('textarea');a.value=v;a.style.cssText='posi
 if(navigator.clipboard&&window.isSecureContext)navigator.clipboard.writeText(v).then(ok,old);else old()}
 if(!navigator.share)$$('[data-share]').forEach(function(b){b.hidden=true});
 
+/* «دخل اليوم»: from this phone's own midnight (the server keeps quarter hours of the last two days) */
+(function(){var b=D.getElementById('inc-today');if(!b)return;try{var slots=JSON.parse(b.dataset.slots||'{}'),m=new Date();m.setHours(0,0,0,0);
+var from=Math.floor(m.getTime()/1000/900),sum=0;Object.keys(slots).forEach(function(k){if(+k>=from)sum+=+slots[k]||0});
+b.textContent='$'+(Math.round(sum*100)/100).toFixed(2)}catch(e){}})();
+
 /* a user's row: a tap on the name opens the rest under it (another tap closes it) */
 function setOpen(u,on){u.classList.toggle('open',on);var w=$('.who',u);if(w)w.setAttribute('aria-expanded',String(on))}
 D.addEventListener('click',function(e){var w=e.target.closest('.u .who');if(w){var u=w.closest('.u');setOpen(u,!u.classList.contains('open'))}});
@@ -3806,6 +3884,10 @@ def dashboard():
     since_start = lifetime_totals(usage_data)
     stats["all_comments"], stats["all_cost"] = since_start["comments"], since_start["cost"]
     stats["ccost"] = round(sum(r["usage"]["ccost"] for r in rows), 2)       # («تكلفة التعليقات»: the comments only)
+    income = income_slots()                          # («دخل اليوم»: from this server's midnight; the page redoes it
+    midnight = time.mktime(time.localtime()[:3] + (0, 0, 0, 0, 0, -1))   # from the owner's own)
+    stats["income_today"] = round(sum(v for k, v in income.items() if k * INCOME_SLOT >= midnight), 2)
+    stats["income_slots"] = json.dumps({str(k): v for k, v in income.items()}, separators=(",", ":"))
     stats["all_ccost"] = since_start["comment_cost"]
     # «مسبق»: what their balances hold now (and what the ones below zero owe); «آجل»: what they owe, their cost
     # since it was last cleared («تصفير التكلفة», when the owner collects it).

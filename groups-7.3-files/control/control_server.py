@@ -843,8 +843,9 @@ def record_actions(code_id: str, items: list, prices: dict, charged: list | None
 LIFETIME_PATH = DATA_DIR / "lifetime.json"
 
 
-# «تكلفة التعليقات»: what the comments alone cost (the cost above is of every paid service). Kept apart since it
-# was added («ccost»); for what was counted before, the comments at the comment price, never more than the whole.
+# What the comments alone cost (the cost above is of every paid service). Kept apart since it was added («ccost»);
+# for what was counted before, the comments at the comment price, never more than the whole. The summary no longer
+# shows it (the owner keeps only «تعليقات مكتوبة» there), but it is still kept, so it can come back with its history.
 def _comment_price_then() -> float:
     return load_prices()["comment"] or COST_PER_COMMENT
 
@@ -2742,7 +2743,8 @@ input::placeholder{color:var(--mut);opacity:.8}
 .ratio i{border-radius:99px;background:#63d6ca}
 .rl{display:flex;justify-content:space-between;gap:12px;font-size:13px;color:#a3cbc6;margin-top:7px}
 .rl b{color:#fff;font-weight:600;font-variant-numeric:tabular-nums}
-.kp{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));margin-top:12px;border-top:1px solid var(--heroline)}
+.kp{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));margin-top:12px;border-top:1px solid var(--heroline)}
+.kp div{grid-column:span 2}.kp div:nth-child(-n+2){grid-column:span 3}   /* (two above: devices, comments; three under) */
 .kp div{padding:10px 0 12px;padding-inline-start:14px;border-inline-start:1px solid var(--heroline)}
 .kp div:first-child{padding-inline-start:0;border:0}
 .kp dt{font-size:12px;color:#a3cbc6;line-height:1.5}
@@ -2828,8 +2830,8 @@ input::placeholder{color:var(--mut);opacity:.8}
 .al span{font-variant-numeric:tabular-nums}
 .pg{grid-column:1/-1;height:4px;border-radius:9px;background:var(--line);overflow:hidden}
 .pg i{display:block;height:100%;border-radius:9px;background:var(--pri)}
-.kp div:nth-child(3n+1){padding-inline-start:0;border-inline-start:0}
-.kp div:nth-child(n+4){border-top:1px solid var(--heroline)}
+.kp div:nth-child(1),.kp div:nth-child(3){padding-inline-start:0;border-inline-start:0}
+.kp div:nth-child(n+3){border-top:1px solid var(--heroline)}
 .ax{grid-column:1/-1;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
 .ax div{background:var(--soft);border:1px solid var(--line);border-radius:12px;padding:8px 10px;text-align:center;line-height:1.35}
 .ax b{display:block;font-size:18px;font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}
@@ -3043,14 +3045,17 @@ dialog[open]{animation:pop .22s cubic-bezier(.2,.8,.2,1)}
 main{padding-bottom:56px}
 .toasts{bottom:24px}
 .hero{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.15fr);align-items:center;gap:0 30px;padding:22px 26px;margin-top:22px}
+.hm{grid-template-columns:1fr 1fr}
 .kp{margin:0;border-top:0;border-inline-start:1px solid var(--heroline)}
 .kp div{padding:6px 0;padding-inline-start:22px}
-.kp div:first-child,.kp div:nth-child(3n+1){padding-inline-start:26px}
+.kp div:nth-child(1),.kp div:nth-child(3){padding-inline-start:26px}
 .kp dd{font-size:24px}
 .tb{padding-top:14px}
 .search{max-width:420px}
 .add{margin-inline-start:auto}
 }
+/* wide enough for the four money tiles in one row: they get the wider side (the stats beside them are five) */
+@media(min-width:1100px){.hero{grid-template-columns:minmax(0,1.25fr) minmax(0,1fr)}.hm{grid-template-columns:repeat(4,minmax(0,1fr))}}
 @media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 </style></head><body>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
@@ -3121,7 +3126,6 @@ main{padding-bottom:56px}
 <dl class="kp">
 <div><dt>أجهزة مربوطة</dt><dd>{{stats.bound}}</dd></div>
 <div><dt>تعليقات مكتوبة</dt><dd>{{ '{:,}'.format(stats.comments) }}</dd><small class="kpa">منذ البداية <bdi dir="ltr">{{ '{:,}'.format(stats.all_comments) }}</bdi></small></div>
-<div><dt>تكلفة التعليقات</dt><dd>${{ '%.2f'|format(stats.ccost) }}</dd><small class="kpa">منذ البداية <bdi dir="ltr">${{ '%.2f'|format(stats.all_ccost) }}</bdi></small></div>
 <div><dt>الرتويت</dt><dd>{{ '{:,}'.format(stats.repost) }}</dd></div>
 <div><dt>الإعجاب</dt><dd>{{ '{:,}'.format(stats.like) }}</dd></div>
 <div><dt>المرجعية</dt><dd>{{ '{:,}'.format(stats.bookmark) }}</dd></div>
@@ -3883,12 +3887,10 @@ def dashboard():
              "bookmark": sum(r["acts"]["bookmark"] for r in rows)}
     since_start = lifetime_totals(usage_data)
     stats["all_comments"], stats["all_cost"] = since_start["comments"], since_start["cost"]
-    stats["ccost"] = round(sum(r["usage"]["ccost"] for r in rows), 2)       # («تكلفة التعليقات»: the comments only)
     income = income_slots()                          # («دخل اليوم»: from this server's midnight; the page redoes it
     midnight = time.mktime(time.localtime()[:3] + (0, 0, 0, 0, 0, -1))   # from the owner's own)
     stats["income_today"] = round(sum(v for k, v in income.items() if k * INCOME_SLOT >= midnight), 2)
     stats["income_slots"] = json.dumps({str(k): v for k, v in income.items()}, separators=(",", ":"))
-    stats["all_ccost"] = since_start["comment_cost"]
     # «مسبق»: what their balances hold now (and what the ones below zero owe); «آجل»: what they owe, their cost
     # since it was last cleared («تصفير التكلفة», when the owner collects it).
     stats["balance"] = round(sum(r["balance"] for r in prepaid if r["balance"] > 0), 4)

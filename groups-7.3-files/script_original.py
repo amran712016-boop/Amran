@@ -1401,6 +1401,21 @@ EMBEDDED_PAGE = r'''<!doctype html>
     .usage-table .empty { padding: 18px; text-align: center; color: var(--text-3); }
     .usage-foot { display: flex; gap: 8px; margin-top: 14px; }
     .usage-foot .btn { flex: 1; min-height: 40px; }
+    /* «سجل الرصيد»: a tab beside the accounts' table */
+    .usage-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 3px; margin: 0 0 10px; padding: 3px; border-radius: 11px; background: var(--surface-3); }
+    .usage-tabs button { min-height: 34px; padding: 0 10px; border: 0; border-radius: 9px; background: none; color: var(--text-3); font: inherit; font-size: 13px; font-weight: 600; }
+    .usage-tabs button[aria-selected="true"] { background: var(--surface); color: var(--text); box-shadow: 0 1px 3px rgba(16, 24, 40, 0.12); }
+    .led-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; max-height: min(52vh, 440px); overflow: auto; overscroll-behavior: contain; }
+    .led-list li { display: grid; grid-template-columns: 1fr auto; align-items: baseline; gap: 2px 10px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-2); }
+    .led-list b { font-size: 13.5px; font-weight: 600; color: var(--text); }
+    .led-amt { font-size: 13.5px; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .led-amt.in { color: var(--ok); }
+    .led-amt.out { color: var(--bad); }
+    .led-list small { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 0 10px; font-size: 11.5px; line-height: 1.7; color: var(--text-3); }
+    .led-list small a { color: var(--brand); font-weight: 600; text-decoration: none; }
+    .led-list q { grid-column: 1 / -1; quotes: none; margin-top: 4px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--text-2); font-size: 12.5px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .led-note { margin: 10px 0 0; text-align: center; font-size: 12.5px; color: var(--text-3); }
+    .led-more { width: 100%; min-height: 38px; margin-top: 8px; }
 
     .guide-steps { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 0; }
     .guide-steps li { position: relative; display: flex; gap: 12px; padding-bottom: 14px; }
@@ -1933,11 +1948,22 @@ EMBEDDED_PAGE = r'''<!doctype html>
       <button id="usage-close" class="usage-x" type="button" aria-label="إغلاق">×</button>
     </div>
     <p id="usage-note" class="usage-note"></p>
+    {% if control_on %}<div class="usage-tabs" role="tablist" aria-label="عرض">
+      <button id="usage-tab-sum" type="button" role="tab" aria-selected="true" aria-controls="usage-sum">الحسابات</button>
+      <button id="usage-tab-led" type="button" role="tab" aria-selected="false" aria-controls="usage-led">سجل الرصيد</button>
+    </div>{% endif %}
+    <div id="usage-sum" role="tabpanel">
     <table class="usage-table">
       <thead><tr><th>الحساب</th><th class="num">التعليقات</th><th class="num">التكلفة</th></tr></thead>
       <tbody id="usage-rows"></tbody>
       <tfoot><tr><th>المجموع</th><th class="num" id="usage-total-n">0</th><th class="num" id="usage-total-cost">$0.00</th></tr></tfoot>
     </table>
+    </div>
+    {% if control_on %}<div id="usage-led" role="tabpanel" hidden>
+      <ul id="led-list" class="led-list"></ul>
+      <p id="led-note" class="led-note" hidden></p>
+      <button id="led-more" class="btn btn-ghost led-more" type="button" hidden>المزيد</button>
+    </div>{% endif %}
     <div class="usage-foot">
       {% if control_on %}<button id="usage-topup" class="btn btn-ghost" type="button">شحن رصيد</button>{% endif %}
       <button id="usage-done" class="btn btn-pine" type="button">إغلاق</button>
@@ -3016,10 +3042,109 @@ EMBEDDED_PAGE = r'''<!doctype html>
       renderUsage();
     } catch (_) {}
   }
+  // «سجل الرصيد» (from the control panel): every change to the balance, newest first: each paid service with its
+  // tweet and the X account that did it (and a comment's text), each top-up; «المزيد» for older ones.
+  const ledTabs = {sum: document.getElementById("usage-tab-sum"), led: document.getElementById("usage-tab-led")};
+  const ledPanes = {sum: document.getElementById("usage-sum"), led: document.getElementById("usage-led")};
+  const ledList = document.getElementById("led-list");
+  const ledNote = document.getElementById("led-note");
+  const ledMore = document.getElementById("led-more");
+  const LEDGER_WORDS = {like: "إعجاب", repost: "إعادة نشر", bookmark: "مرجعية", comment: "تعليق",
+    topup: "شحن رصيد", add: "إضافة رصيد", fix: "خصم", gift: "رصيد تجريبي"};
+  let ledgerNext = "";
+  let ledgerBusy = false;
+  function ledgerWhen(at) {
+    const when = new Date(Number(at || 0) * 1000);
+    const now = new Date();
+    const yesterday = new Date();
+    yesterday.setDate(now.getDate() - 1);
+    const pad = (n) => String(n).padStart(2, "0");
+    const time = pad(when.getHours()) + ":" + pad(when.getMinutes());
+    if (when.toDateString() === now.toDateString()) return "اليوم " + time;
+    if (when.toDateString() === yesterday.toDateString()) return "أمس " + time;
+    return when.getDate() + "/" + (when.getMonth() + 1) + (when.getFullYear() !== now.getFullYear() ? "/" + when.getFullYear() : "") + " " + time;
+  }
+  function ledgerRow(entry) {
+    const item = document.createElement("li");
+    const kind = entry.kind === "service" ? entry.action : entry.kind;
+    const title = document.createElement("b");
+    title.textContent = (LEDGER_WORDS[kind] || kind || "") + (Number(entry.count || 1) > 1 ? " ×" + entry.count : "");
+    const amount = document.createElement("span");
+    amount.className = "led-amt " + (Number(entry.amount) > 0 ? "in" : "out");
+    amount.dir = "ltr";                    // (+$5.00, not $5.00+)
+    amount.textContent = (Number(entry.amount) > 0 ? "+" : "") + money(entry.amount);
+    const details = document.createElement("small");
+    const part = (node) => details.append(node);
+    const text = (value) => { const span = document.createElement("span"); span.textContent = value; return span; };
+    part(text(ledgerWhen(entry.at)));
+    if (entry.account) {
+      const who = document.createElement("bdi");
+      who.dir = "ltr";
+      who.textContent = "@" + entry.account;
+      part(who);
+    }
+    if (entry.url) {
+      const link = document.createElement("a");
+      link.href = entry.url;
+      link.target = "_blank";
+      link.rel = "noopener";
+      link.textContent = "التغريدة ↗";
+      part(link);
+    }
+    if (entry.note) part(text(entry.note));
+    if (entry.after != null) part(text("الرصيد بعدها " + money(entry.after)));
+    else if (entry.pay === "later") part(text("يُدفع لاحقًا"));
+    item.append(title, amount, details);
+    if (entry.comment) {
+      const said = document.createElement("q");
+      said.dir = "auto";
+      said.textContent = entry.comment;
+      item.append(said);
+    }
+    return item;
+  }
+  async function loadLedger(more) {
+    if (!ledList || ledgerBusy) return;
+    ledgerBusy = true;
+    ledMore.disabled = true;
+    if (!more && !ledList.children.length) { ledNote.hidden = false; ledNote.textContent = "جارٍ التحميل…"; }
+    try {
+      const response = await fetchWithTimeout(apiRoot + "/ledger" + (more && ledgerNext ? "?before=" + encodeURIComponent(ledgerNext) : ""),
+        {headers: {"X-CSRF-Token": csrf}, cache: "no-store"});
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || "");
+      if (!more) ledList.replaceChildren();
+      (data.items || []).forEach((entry) => ledList.append(ledgerRow(entry)));
+      ledgerNext = data.next || "";
+      ledMore.hidden = !data.more;
+      ledNote.hidden = ledList.children.length > 0;
+      ledNote.textContent = "لا حركات في رصيدك بعد.";
+    } catch (error) {
+      ledNote.hidden = false;
+      ledNote.textContent = (error && error.message) || "تعذّر تحميل السجل. أعد المحاولة.";
+    } finally {
+      ledgerBusy = false;
+      ledMore.disabled = false;
+    }
+  }
+  function showUsageTab(name) {
+    if (!ledTabs.led) return;
+    ["sum", "led"].forEach((key) => {
+      ledTabs[key].setAttribute("aria-selected", String(key === name));
+      ledPanes[key].hidden = key !== name;
+    });
+    if (name === "led") loadLedger(false);
+  }
+  if (ledTabs.led) {
+    ledTabs.sum.addEventListener("click", () => showUsageTab("sum"));
+    ledTabs.led.addEventListener("click", () => showUsageTab("led"));
+    ledMore.addEventListener("click", () => loadLedger(true));
+  }
   function openUsage() {
     usageBox.hidden = false;
     renderUsage();
     loadCommentsUsage(true);
+    if (ledTabs.led && ledTabs.led.getAttribute("aria-selected") === "true") loadLedger(false);
   }
   function closeUsage() { usageBox.hidden = true; }
   usagePill.addEventListener("click", openUsage);
@@ -7889,7 +8014,7 @@ def _execute_comment_actions(page, items: list[dict], task_actions: list[str], a
         # Save what was done, for the tweet in the group and for the tweet actually replied to.
         for done_id in {status_id, tweet_status_id(result["url"])}:
             remember_done(account, done_id, result["actions"])
-        count_successes(result["actions"], account)
+        count_successes(result["actions"], account, result.get("url") or "")
         results.append(result)
         if on_snapshot:
             on_snapshot(list(results))
@@ -11145,11 +11270,12 @@ def load_action_counts() -> None:
                             action: max(0, int(row.get(action) or 0)) for action in ACTION_NAMES if row.get(action)}
 
 
-def count_successes(outcome: dict[str, str], account: str = "") -> None:
-    """Add this tweet's successful actions to this account's totals shown at the top of the page."""
+def count_successes(outcome: dict[str, str], account: str = "", url: str = "") -> None:
+    """Add this tweet's successful actions to this account's totals shown at the top of the page (and the paid ones
+    to what is reported to the control server, with the tweet's link)."""
     done = [action for action, note in (outcome or {}).items() if note == "تم التنفيذ" and action in ACTION_NAMES]
     if done:
-        charge_services(account, done)
+        charge_services(account, done, url)
     if not done or not account:
         return
     with action_counts_lock:
@@ -11773,7 +11899,7 @@ def visit_and_apply(page, items: list[dict], task_actions: list[str], on_progres
             pressed = {key: "تعذر تنفيذ الإجراء بعد فتح التغريدة" for key in press}
         result["actions"] = {key: (BUTTON_OFF if key in off else pressed.get(key, "تعذر التنفيذ")) for key in actions}
         remember_done(account, status_id or tweet_status_id(opened), result["actions"])
-        count_successes(result["actions"], account)
+        count_successes(result["actions"], account, result.get("url") or "")
         results.append(result)
         if on_snapshot:
             on_snapshot(list(results))
@@ -14289,6 +14415,46 @@ def comments_usage_endpoint(access_path: str):
     return jsonify(**comments_usage(fresh=request.args.get("fresh") == "1"))
 
 
+def clean_ledger_row(row: dict) -> dict | None:
+    """One line of «سجل الرصيد» as the control panel sent it, kept to what the page shows."""
+    try:
+        out = {"at": int(row.get("at") or 0), "kind": str(row.get("kind") or "")[:10], "amount": round(float(row.get("amount") or 0), 4)}
+        if row.get("after") is not None:
+            out["after"] = round(float(row["after"]), 4)
+        if int(row.get("count") or 1) > 1:
+            out["count"] = int(row["count"])
+    except (TypeError, ValueError):
+        return None
+    for key, limit in (("action", 12), ("account", 40), ("comment", 1200), ("note", 120), ("pay", 8)):
+        if row.get(key):
+            out[key] = str(row[key])[:limit]
+    url = str(row.get("url") or "")
+    if re.fullmatch(r"https://(?:x|twitter|mobile\.x|mobile\.twitter)\.com/[A-Za-z0-9_/]{1,80}status/\d{5,25}", url):
+        out["url"] = url
+    return out
+
+
+@app.get("/<access_path>/ledger")
+def ledger_endpoint(access_path: str):
+    """«سجل الرصيد» for the balance window: this user's own, from the control panel, a page at a time."""
+    if not hmac.compare_digest(access_path, ACCESS_PATH):
+        abort(404)
+    if not csrf_matches(request.headers.get("X-CSRF-Token", "")):
+        return jsonify(success=False, message="انتهت صلاحية الصفحة. أعد تحميلها ثم حاول مجددًا."), 400
+    token = _current_token() if control_configured() else ""
+    if not token:
+        return jsonify(success=False, message="سجل الرصيد يأتي من لوحة التحكم.")
+    try:
+        answer = _control_request("ledger", {"token": token, "before": str(request.args.get("before") or "")[:40]}, seconds=15)
+    except _ControlNoRoute:
+        return jsonify(success=False, message="سجل الرصيد يحتاج تحديث خادم التحكم.")
+    except RuntimeError as exc:
+        return jsonify(success=False, message=str(exc) or "تعذّر تحميل السجل. أعد المحاولة.")
+    items = [clean_ledger_row(row) for row in (answer.get("items") or [])[:200] if isinstance(row, dict)]
+    return jsonify(success=True, items=[row for row in items if row], more=bool(answer.get("more")),
+                   next=str(answer.get("next") or "")[:40])
+
+
 @app.get("/<access_path>/stats")
 def stats_endpoint(access_path: str):
     if not hmac.compare_digest(access_path, ACCESS_PATH):
@@ -16088,13 +16254,15 @@ def service_used(action: str) -> None:
             _billing["balance"] -= float(_billing["prices"].get(action) or 0)
 
 
-def charge_services(account: str, done: list) -> None:
-    """Successful paid services, kept on the phone to be reported to the control server in the background."""
+def charge_services(account: str, done: list, url: str = "") -> None:
+    """Successful paid services, kept on the phone to be reported to the control server in the background, with
+    their tweet (for «سجل الرصيد»)."""
     paid = [action for action in done if action in PAID_ACTIONS and service_price(action) != 0]
     if not paid or not control_configured():
         return
     item = {"id": secrets.token_hex(8), "account": account or "", "name": str(account_names.get(account) or ""),
-            "done": {action: 1 for action in paid}, "at": int(time.time())}
+            "done": {action: 1 for action in paid}, "at": int(time.time()),
+            "url": str(url or "")[:300], "tweet": tweet_status_id(str(url or ""))}
     with _charges_lock:
         pending = read_private_json(CHARGES_PATH) or {}
         items = pending.get("items") if isinstance(pending.get("items"), list) else []
@@ -16213,7 +16381,8 @@ def control_comment(tweet_text: str, image: bytes | None, voice: str, account: s
         others = [text for text in (replies_by_tweet.get(tweet_id) or []) if text not in own] if tweet_id else []
     before = (own[-6:] + others[-4:])[-10:]
     body = {"token": token, "text": tweet_text or "", "voice": voice, "manner": manner, "before": before,
-            "account": account or "", "name": account_names.get(account, ""), "pass": task_pass(account)}
+            "account": account or "", "name": account_names.get(account, ""), "pass": task_pass(account),
+            "tweet": tweet_id or ""}                 # («سجل الرصيد»: for which tweet the comment is)
     if image:
         body["image"] = base64.b64encode(image).decode("ascii")
     text = str(_control_request("comment", body, seconds=90).get("comment") or "")

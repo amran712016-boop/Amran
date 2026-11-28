@@ -26,6 +26,7 @@ Useful environment variables (all optional):
 from __future__ import annotations
 
 import base64
+import csv
 import io
 import gzip
 import hashlib
@@ -284,6 +285,7 @@ def republish_moves_in_background() -> None:
 BACKUP_FILES = ("secrets.json", "codes.json", "keys.json", "usage.json", "notices.json", "acts.json", "support.json",
                 "move.json", "prices.json", "welcomed.json", "lifetime.json", "pace.json", "history.json", "prompt.json",
                 "devices.json", "server.crt", "server.key")
+BACKUP_LEDGER = re.compile(r"ledger/[0-9A-Za-z_-]{1,64}\.jsonl\.gz")     # («سجل الرصيد»: each user's, compressed)
 BACKUP_MAGIC = b"GGBAK1"
 
 
@@ -298,6 +300,10 @@ def backup_pack(password: str) -> bytes:
         path = DATA_DIR / name
         if path.is_file():
             files[name] = base64.b64encode(path.read_bytes()).decode("ascii")
+    for path in sorted(LEDGER_DIR.glob("*.jsonl")) if LEDGER_DIR.is_dir() else []:
+        with _ledger_lock:
+            raw = path.read_bytes()
+        files[f"ledger/{path.name}.gz"] = base64.b64encode(gzip.compress(raw)).decode("ascii")
     plain = json.dumps({"v": 1, "at": int(time.time()), "files": files}).encode("utf-8")
     salt, nonce = secrets.token_bytes(16), secrets.token_bytes(16)
     enc_key, mac_key = _backup_keys(password, salt)
@@ -317,7 +323,8 @@ def backup_unpack(blob: bytes, password: str) -> dict:
         raise ValueError("كلمة المرور لا تطابق كلمة مرور هذه النسخة، أو الملف تالف.")
     plain = bytes(a ^ b for a, b in zip(body, key_stream(enc_key, nonce, len(body))))
     data = json.loads(plain.decode("utf-8"))
-    files = {name: base64.b64decode(value) for name, value in (data.get("files") or {}).items() if name in BACKUP_FILES}
+    files = {name: base64.b64decode(value) for name, value in (data.get("files") or {}).items()
+             if name in BACKUP_FILES or BACKUP_LEDGER.fullmatch(name)}
     if "secrets.json" not in files or "server.crt" not in files or "server.key" not in files:
         raise ValueError("النسخة ناقصة: لا تحمل أسرار الخادم وشهادته.")
     return {"at": int(data.get("at") or 0), "files": files}
@@ -776,9 +783,10 @@ def record_comment(code_id: str, account: str, name: str, price: float = COST_PE
         history_add({"comment": 1})
 
 
-def record_actions(code_id: str, items: list, prices: dict) -> float:
+def record_actions(code_id: str, items: list, prices: dict, charged: list | None = None) -> float:
     """Successful reposts, likes and bookmarks the app reports: counted, with their cost at today's prices. A report
-    the app sends again (its answer was lost) has the same id and is not counted twice. Returns the cost added."""
+    the app sends again (its answer was lost) has the same id and is not counted twice. Returns the cost added;
+    charged (for «سجل الرصيد») gets each one that cost something: which, its tweet, the X account."""
     added = 0.0
     with LOCK:
         usage = load_usage()
@@ -808,6 +816,11 @@ def record_actions(code_id: str, items: list, prices: dict) -> float:
                 who["cost"] = round(float(who.get("cost") or 0) + cost, 4)
                 code["cost"] = round(float(code.get("cost") or 0) + cost, 4)
                 added += cost
+                if charged is not None and cost > 0:
+                    charged.append({"kind": "service", "action": action, "amount": -cost, "count": count,
+                                    "tweet": str(item.get("tweet") or "")[:25],
+                                    "url": tweet_link(item.get("tweet"), item.get("url")),
+                                    "account": str(item.get("name") or "")[:40]})
             if item.get("name"):
                 who["name"] = str(item.get("name"))[:40]
             if report:
@@ -960,13 +973,17 @@ def task_pass_ok(code_id: str, value) -> bool:
     return until > time.time() and hmac.compare_digest(sig, good)
 
 
-def take_comment_price(code_id: str, price: float = COST_PER_COMMENT, in_task: bool = False) -> str:
+def take_comment_price(code_id: str, price: float = COST_PER_COMMENT, in_task: bool = False,
+                       taken: dict | None = None) -> str:
     """Before a prepaid user's comment its price is taken from the balance at once (so two comments at the same
     moment cannot both spend the last cent). "" when it may go ahead, else why not. A «آجل» user always may, and
-    so does a comment of a task that started with balance (its pass): the balance may then go below zero."""
+    so does a comment of a task that started with balance (its pass): the balance may then go below zero. taken
+    (for «سجل الرصيد»): when it was taken, and the balance it left."""
     with LOCK:
         codes = load_codes()
         row = next((item for item in codes if item.get("id") == code_id), None)
+        if taken is not None:
+            taken.update(at=int(time.time()), pay=pay_of(row or {}), after=None)
         if row is None or pay_of(row) != PAY_PREPAID:
             return ""
         balance = balance_of(row)
@@ -976,6 +993,8 @@ def take_comment_price(code_id: str, price: float = COST_PER_COMMENT, in_task: b
             return f"رصيدك لا يكفي لكتابة التعليقات (الرصيد {money(balance)}). اطلب من صاحب البرنامج شحن رصيدك."
         row["balance"] = round(balance - price, 4)
         save_codes(codes)
+        if taken is not None:
+            taken["after"] = row["balance"]
     return ""
 
 
@@ -987,6 +1006,178 @@ def give_back_comment_price(code_id: str, price: float = COST_PER_COMMENT) -> No
         if row is not None and pay_of(row) == PAY_PREPAID and price > 0:
             row["balance"] = round(balance_of(row) + price, 4)
             save_codes(codes)
+
+
+# ----------------------------------------------------------------------------- «سجل الرصيد»
+# Every change to a user's balance, one line each, in data/ledger/<user id>.jsonl: each service it paid for (which
+# one, the tweet's link, the X account that did it, and for a comment the comment written), a top-up (Binance Pay,
+# or a request confirmed by hand), what the owner added or took off, and the trial balance; with the balance it
+# left. A «آجل» user's services too (their cost, collected later). The panel shows it on the user's card (and as
+# CSV), the app in its balance window. The newest LEDGER_LINES_KEPT lines are kept.
+LEDGER_DIR = DATA_DIR / "ledger"
+LEDGER_LINES_KEPT = 3000
+LEDGER_PAGE = 40
+LEDGER_KINDS = {"service", "topup", "add", "fix", "gift"}
+_ledger_lock = threading.Lock()
+_ledger_state: dict[str, list] = {}           # user id -> [next line number, lines in the file]
+
+
+def _ledger_path(code_id: str) -> Path | None:
+    clean = re.sub(r"[^0-9A-Za-z_-]", "", str(code_id or ""))[:64]
+    return LEDGER_DIR / f"{clean}.jsonl" if clean else None
+
+
+def tweet_link(tweet_id, url="") -> str:
+    """The tweet's own link on x.com (as the app gave it, else by its number); "" when there is none."""
+    url = str(url or "").strip()[:300]
+    if re.fullmatch(r"https://(?:x|twitter|mobile\.x|mobile\.twitter)\.com/[A-Za-z0-9_]{1,15}/status/\d{5,25}(?:[/?#].*)?", url):
+        return url.split("?")[0].split("#")[0]
+    found = re.search(r"\d{5,25}", str(tweet_id or "")) or re.search(r"/status/(\d{5,25})", url)
+    return f"https://x.com/i/web/status/{found.group(found.lastindex or 0)}" if found else ""
+
+
+def _ledger_lines(path: Path) -> list[str]:
+    try:
+        return path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return []
+
+
+def _ledger_state_of(code_id: str, path: Path) -> list:
+    """(Under _ledger_lock.) This user's next line number and how many lines the file has, read once."""
+    state = _ledger_state.get(code_id)
+    if state is None:
+        lines, last = _ledger_lines(path), 0
+        for line in reversed(lines):
+            try:
+                last = int(json.loads(line).get("n") or 0)
+                break
+            except (ValueError, AttributeError):
+                continue
+        state = _ledger_state[code_id] = [last + 1, len(lines)]
+    return state
+
+
+def ledger_add(code_id: str, entries: list[dict]) -> None:
+    """Add these to this user's «سجل الرصيد». Each: kind, amount (+ in, − out), after (the balance it left, or None
+    for a «آجل» user's service), and what it was for (action, tweet, url, account, comment, note)."""
+    path = _ledger_path(code_id)
+    entries = [entry for entry in entries or [] if isinstance(entry, dict) and entry.get("kind") in LEDGER_KINDS]
+    if path is None or not entries:
+        return
+    with _ledger_lock:
+        try:
+            LEDGER_DIR.mkdir(parents=True, exist_ok=True)
+            os.chmod(LEDGER_DIR, 0o700)
+        except OSError:
+            pass
+        state = _ledger_state_of(code_id, path)
+        lines = []
+        for entry in entries:
+            row = {"n": state[0], "at": int(entry.get("at") or time.time()), "kind": entry["kind"],
+                   "amount": round(float(entry.get("amount") or 0), 4)}
+            if entry.get("after") is not None:
+                row["after"] = round(float(entry["after"]), 4)
+            for key, limit in (("action", 12), ("tweet", 25), ("url", 300), ("account", 40), ("comment", 1200),
+                               ("note", 120), ("pay", 8)):
+                value = str(entry.get(key) or "").strip()[:limit]
+                if value:
+                    row[key] = value
+            if int(entry.get("count") or 1) > 1:
+                row["count"] = int(entry["count"])
+            lines.append(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
+            state[0] += 1
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            with os.fdopen(fd, "a", encoding="utf-8") as handle:
+                handle.write("\n".join(lines) + "\n")
+        except OSError as exc:
+            print(f"سجل الرصيد: تعذّرت الكتابة ({exc})", flush=True)
+            return
+        state[1] += len(lines)
+        if state[1] > LEDGER_LINES_KEPT + 300:       # (only the newest are kept)
+            kept = _ledger_lines(path)[-LEDGER_LINES_KEPT:]
+            temporary = path.with_suffix(".tmp")
+            temporary.write_text("\n".join(kept) + "\n", encoding="utf-8")
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, path)
+            state[1] = len(kept)
+
+
+def ledger_all(code_id: str) -> list[dict]:
+    """This user's «سجل الرصيد», oldest first (in the order the balance changed: by time, then line)."""
+    path = _ledger_path(code_id)
+    if path is None:
+        return []
+    with _ledger_lock:
+        lines = _ledger_lines(path)
+    out = []
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict) and row.get("kind") in LEDGER_KINDS:
+            out.append(row)
+    out.sort(key=lambda row: (int(row.get("at") or 0), int(row.get("n") or 0)))
+    return out
+
+
+def ledger_page(code_id: str, before: str = "", limit: int = LEDGER_PAGE) -> dict:
+    """One page of it, newest first: before («at.n» of the last line shown) goes on from there."""
+    try:
+        at, n = (int(part) for part in str(before).split(".", 1))
+        cursor = (at, n)
+    except ValueError:
+        cursor = None
+    rows = [row for row in reversed(ledger_all(code_id))
+            if cursor is None or (int(row.get("at") or 0), int(row.get("n") or 0)) < cursor]
+    page = rows[:max(1, min(200, limit))]
+    last = page[-1] if page else None
+    return {"items": page, "more": len(rows) > len(page),
+            "next": f"{int(last.get('at') or 0)}.{int(last.get('n') or 0)}" if last and len(rows) > len(page) else ""}
+
+
+def ledger_forget(code_id: str) -> None:
+    path = _ledger_path(code_id)
+    if path is None:
+        return
+    with _ledger_lock:
+        _ledger_state.pop(code_id, None)
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def balance_entry(kind: str, amount: float, after, note: str = "", at: int | None = None) -> dict:
+    """A top-up, the owner's addition or correction, or the trial balance, for «سجل الرصيد»."""
+    return {"kind": kind, "amount": amount, "after": after, "note": note, "at": at or int(time.time())}
+
+
+def _ledger_from_cards() -> None:
+    """The balance history kept before «سجل الرصيد» (each user's last top-ups, on their card) starts it, once."""
+    try:
+        codes = load_codes()
+    except Exception:
+        return
+    for row in codes:
+        old = row.get("ledger") if isinstance(row.get("ledger"), list) else []
+        path = _ledger_path(row.get("id"))
+        if not old or path is None or path.exists():
+            continue
+        entries = []
+        for item in reversed(old):
+            if not isinstance(item, dict):
+                continue
+            amount, note = float(item.get("amount") or 0), str(item.get("note") or "")
+            kind = ("gift" if note == WELCOME_NOTE else "topup" if note.startswith(("Binance Pay", "شحن رصيد"))
+                    else "fix" if amount < 0 else "add")
+            entries.append(balance_entry(kind, amount, item.get("after"), note, int(item.get("at") or 0) or None))
+        ledger_add(row["id"], entries)
+
+
+_ledger_from_cards()
 
 
 # ----------------------------------------------------------------------------- accounts (a name and a password)
@@ -2543,9 +2734,13 @@ html.loading .ldpill{display:flex}
 .bal b{color:var(--pri)}.bal.low b{color:var(--bad)}.fre b{color:var(--pri)}
 .frg{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-top:12px}.frg .opt{min-height:56px;padding:8px 12px}
 .frh{margin-top:12px;font-size:12.5px}
-.led{margin-top:8px;font-size:13px}.led summary{cursor:pointer;color:var(--mut);min-height:32px;display:flex;align-items:center}
-.led ul{list-style:none;margin:4px 0 0;padding:0;display:grid;gap:6px}.led li{display:grid;grid-template-columns:1fr auto;gap:0 10px;padding:8px 10px;border-radius:10px;background:var(--soft)}
-.led li small{grid-column:1/-1;color:var(--mut);font-size:11.5px}.led .pl{color:var(--pri)}.led .mi{color:var(--bad)}
+.led{grid-column:1/-1;margin-top:8px;font-size:13px}.led summary{cursor:pointer;color:var(--mut);min-height:32px;display:flex;align-items:center}
+.lel{list-style:none;margin:4px 0 0;padding:0;display:grid;gap:6px;max-height:440px;overflow:auto;overscroll-behavior:contain}
+.lel li{display:grid;grid-template-columns:1fr auto;align-items:baseline;gap:2px 10px;padding:8px 10px;border-radius:10px;background:var(--soft)}
+.lel li>b{font-weight:600}.lel .lam{font-weight:700;font-variant-numeric:tabular-nums}.lel .lin{color:var(--pri)}.lel .lout{color:var(--bad)}
+.lel small{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:0 10px;color:var(--mut);font-size:11.5px}.lel small a{color:var(--pri);font-weight:600;text-decoration:none}
+.lel q{grid-column:1/-1;quotes:none;margin-top:4px;padding:6px 9px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink);font-size:12.5px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere}
+.lew{margin:6px 0 0;font-size:12.5px}.lea{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
 .fl-ok{background:var(--prisoft);color:var(--pri)}.fl-bad{background:var(--badsoft);color:var(--bad)}
 .mvd{display:grid;gap:8px;margin:12px 0 4px;font-size:14px}.mvd div{display:flex;gap:12px;align-items:baseline}.mvd dt{color:var(--mut);min-width:72px;flex:none}.mvd dd{margin:0}
 .mc{font:700 16px/1 var(--mono);letter-spacing:1px;background:var(--soft);border:1px solid var(--line);border-radius:8px;padding:4px 8px;direction:ltr;display:inline-block}
@@ -2849,7 +3044,7 @@ if(j.ok){show(j.comment,false,'\u2066'+j.chars+' / '+j.limit+'\u2069 حرف',j.t
 <p class="alh">حسابات X ({{c.usage.accounts|length}})</p><ul class="al">
 {% for a in c.usage.accounts %}<li><b><bdi>{{ ('@' ~ a.name) if a.name else ('#' ~ a.id[:8]) }}</bdi></b><span>{{ '{:,}'.format(a.n) }} تعليق</span><span>${{ '%.2f'|format(a.cost) }}</span><div class="pg"><i style="width:{{ ((a.n * 100 / c.usage.total)|round|int) if c.usage.total else 0 }}%"></i></div></li>{% endfor %}
 </ul></details>{% else %}<div class="facts">{{facts}}</div>{% endif %}
-{% if c.ledger %}<details class="led"><summary>سجل الرصيد</summary><ul>{% for e in c.ledger %}<li><span>{{e.note}}</span><b class="{{ 'pl' if e.amount > 0 else 'mi' }}" dir="ltr">{{ '+' if e.amount > 0 else '−' }}${{ '%.2f'|format(e.amount|abs) }}</b><small>{{e.when}} · الرصيد <bdi dir="ltr">{{ usd(e.after) }}</bdi></small></li>{% endfor %}</ul></details>{% endif %}
+<details class="led" data-led="/{{admin}}/ledger/{{c.id}}"><summary>سجل الرصيد</summary><ul class="lel"></ul><p class="lew mut" hidden></p><div class="lea"><button type="button" class="btn sm ghost" data-ledmore hidden>المزيد</button><a class="btn sm ghost" href="/{{admin}}/ledger-csv/{{c.id}}">تنزيل CSV</a></div></details>
 {% if c.acts.at %}<div class="ax" role="group" aria-label="التنفيذ في تطبيق {{ c.label or 'المستخدم' }}">
 <div><b>{{ '{:,}'.format(c.acts.repost) }}</b><span>الرتويت</span></div>
 <div><b>{{ '{:,}'.format(c.acts.like) }}</b><span>الإعجاب</span></div>
@@ -3349,6 +3544,26 @@ j.failed.forEach(function(x){var li=D.createElement('li');li.dir='auto';li.textC
 part('الخطأ',j.trace);part('السجل',j.log);part('سجل النقر',j.clicks);if(!box.firstChild)box.textContent='لا يوجد سجل.'}
 if(then)then(j)}).catch(function(x){if(x!==0&&box)box.textContent='تعذّر التحميل. أغلقه وافتحه للمحاولة مرة أخرى.'})}
 D.addEventListener('toggle',function(e){var d=e.target;if(d.open&&d.dataset&&d.dataset.src&&!d.dataset.done)lazy(d)},true);
+
+/* «سجل الرصيد» on a user's card: loaded when opened (newest first), «المزيد» for older ones */
+var LW={like:'إعجاب',repost:'إعادة نشر',bookmark:'مرجعية',comment:'تعليق',topup:'شحن رصيد',add:'إضافة رصيد',fix:'خصم',gift:'رصيد تجريبي'};
+function usdText(v){v=Math.round(Number(v||0)*10000)/10000;var a=Math.abs(v),t=Math.abs(a*100-Math.round(a*100))<1e-6?a.toFixed(2):a.toFixed(4).replace(/0+$/,'');return '⁦'+(v<0?'−$':'$')+t+'⁩'}
+function whenText(at){var d=new Date(at*1000),n=new Date(),y=new Date(),p=function(x){return (x<10?'0':'')+x},t=p(d.getHours())+':'+p(d.getMinutes());y.setDate(n.getDate()-1);
+if(d.toDateString()===n.toDateString())return 'اليوم '+t;if(d.toDateString()===y.toDateString())return 'أمس '+t;
+return d.getDate()+'/'+(d.getMonth()+1)+(d.getFullYear()!==n.getFullYear()?'/'+d.getFullYear():'')+' '+t}
+function ledRow(e){var li=D.createElement('li'),k=e.kind==='service'?e.action:e.kind,b=D.createElement('b'),am=D.createElement('span'),s=D.createElement('small');
+b.textContent=(LW[k]||k)+(e.count>1?' ×'+e.count:'');am.className='lam '+(e.amount>0?'lin':'lout');am.dir='ltr';am.textContent=(e.amount>0?'+':'')+usdText(e.amount);
+function part(t,el){var x=el||D.createElement('span');if(!el)x.textContent=t;s.appendChild(x)}
+part(whenText(e.at));if(e.account){var a=D.createElement('bdi');a.dir='ltr';a.textContent='@'+e.account;part('',a)}
+if(e.url){var l=D.createElement('a');l.href=e.url;l.target='_blank';l.rel='noopener';l.textContent='التغريدة ↗';part('',l)}
+if(e.note)part(e.note);if(e.after!=null)part('الرصيد بعدها '+usdText(e.after));else if(e.pay==='later')part('آجل');
+li.appendChild(b);li.appendChild(am);li.appendChild(s);if(e.comment){var q=D.createElement('q');q.dir='auto';q.textContent=e.comment;li.appendChild(q)}return li}
+function ledLoad(d,more){if(!d||d._busy)return;var u=$('.lel',d),m=$('[data-ledmore]',d),w=$('.lew',d);d._busy=1;m.classList.add('busy');
+fetch(d.dataset.led+(more&&d._next?'?before='+encodeURIComponent(d._next):''),{credentials:'same-origin',cache:'no-store'}).then(function(r){if(r.status===401){location.reload();throw 0}return r.json()}).then(function(j){
+if(!more)u.textContent='';(j.items||[]).forEach(function(e){u.appendChild(ledRow(e))});d._next=j.next||'';d.dataset.done='1';m.hidden=!j.more;
+w.hidden=!!u.firstChild;w.textContent='لا حركات في الرصيد بعد.'}).catch(function(x){if(x!==0){w.hidden=false;w.textContent='تعذّر التحميل. أغلقه وافتحه للمحاولة مرة أخرى.'}}).then(function(){d._busy=0;m.classList.remove('busy')})}
+D.addEventListener('toggle',function(e){var d=e.target;if(d.open&&d.dataset&&d.dataset.led&&!d.dataset.done)ledLoad(d,false)},true);
+D.addEventListener('click',function(e){var b=e.target.closest('[data-ledmore]');if(b)ledLoad(b.closest('details'),true)});
 D.addEventListener('click',function(e){var b=e.target.closest('[data-fcopy]');if(!b)return;
 var d=b.closest('article').querySelector('details[data-src]');if(!d)return;b.classList.add('busy');
 lazy(d,function(j){b.classList.remove('busy');copy([j.title,j.message,(j.failed||[]).join('\n'),j.trace,j.log].filter(Boolean).join('\n\n'))})});
@@ -3430,8 +3645,7 @@ def dashboard():
         r["balance"] = balance_of(r)
         r["free"] = free_of(r)
         r["account_user"] = str((r.get("account") or {}).get("user") or "")
-        r["ledger"] = [dict(e, when=seen_text({"last_seen": int(e.get("at") or 0)}))
-                       for e in (r.get("ledger") if isinstance(r.get("ledger"), list) else [])[:6] if isinstance(e, dict)]
+        r.pop("ledger", None)                        # («سجل الرصيد» loads when opened on the card)
         r.pop("account", None)                       # (no password hash goes into the page)
         r["acts_text"] = ("الآن" if time.time() - r["acts"]["at"] < 60 else seen_text({"last_seen": r["acts"]["at"]})) if r["acts"]["at"] else ""
         n = len(devices_of(r))
@@ -3618,9 +3832,18 @@ def backup_restore():
             current = DATA_DIR / name
             if current.is_file():
                 shutil.copy2(current, keep / name)
+        with _ledger_lock:                          # («سجل الرصيد»: the backup's, in place of this server's)
+            if LEDGER_DIR.is_dir():
+                shutil.move(str(LEDGER_DIR), str(keep / "ledger"))
+            _ledger_state.clear()
         for name, content in restored["files"].items():
-            target = DATA_DIR / name
-            temporary = target.with_name(name + ".restore")
+            if BACKUP_LEDGER.fullmatch(name):
+                LEDGER_DIR.mkdir(parents=True, exist_ok=True)
+                os.chmod(LEDGER_DIR, 0o700)
+                target, content = LEDGER_DIR / name[len("ledger/"):-len(".gz")], gzip.decompress(content)
+            else:
+                target = DATA_DIR / name
+            temporary = target.with_name(target.name + ".restore")
             temporary.write_bytes(content)
             os.chmod(temporary, 0o600)
             os.replace(temporary, target)
@@ -3711,6 +3934,7 @@ def code_delete():
     code_id = request.form.get("id")
     with LOCK:
         save_codes([row for row in load_codes() if row.get("id") != code_id])
+    ledger_forget(code_id)
     return redirect(f"/{ADMIN}")
 
 
@@ -4059,6 +4283,7 @@ def code_balance():
         ledger.insert(0, {"at": int(time.time()), "amount": amount, "note": note, "after": round(row["balance"], 2)})
         row["ledger"] = ledger[:LEDGER_KEEP]
         save_codes(codes)
+        ledger_add(row["id"], [balance_entry("add" if amount > 0 else "fix", amount, row["balance"], note)])
         name = row.get("label") or row.get("code") or ""
         later = pay_of(row) != PAY_PREPAID
     flash("ok", f"{'أُضيف' if amount > 0 else 'خُصم'} {money(abs(amount))} {'إلى' if amount > 0 else 'من'} رصيد {name}. "
@@ -4271,6 +4496,8 @@ def topup_confirm():
                           "after": round(target["balance"], 2)})
         target["ledger"] = ledger[:LEDGER_KEEP]
         save_codes(codes)
+        ledger_add(target["id"], [balance_entry("topup", amount, target["balance"],
+                                                f"Binance Pay · {order}" if order else "شحن رصيد", now)])
         if order:
             topups["used"][order] = {"code_id": target["id"], "amount": amount, "at": now, "by_hand": True}
             write_private_json(TOPUPS_PATH, {"version": 1, **topups})
@@ -4352,6 +4579,48 @@ def failure_details(failure_id: int):
     item = next((row for row in load_failures()["items"] if row.get("id") == failure_id), {})
     return jsonify(ok=True, title=item.get("title") or "", message=item.get("message") or "",
                    **{key: data.get(key) or ([] if key == "failed" else "") for key in FAILURE_HEAVY})
+
+
+@app.get(f"/{ADMIN}/ledger/<code_id>")
+def ledger_view(code_id: str):
+    """One user's «سجل الرصيد», a page at a time (newest first), when its place on their card is opened."""
+    if not logged_in():
+        return jsonify(ok=False), 401
+    return jsonify(ok=True, **ledger_page(code_id, request.args.get("before") or ""))
+
+
+LEDGER_WORDS = {"like": "إعجاب", "repost": "إعادة نشر", "bookmark": "مرجعية", "comment": "تعليق", "topup": "شحن رصيد",
+                "add": "إضافة رصيد", "fix": "خصم", "gift": "رصيد تجريبي"}
+
+
+@app.get(f"/{ADMIN}/ledger-csv/<code_id>")
+def ledger_csv(code_id: str):
+    """All of one user's «سجل الرصيد» as a spreadsheet (CSV, opens in Excel), oldest first."""
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    row = next((item for item in load_codes() if item.get("id") == code_id), None)
+    if row is None:
+        return "المستخدم غير موجود.", 404
+    out = io.StringIO()
+    sheet = csv.writer(out)
+    sheet.writerow(["التاريخ (UTC)", "النوع", "المبلغ", "الرصيد بعده", "حساب X", "رابط التغريدة", "التعليق", "ملاحظة"])
+
+    def text(value) -> str:                         # (a cell a spreadsheet would read as a formula stays text)
+        value = str(value or "")
+        return "'" + value if value[:1] in ("=", "+", "-", "@", "\t", "\r") else value
+
+    for entry in ledger_all(code_id):
+        kind = entry.get("action") if entry.get("kind") == "service" else entry.get("kind")
+        sheet.writerow([time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(int(entry.get("at") or 0))),
+                        LEDGER_WORDS.get(str(kind), str(kind)) + (f" ×{entry['count']}" if int(entry.get("count") or 1) > 1 else ""),
+                        f"{float(entry.get('amount') or 0):.4f}".rstrip("0").rstrip("."),
+                        "" if entry.get("after") is None else f"{float(entry['after']):.4f}".rstrip("0").rstrip("."),
+                        text(entry.get("account")), text(entry.get("url")), text(entry.get("comment")),
+                        text(entry.get("note") or ("آجل" if entry.get("pay") == PAY_LATER else ""))])
+    name = re.sub(r"[^\w.-]", "_", str(row.get("label") or row.get("code") or code_id))[:40] or "user"
+    return app.response_class("﻿" + out.getvalue(), mimetype="text/csv; charset=utf-8",
+                              headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote('سجل-الرصيد-' + name + '.csv')}",
+                                       "Cache-Control": "no-store"})
 
 
 # ----------------------------------------------------------------------------- the app itself (its APK)
@@ -4949,6 +5218,8 @@ def api_register():
                **({"welcome_pending": now} if waits else {})}
         codes.insert(0, row)
         save_codes(codes)
+        if gift:
+            ledger_add(row["id"], [balance_entry("gift", gift, gift, WELCOME_NOTE, now)])
     return signed_in(row, device)
 
 
@@ -5016,6 +5287,7 @@ def api_welcome_claim():
                 ledger = target.get("ledger") if isinstance(target.get("ledger"), list) else []
                 ledger.insert(0, {"at": int(time.time()), "amount": gift, "note": WELCOME_NOTE, "after": round(target["balance"], 2)})
                 target["ledger"] = ledger[:LEDGER_KEEP]
+                ledger_add(target["id"], [balance_entry("gift", gift, target["balance"], WELCOME_NOTE)])
         save_codes(codes)
         balance = round(balance_of(target), 4)
     return api_ok(gift=gift, balance=balance)
@@ -5100,6 +5372,7 @@ def api_topup():
                           "after": round(target["balance"], 2)})
         target["ledger"] = ledger[:LEDGER_KEEP]
         save_codes(codes)
+        ledger_add(target["id"], [balance_entry("topup", received, target["balance"], f"Binance Pay · {tx_id} ({coin})", int(now))])
         topups["used"][tx_id] = {"code_id": row["id"], "amount": received, "coin": coin, "at": int(now)}
         write_private_json(TOPUPS_PATH, {"version": 1, **topups})
         support = load_support()
@@ -5146,15 +5419,33 @@ def api_charge():
     items = [item for item in items[:500] if isinstance(item, dict)]
     base = load_prices()
     prices = prices_for(row, base)                  # (counted, at 0, when free for this user)
-    cost = record_actions(row["id"], items, prices) if items else 0.0
+    charged: list = []
+    cost = record_actions(row["id"], items, prices, charged) if items else 0.0
     with LOCK:
         codes = load_codes()
         target = next((item for item in codes if item.get("id") == row["id"]), None) or row
-        if cost > 0 and pay_of(target) == PAY_PREPAID:
+        prepaid = pay_of(target) == PAY_PREPAID
+        running = balance_of(target)
+        now = int(time.time())
+        for entry in charged:                       # («سجل الرصيد»: each, with the balance it left)
+            running = round(running + entry["amount"], 4)
+            entry.update(at=now, after=running if prepaid else None, pay=pay_of(target))
+        if cost > 0 and prepaid:
             target["balance"] = round(balance_of(target) - cost, 4)
             save_codes(codes)
+        ledger_add(row["id"], charged)
     return api_ok(pay=pay_of(target), balance=round(balance_of(target), 4), prices=prices, free=free_for_app(row, base),
                   charged=cost)
+
+
+@app.post(f"/{API}/ledger")
+def api_ledger():
+    """«سجل الرصيد» for the app's balance window: this user's own, a page at a time (newest first)."""
+    body = request.get_json(silent=True) or {}
+    row = code_from_token(body.get("token"))
+    if not row:
+        return api_err("انتهت صلاحية الدخول أو أوقِف الرمز أو نُقل لجهاز آخر. أعد إدخال الرمز.", 200)
+    return api_ok(pay=pay_of(row), balance=round(balance_of(row), 4), **ledger_page(row["id"], str(body.get("before") or "")))
 
 
 @app.post(f"/{API}/stats")
@@ -5422,7 +5713,8 @@ def api_comment():
     if not tweet_text and not image:
         return api_err("لا نص ولا صورة للتغريدة.")
     price = prices_for(row)["comment"]              # (0 when comments are free for this user)
-    refused = take_comment_price(row["id"], price, task_pass_ok(row["id"], body.get("pass")))   # («مسبق»: held first)
+    taken: dict = {}
+    refused = take_comment_price(row["id"], price, task_pass_ok(row["id"], body.get("pass")), taken)   # («مسبق»: held first)
     if refused:
         return api_err(refused)
     try:
@@ -5434,6 +5726,11 @@ def api_comment():
         give_back_comment_price(row["id"], price)
         raise
     record_comment(row["id"], str(body.get("account") or ""), str(body.get("name") or ""), price)
+    if price > 0:                                   # («سجل الرصيد»: the comment, for which tweet, when its price was taken)
+        ledger_add(row["id"], [{"kind": "service", "action": "comment", "amount": -price, "at": taken.get("at"),
+                                "after": taken.get("after"), "pay": taken.get("pay"),
+                                "tweet": str(body.get("tweet") or "")[:25], "url": tweet_link(body.get("tweet"), body.get("url")),
+                                "account": str(body.get("name") or "")[:40], "comment": comment}])
     return api_ok(comment=comment)
 
 

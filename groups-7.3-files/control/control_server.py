@@ -1388,6 +1388,12 @@ def save_acts_of(code_id: str, accounts: list, device: str = "", first_device: s
                     grown[name] += step
         # (an account seen for the first time adds nothing to the chart: its numbers are from before)
         now = int(time.time())
+        # «آخر تنفيذ»: when its numbers last grew (the app sends them again every hour even when nothing was done)
+        changed = int(before_row.get("changed") or 0)
+        if sum(grown.values()) > 0:
+            changed = now
+        elif not changed:
+            changed = int(before_row.get("at") or 0)     # (kept from before this was: its last report)
         phones.pop(device, None)
         phones[device] = {"at": now, "accounts": clean}
         while len(phones) > ACTS_PHONES_KEPT:            # (the phone not heard from the longest: its numbers are kept)
@@ -1398,14 +1404,14 @@ def save_acts_of(code_id: str, accounts: list, device: str = "", first_device: s
                     for act in ACT_NAMES:
                         slot[act] = int(slot.get(act) or 0) + int(old.get(act) or 0)
                     slot["name"] = old.get("name") or slot.get("name") or ""
-        data[code_id] = {"at": now, "phones": phones, **({"kept": kept} if kept else {})}
+        data[code_id] = {"at": now, "changed": changed, "phones": phones, **({"kept": kept} if kept else {})}
         write_private_json(ACTS_PATH, data)
         history_add(grown)
 
 
 def acts_of(code_id: str, data: dict | None = None) -> dict:
     """A user's totals and, by X account (by @name, as the comments are), what their app shows; at is when it
-    last sent them (0: never)."""
+    last sent them (0: never), changed when they last grew (something was done; before that was kept: at)."""
     row = (data if data is not None else load_acts()).get(code_id) or {}
     merged: dict[str, dict] = {}
     # (what each account shows in the app now, on each phone, and what was kept of it when an app lost it: the same
@@ -1423,7 +1429,7 @@ def acts_of(code_id: str, data: dict | None = None) -> dict:
             slot[act] += int(value.get(act) or 0)
     accounts = sorted(merged.values(), key=lambda item: -(item["repost"] + item["like"] + item["bookmark"]))
     totals = {act: sum(item[act] for item in accounts) for act in ACT_NAMES}
-    return dict(totals, accounts=accounts, at=int(row.get("at") or 0))
+    return dict(totals, accounts=accounts, at=int(row.get("at") or 0), changed=int(row.get("changed") or row.get("at") or 0))
 
 
 # ----------------------------------------------------------------------------- the users' messages («مساعدة»)
@@ -3120,7 +3126,7 @@ if(j.ok){show(j.comment,false,'\u2066'+j.chars+' / '+j.limit+'\u2069 حرف',j.t
 <div><b>{{ '{:,}'.format(c.acts.repost) }}</b><span>الرتويت</span></div>
 <div><b>{{ '{:,}'.format(c.acts.like) }}</b><span>الإعجاب</span></div>
 <div><b>{{ '{:,}'.format(c.acts.bookmark) }}</b><span>المرجعية</span></div></div>
-<details class="acc axd"><summary class="axs"><span>حسابات <bdi>X</bdi> ({{c.acts.accounts|length}}) · آخر تحديث {{c.acts_text}}</span>{{ic('chev')}}</summary>
+<details class="acc axd"><summary class="axs"><span>حسابات <bdi>X</bdi> ({{c.acts.accounts|length}}) · آخر تنفيذ {{c.acts_text}}</span>{{ic('chev')}}</summary>
 {% if c.acts.accounts %}<ul class="axl">
 {% for a in c.acts.accounts %}<li><b><bdi>{{ ('@' ~ a.name) if a.name else 'حساب بلا اسم' }}</bdi></b><span><b>{{ '{:,}'.format(a.repost) }}</b> رتويت</span><span><b>{{ '{:,}'.format(a.like) }}</b> إعجاب</span><span><b>{{ '{:,}'.format(a.bookmark) }}</b> مرجعية</span></li>{% endfor %}
 </ul>{% else %}<p class="mut axe">لا يوجد حساب X في تطبيقه الآن.</p>{% endif %}</details>
@@ -3748,13 +3754,14 @@ def dashboard():
         r["account_user"] = str((r.get("account") or {}).get("user") or "")
         r.pop("ledger", None)                        # («سجل الرصيد» loads when opened on the card)
         r.pop("account", None)                       # (no password hash goes into the page)
-        r["acts_text"] = ("الآن" if time.time() - r["acts"]["at"] < 60 else seen_text({"last_seen": r["acts"]["at"]})) if r["acts"]["at"] else ""
+        r["acts_text"] = seen_text({"last_seen": r["acts"]["changed"]}) if r["acts"]["changed"] else ""
         n = len(devices_of(r))
         r["device_count"] = n
         r["devices_text"] = ("غير مربوط", "جهاز مربوط", "جهازان")[n] if n < 3 else f"{n} {'أجهزة' if n <= 10 else 'جهازًا'}"
         r.pop("devices", None)                       # (the phones' ids stay out of the page)
         r.pop("hw", None)
-        acted = max(int(activity.get(r["id"]) or 0), int(r.get("last_seen") or 0))
+        # (its last execution as its app reports it, a task started or a service charged here, or its sign-in)
+        acted = max(int(activity.get(r["id"]) or 0), int(r["acts"]["changed"] or 0), int(r.get("last_seen") or 0))
         r["active_at"] = max(acted, int(r.get("created") or 0))
         r["active_text"] = seen_text({"last_seen": acted})
         r["idle"] = now - r["active_at"] > IDLE_AFTER

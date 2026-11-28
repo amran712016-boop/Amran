@@ -284,7 +284,7 @@ def republish_moves_in_background() -> None:
 # ---- «نسخة احتياطية»: all the server's data in one file, encrypted with the control panel's password ----
 BACKUP_FILES = ("secrets.json", "codes.json", "keys.json", "usage.json", "notices.json", "acts.json", "support.json",
                 "move.json", "prices.json", "welcomed.json", "lifetime.json", "pace.json", "history.json", "prompt.json",
-                "devices.json", "server.crt", "server.key")
+                "devices.json", "activity.json", "server.crt", "server.key")
 BACKUP_LEDGER = re.compile(r"ledger/[0-9A-Za-z_-]{1,64}\.jsonl\.gz")     # («سجل الرصيد»: each user's, compressed)
 BACKUP_MAGIC = b"GGBAK1"
 
@@ -1178,6 +1178,49 @@ def _ledger_from_cards() -> None:
 
 
 _ledger_from_cards()
+
+
+# ----------------------------------------------------------------------------- «آخر نشاط»
+# When each user last used the app for something: started a task, was charged for a service, had a comment written
+# (its sign-in counts too: last_seen). Kept apart from codes.json, which it would otherwise rewrite all day: at most
+# once every ACTIVITY_EVERY seconds for each user. A user with none for IDLE_AFTER is shown under «غير نشطين».
+ACTIVITY_PATH = DATA_DIR / "activity.json"
+ACTIVITY_EVERY = 600
+IDLE_AFTER = 2 * 86400
+_activity: dict | None = None
+_activity_lock = threading.Lock()
+
+
+def load_activity() -> dict:
+    global _activity
+    with _activity_lock:
+        if _activity is None:
+            users = (read_private_json(ACTIVITY_PATH) or {}).get("users")
+            _activity = {}
+            for key, value in (users.items() if isinstance(users, dict) else []):
+                try:
+                    _activity[str(key)] = int(value)
+                except (TypeError, ValueError):
+                    continue
+        return dict(_activity)
+
+
+def touch_activity(code_id: str) -> None:
+    """This user just used the app (written at most once every ACTIVITY_EVERY seconds)."""
+    now = int(time.time())
+    load_activity()
+    with _activity_lock:
+        if not code_id or now - int(_activity.get(code_id) or 0) < ACTIVITY_EVERY:
+            return
+        _activity[code_id] = now
+        write_private_json(ACTIVITY_PATH, {"version": 1, "users": _activity})
+
+
+def forget_activity(code_id: str) -> None:
+    load_activity()
+    with _activity_lock:
+        if _activity.pop(code_id, None) is not None:
+            write_private_json(ACTIVITY_PATH, {"version": 1, "users": _activity})
 
 
 # ----------------------------------------------------------------------------- accounts (a name and a password)
@@ -2600,6 +2643,8 @@ input::placeholder{color:var(--mut);opacity:.8}
 .hta{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end}.hta form{margin:0}
 .setb{display:grid;gap:8px;padding-bottom:12px}.setb .card{margin:0;border-radius:12px;background:var(--soft)}.setb .prc{padding:0 12px}
 @media(max-width:599px){.hero{padding:12px 14px 0;margin-top:12px;border-radius:16px}.tot b{font-size:32px}.hb{height:34px;padding:0 10px;font-size:12.5px}.ratio{margin-top:10px;height:6px}.rl{margin-top:5px;font-size:12px}.kp{margin-top:10px}.kp div{padding:7px 0 8px;padding-inline-start:10px}.kp dt{font-size:11px}.kp dd{font-size:16px}.kpa{font-size:10px}}
+.hm{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px}.hm div{display:grid;gap:1px;padding:9px 12px;border-radius:12px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12)}.hm span{font-size:12px;color:#a3cbc6}.hm b{font-size:21px;font-weight:600;line-height:1.3;font-variant-numeric:tabular-nums;color:#fff}.hm small{font-size:11px;color:#a3cbc6}
+.idle{margin-top:14px}.idle>summary .prc-h .tg{margin:0}.idle .list{padding-bottom:12px}.idle .u{background:var(--soft)}
 .nm .st{font-size:0;gap:0}.ls{display:inline-flex;align-items:center;gap:3px}.ls .i{width:12px;height:12px}
 @media(max-width:599px){.hbt{display:none}.hta .hb{width:36px;padding:0;justify-content:center}}
 
@@ -2959,6 +3004,8 @@ main{padding-bottom:56px}
 {% if stats.comments %}<form method="post" action="/{{admin}}/reset-cost-all" data-title="تصفير كل التكاليف؟" data-confirm="سيُصفَّر عدّاد التعليقات والتكلفة لكل المستخدمين، ويبقى محسوبًا في «منذ البداية» أعلى الصفحة." data-yes="تصفير التكاليف" data-kind="danger" data-toast="تم تصفير كل التكاليف"><button class="hb" aria-label="تصفير التكاليف">{{ic('reset')}}<span class="hbt">تصفير التكاليف</span></button></form>{% endif %}</div></div>
 <div class="ratio" aria-hidden="true"><i style="width:{{ stats.active * 100 / stats.users }}%"></i></div>
 <div class="rl"><span><b>{{stats.active}}</b> يعمل</span><span><b>{{stats.users - stats.active}}</b> موقوف</span></div>
+<div class="hm"><div><span>إجمالي الأرصدة</span><b dir="ltr">{{ usd(stats.balance) }}</b><small>{% if stats.debt < 0 %}ديون <bdi dir="ltr">{{ usd(stats.debt) }}</bdi>{% else %}ما لدى المستخدمين الآن{% endif %}</small></div>
+<div><span>إجمالي الدخل</span><b dir="ltr">${{ '%.2f'|format(stats.all_cost) }}</b><small>ما أنفقوه منذ البداية</small></div></div>
 </div>
 <dl class="kp">
 <div><dt>أجهزة مربوطة</dt><dd>{{stats.bound}}</dd></div>
@@ -3047,15 +3094,14 @@ if(j.ok){show(j.comment,false,'\u2066'+j.chars+' / '+j.limit+'\u2069 حرف',j.t
 </div>
 <div class="fr">
 <div class="seg" id="flt" role="group" aria-label="تصفية حسب الحالة"><button type="button" data-f="all" aria-pressed="true">الكل</button><button type="button" data-f="on" aria-pressed="false">يعمل</button><button type="button" data-f="off" aria-pressed="false">موقوف</button></div>
-<label class="sort">{{ic('sort')}}<span id="sol">الأحدث</span><select id="so" aria-label="ترتيب المستخدمين"><option value="new" data-s="الأحدث">الأحدث إضافةً</option><option value="seen" data-s="آخر دخول">آخر دخول</option><option value="top" data-s="الأكثر تعليقًا">الأكثر تعليقًا</option><option value="acts" data-s="الأكثر تنفيذًا">الأكثر تنفيذًا</option><option value="name" data-s="الاسم">الاسم</option></select></label>
+<label class="sort">{{ic('sort')}}<span id="sol">الأحدث</span><select id="so" aria-label="ترتيب المستخدمين"><option value="new" data-s="الأحدث">الأحدث إضافةً</option><option value="seen" data-s="آخر نشاط">آخر نشاط</option><option value="top" data-s="الأكثر تعليقًا">الأكثر تعليقًا</option><option value="acts" data-s="الأكثر تنفيذًا">الأكثر تنفيذًا</option><option value="name" data-s="الاسم">الاسم</option></select></label>
 </div>
 {% endif %}
 
-<div class="list" id="list">
-{% for c in codes %}{% set hue = (c.id[:2]|int(0,16)) * 360 // 256 %}
-<article class="u{{ '' if c.active else ' off' }}" data-id="{{c.id}}" data-s="{{ 'on' if c.active else 'off' }}" data-name="{{c.label}}" data-code="{{c.code}}" data-bound="{{ '1' if c.device_count else '' }}" data-pay="{{c.pay}}" data-bal="{{ usd(c.balance) }}" data-free="{{ c.free|join(',') }}" data-acct="{{c.account_user}}" data-n="{{c.usage.total}}" data-x="{{ c.acts.repost + c.acts.like + c.acts.bookmark }}" data-seen="{{c.last_seen or 0}}" data-q="{{ (c.label ~ ' ' ~ c.code ~ ' ' ~ c.code|replace('-','') ~ ' ' ~ c.usage.accounts|map(attribute='name')|join(' '))|lower }}">
+{% macro ucard(c) %}{% set hue = (c.id[:2]|int(0,16)) * 360 // 256 %}
+<article class="u{{ '' if c.active else ' off' }}" data-id="{{c.id}}" data-s="{{ 'on' if c.active else 'off' }}" data-name="{{c.label}}" data-code="{{c.code}}" data-bound="{{ '1' if c.device_count else '' }}" data-pay="{{c.pay}}" data-bal="{{ usd(c.balance) }}" data-free="{{ c.free|join(',') }}" data-acct="{{c.account_user}}" data-n="{{c.usage.total}}" data-x="{{ c.acts.repost + c.acts.like + c.acts.bookmark }}" data-seen="{{c.active_at}}" data-q="{{ (c.label ~ ' ' ~ c.code ~ ' ' ~ c.code|replace('-','') ~ ' ' ~ c.usage.accounts|map(attribute='name')|join(' '))|lower }}">
 <div class="who" role="button" tabindex="0" aria-expanded="false"><div class="av" style="--h:{{hue}}" aria-hidden="true">{{ (c.label or '؟')[:1] }}</div>
-<div class="nm"><h3>{{ c.label or 'بدون اسم' }}{% if c.account_user %}<span class="tg">حساب</span>{% endif %}{% if c.pay == 'prepaid' %}<span class="tg pp">مسبق</span>{% endif %}</h3><p><span class="st" title="{{ 'يعمل' if c.active else 'موقوف' }}">{{ 'يعمل' if c.active else 'موقوف' }}</span><span class="ls" title="آخر دخول">{{ic('clock')}}{{ c.last_seen_text if c.last_seen else 'لم يدخل' }}</span>{% if c.pay == 'prepaid' %}<span class="sb pp{{ ' low' if c.balance < 0.05 else '' }}">رصيد <b dir="ltr">{{ usd(c.balance) }}</b></span>{% elif c.usage.cost %}<span class="sb">آجل <b dir="ltr">${{ '%.2f'|format(c.usage.cost) }}</b></span>{% endif %}</p></div>{{ic('chev')}}</div>
+<div class="nm"><h3>{{ c.label or 'بدون اسم' }}{% if c.account_user %}<span class="tg">حساب</span>{% endif %}{% if c.pay == 'prepaid' %}<span class="tg pp">مسبق</span>{% endif %}</h3><p><span class="st" title="{{ 'يعمل' if c.active else 'موقوف' }}">{{ 'يعمل' if c.active else 'موقوف' }}</span><span class="ls" title="آخر نشاط">{{ic('clock')}}{{ c.active_text }}</span>{% if c.pay == 'prepaid' %}<span class="sb pp{{ ' low' if c.balance < 0.05 else '' }}">رصيد <b dir="ltr">{{ usd(c.balance) }}</b></span>{% elif c.usage.cost %}<span class="sb">آجل <b dir="ltr">${{ '%.2f'|format(c.usage.cost) }}</b></span>{% endif %}</p></div>{{ic('chev')}}</div>
 <button type="button" class="ib ibm" data-more aria-label="خيارات {{ c.label or 'المستخدم' }}">{{ic('more')}}</button>
 <form method="post" action="/{{admin}}/code/toggle" data-toast="{{ 'تم إيقاف الرمز' if c.active else 'تم تشغيل الرمز' }}"><input type="hidden" name="id" value="{{c.id}}"><button class="sw{{ ' on' if c.active else '' }}" role="switch" aria-checked="{{ 'true' if c.active else 'false' }}" aria-label="رمز {{ c.label or 'بدون اسم' }} يعمل"><i></i></button></form>
 <div class="ub">
@@ -3077,8 +3123,14 @@ if(j.ok){show(j.comment,false,'\u2066'+j.chars+' / '+j.limit+'\u2069 حرف',j.t
 {% else %}<p class="axn">لم يرسل تطبيقه أرقام التنفيذ بعد.</p>{% endif %}
 </div>
 </article>
-{% endfor %}
+{% endmacro %}
+<div class="list" id="list">
+{% for c in codes if not c.idle %}{{ ucard(c) }}{% endfor %}
 </div>
+{% if stats.idle %}<details class="card prc idle" id="idle"><summary><span class="prc-h">{{ic('clock')}}<b>غير نشطين</b><span class="tg" id="idle-n">{{stats.idle}}</span></span><span class="prc-s">لم يستخدموا التطبيق منذ يومين أو أكثر</span>{{ic('chev')}}</summary>
+<div class="list" id="list-idle">
+{% for c in codes if c.idle %}{{ ucard(c) }}{% endfor %}
+</div></details>{% endif %}
 {% if not codes %}<div class="empty" style="margin-top:16px"><h3>لا يوجد مستخدمون بعد</h3><p>أضف مستخدمًا ليُنشأ له رمز دخول يفتح به التطبيق.</p><button class="btn" type="button" data-open="nu">{{ic('plus')}}إضافة مستخدم</button></div>{% endif %}
 <div class="empty" id="nomatch" hidden><h3>لا نتائج</h3><p>جرّب اسمًا أو رمزًا آخر، أو غيّر التصفية.</p><button class="btn ghost" type="button" id="clr">عرض كل المستخدمين</button></div>
 </section>
@@ -3478,7 +3530,7 @@ $('#th').onclick=function(){R.dataset.theme=R.dataset.theme==='dark'?'light':'da
 
 /* search, filter and sort of the users */
 var list=$('#list'),rows=$$('.u'),q=$('#q'),so=$('#so'),nomatch=$('#nomatch'),fl=sget('fl')||'all';
-rows.forEach(function(u,i){u._i=i});
+rows.forEach(function(u,i){u._i=i;u._home=u.parentNode});
 var ORDER={
 'new':function(a,b){return a._i-b._i},
 seen:function(a,b){return b.dataset.seen-a.dataset.seen||a._i-b._i},
@@ -3487,11 +3539,11 @@ acts:function(a,b){return b.dataset.x-a.dataset.x||a._i-b._i},
 name:function(a,b){return a.dataset.name.localeCompare(b.dataset.name,'ar')||a._i-b._i}};
 function filter(){if(!q)return;var s=q.value.trim().toLowerCase(),n=0;
 rows.forEach(function(u){var ok=(fl==='all'||u.dataset.s===fl)&&(!s||u.dataset.q.indexOf(s)>-1);u.hidden=!ok;if(ok)n++});
-nomatch.hidden=n>0;$('#qx').hidden=!s;
+nomatch.hidden=n>0;$('#qx').hidden=!s;var idle=$('#idle');if(idle){var shown=rows.filter(function(u){return u._home.id==='list-idle'&&!u.hidden}).length;idle.hidden=!shown;$('#idle-n').textContent=shown;if(s&&shown)idle.open=true}
 $$('#flt button').forEach(function(b){b.setAttribute('aria-pressed',String(b.dataset.f===fl))});sset('fl',fl)}
 function sort(){if(!so)return;if(!ORDER[so.value])so.value='new';
 $('#sol').textContent=so.options[so.selectedIndex].dataset.s;
-rows.slice().sort(ORDER[so.value]).forEach(function(u){list.appendChild(u)});sset('so',so.value)}
+rows.slice().sort(ORDER[so.value]).forEach(function(u){u._home.appendChild(u)});sset('so',so.value)}
 if(q){
 q.value=take('q')||'';so.value=sget('so')||'new';
 q.oninput=filter;so.onchange=sort;
@@ -3608,7 +3660,7 @@ R.classList.remove('loading');$$('.busy').forEach(function(b){b.classList.remove
 
 /* every change is a form post; risky ones ask first */
 var cf=$('#cf'),pending=null;
-function keep(f){if(f.dataset.toast)leave('toast',f.dataset.toast);leave('open',$$('.u.open').map(function(u){return u.dataset.id}).join(','));leave('setg',$$('#setg,#setg details').filter(function(d){return d.open}).map(function(d){return d.id}).join(','));
+function keep(f){if(f.dataset.toast)leave('toast',f.dataset.toast);leave('open',$$('.u.open').map(function(u){return u.dataset.id}).join(','));leave('setg',$$('#setg,#setg details,#idle').filter(function(d){return d.open}).map(function(d){return d.id}).join(','));
 if(f.hasAttribute('data-fresh'))leave('new',rows.length);
 else{leave('y',window.scrollY);if(q)leave('q',q.value)}}
 $('#cfok').onclick=function(){var f=pending;pending=null;cf.close();if(f){keep(f);loading(f);f.submit()}};
@@ -3669,6 +3721,7 @@ def dashboard():
     acts_data = load_acts()
     usage_data = load_usage()
     rows = [dict(c, last_seen_text=seen_text(c), usage=usage_of(c["id"], usage_data), acts=acts_of(c["id"], acts_data)) for c in codes]
+    activity, now = load_activity(), int(time.time())
     for r in rows:
         r["pay"] = pay_of(r)
         r["balance"] = balance_of(r)
@@ -3682,6 +3735,11 @@ def dashboard():
         r["devices_text"] = ("غير مربوط", "جهاز مربوط", "جهازان")[n] if n < 3 else f"{n} {'أجهزة' if n <= 10 else 'جهازًا'}"
         r.pop("devices", None)                       # (the phones' ids stay out of the page)
         r.pop("hw", None)
+        acted = max(int(activity.get(r["id"]) or 0), int(r.get("last_seen") or 0))
+        r["active_at"] = max(acted, int(r.get("created") or 0))
+        r["active_text"] = seen_text({"last_seen": acted})
+        r["idle"] = now - r["active_at"] > IDLE_AFTER
+    balances = [balance_of(r) for r in rows]
     stats = {"users": len(rows), "active": sum(1 for r in rows if r.get("active")),
              "bound": sum(r["device_count"] for r in rows),
              "comments": sum(r["usage"]["total"] for r in rows),
@@ -3690,6 +3748,9 @@ def dashboard():
              "bookmark": sum(r["acts"]["bookmark"] for r in rows)}
     since_start = lifetime_totals(usage_data)
     stats["all_comments"], stats["all_cost"] = since_start["comments"], since_start["cost"]
+    stats["balance"] = round(sum(b for b in balances if b > 0), 4)          # (what the users hold)
+    stats["debt"] = round(sum(b for b in balances if b < 0), 4)             # (what some owe: below zero)
+    stats["idle"] = sum(1 for r in rows if r["idle"])
     notices = notice_rows(codes)
     messages = support_rows(codes)
     move = load_move()
@@ -3964,6 +4025,7 @@ def code_delete():
     with LOCK:
         save_codes([row for row in load_codes() if row.get("id") != code_id])
     ledger_forget(code_id)
+    forget_activity(code_id)
     return redirect(f"/{ADMIN}")
 
 
@@ -5425,6 +5487,7 @@ def api_task_start():
     row = code_from_token(body.get("token"))
     if not row:
         return api_err("انتهت صلاحية الدخول أو أوقِف الرمز أو نُقل لجهاز آخر. أعد إدخال الرمز.", 200)
+    touch_activity(row["id"])
     base = load_prices()
     prices = prices_for(row, base)                  # (this user's free services cost them nothing)
     services = [name for name in body.get("services") if name in SERVICES] if isinstance(body.get("services"), list) else []
@@ -5446,6 +5509,8 @@ def api_charge():
         return api_err("انتهت صلاحية الدخول أو أوقِف الرمز أو نُقل لجهاز آخر. أعد إدخال الرمز.", 200)
     items = body.get("items") if isinstance(body.get("items"), list) else []
     items = [item for item in items[:500] if isinstance(item, dict)]
+    if items:
+        touch_activity(row["id"])
     base = load_prices()
     prices = prices_for(row, base)                  # (counted, at 0, when free for this user)
     charged: list = []
@@ -5719,6 +5784,7 @@ def api_comment():
     row = code_from_token(body.get("token"))
     if not row:
         return api_err("انتهت صلاحية الدخول أو أوقِف الرمز أو نُقل لجهاز آخر. أعد إدخال الرمز.", 200)
+    touch_activity(row["id"])
     tweet_text = str(body.get("text") or "")[:4000]
     image = None
     raw_image = body.get("image")

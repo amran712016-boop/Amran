@@ -31,11 +31,13 @@ import io
 import gzip
 import hashlib
 import hmac
+import http.cookiejar
 import json
 import os
 import re
 import secrets
 import shutil
+import socket
 import ssl
 import struct
 import subprocess
@@ -3331,6 +3333,21 @@ f.addEventListener('change',sync);sync()})();</script>{% endif %}
 <ul class="notes"><li>{{ic('shield')}}<span>زر «تنزيل التطبيق» داخل التطبيق يُنزّله عبر اتصاله المحمي بخادمك ويحفظه في «التنزيلات» بلا أي تحذير. أما الرابط فيُفتح في المتصفح، وقد يعرض «الاتصال غير خاص» لأن شهادة خادمك ذاتية: اضغط «متقدم» ثم «متابعة».</span></li>
 <li>{{ic('edit')}}<span>«تجريبي»: انشره لمستخدمين تختارهم (أنت مثلًا) أولًا، ثم «نشر للجميع» حين تتأكد أنه يعمل.</span></li>
 <li>{{ic('alert')}}<span>ليُثبَّت فوق النسخة الموجودة دون حذفها: نفس مفتاح التوقيع (keystore) الذي بنيت به النسخة السابقة، ورقم إصدار (versionCode) أعلى منها.</span></li></ul></div>
+<div class="card pad" id="srv-card"><h2>تحديث لوحة التحكم</h2>
+<p class="mut">بدل استبدال <bdi dir="ltr">control_server.py</bdi> في الاستضافة: اختر الملف الجديد أو الصق رابطه، واكتب كلمة مرور اللوحة. يُجرَّب أولًا على نسخة من بياناتك، ولا يُستبدل إلا إن فتحت لوحته؛ ثم يُعاد تشغيل الخادم به خلال ثوانٍ. ويبقى الحالي محفوظًا لـ«الرجوع للإصدار السابق».</p>
+<dl class="mvd"><div><dt>يعمل الآن</dt><dd>{% if srv.now %}<bdi dir="ltr">{{srv.now.sha}}</bdi> · {{srv.now.when_text}}{% else %}—{% endif %}</dd></div>{% if srv.prev %}<div><dt>السابق</dt><dd><bdi dir="ltr">{{srv.prev.sha}}</bdi> · {{srv.prev.when_text}}</dd></div>{% endif %}</dl>
+<form method="post" action="/{{admin}}/server/update" enctype="multipart/form-data" data-keep-busy data-title="تحديث لوحة التحكم؟" data-confirm="يُجرَّب الملف الجديد أولًا، ثم يُستبدل ويُعاد تشغيل الخادم: ثوانٍ قليلة لا تعمل فيها اللوحة والتطبيقات." data-yes="تحديث">
+<label class="l" for="sv-file">الملف <small>(control_server.py)</small></label><input id="sv-file" class="fs" type="file" name="file">
+<label class="l" for="sv-url">أو رابطه <small>(https)</small></label><input id="sv-url" class="fs" name="url" dir="ltr" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://github.com/…/control_server.py">
+<label class="l" for="sv-pw">كلمة مرور لوحة التحكّم</label>
+<div class="pw"><input id="sv-pw" type="password" name="password" required autocomplete="current-password"><button type="button" class="eye" data-eye aria-label="إظهار كلمة المرور" aria-pressed="false">{{ic('eye')}}</button></div>
+<button class="btn wide" style="margin-top:14px">{{ic('reset')}}تجربة ثم تحديث</button></form>
+{% if srv.prev %}<details class="acc rs"><summary class="axs"><span>الرجوع للإصدار السابق</span>{{ic('chev')}}</summary>
+<form method="post" action="/{{admin}}/server/rollback" data-title="الرجوع للإصدار السابق؟" data-confirm="يُوضع الإصدار السابق مكان الحالي ويُعاد تشغيل الخادم." data-yes="الرجوع" data-kind="danger">
+<label class="l" for="sv-pw2">كلمة مرور لوحة التحكّم</label>
+<div class="pw"><input id="sv-pw2" type="password" name="password" required autocomplete="current-password"><button type="button" class="eye" data-eye aria-label="إظهار كلمة المرور" aria-pressed="false">{{ic('eye')}}</button></div>
+<button class="btn wide ghost" style="margin-top:12px">الرجوع للإصدار السابق</button></form></details>{% endif %}
+</div>
 </section>
 
 <section class="panel" id="p-link">
@@ -3491,7 +3508,7 @@ row.addEventListener('pointerenter',open);row.addEventListener('focus',open);row
 function draw(){tip.hidden=true;if(data)(range==='u'?users:lines)()}
 dlg.querySelectorAll('.ch-seg button').forEach(function(b){b.addEventListener('click',function(){range=b.dataset.r;
 dlg.querySelectorAll('.ch-seg button').forEach(function(x){x.setAttribute('aria-selected',String(x===b))});draw()})});
-D.getElementById('ch-open').addEventListener('click',function(){say('جارٍ التحميل…');fetch(dlg.dataset.url,{cache:'no-store',credentials:'same-origin'})
+(D.getElementById('ch-open')||D.createElement('i')).addEventListener('click',function(){   /* (no button before the first user) */say('جارٍ التحميل…');fetch(dlg.dataset.url,{cache:'no-store',credentials:'same-origin'})
 .then(function(r){return r.json()}).then(function(j){if(!j||!j.ok)throw 0;data=j;draw()}).catch(function(){say('تعذّر جلب البيانات. أعد فتح الرسم.')})});
 addEventListener('resize',function(){if(dlg.open)draw()})})();</script>
 <dialog id="cf" class="sheet" aria-labelledby="cft"><div class="grab"></div><div class="dg"><h3 id="cft"></h3><p class="mut" id="cfm"></p><div class="da"><button type="button" class="btn ghost" data-close>إلغاء</button><button type="button" class="btn" id="cfok">تأكيد</button></div></div></dialog>
@@ -3776,7 +3793,7 @@ def dashboard():
         backup_when=seen_text({"last_seen": last_backup}) if last_backup else "",
         owner_link=owner_app_link(request.host), in_owner_app=OWNER_APP_MARK in (request.headers.get("User-Agent") or ""),
         this_host=request.host, relay=MOVE_RELAY.split("//")[-1],
-        prices=load_prices(), svc=SERVICE_NAMES, welcome=load_welcome(), pace=load_pace(), prompt=load_prompt(), one_device=one_device(),
+        prices=load_prices(), svc=SERVICE_NAMES, srv=server_info(), welcome=load_welcome(), pace=load_pace(), prompt=load_prompt(), one_device=one_device(),
         pay=dict(public_payment(), has_key=bool(load_binance()["key"]), blocked=binance_blocked(load_binance())),
         app_slots=app_panel(codes), app_dl_link=app_download_link(), app_package=APP_PACKAGE,
         script_live=script_live, script_staged=script_staged, script_next=next_version(highest_published_version()),
@@ -3954,6 +3971,226 @@ def backup_restore():
     threading.Thread(target=again, daemon=True).start()
     session.clear()
     return render_template_string(RESTORED_PAGE, link=link)
+
+
+# ----------------------------------------------------------------------------- «تحديث لوحة التحكم»
+# The owner gives a new control_server.py from the panel (the file, or its link) instead of replacing it on the
+# hosting. It is checked first: a control panel's file, Python that compiles. Then it is started on the side, on
+# another port with a copy of this server's data, and its panel must open (signed in with the owner's password)
+# and its apps' side answer. Only then is the running file kept as the previous one (.prev) and replaced, and the
+# server starts again with it, in a few seconds. «الرجوع للإصدار السابق» puts the previous one back the same way.
+SERVER_FILE = Path(__file__).resolve()
+SERVER_PREV = SERVER_FILE.with_name(SERVER_FILE.name + ".prev")
+SERVER_MAX = 8 * 1024 * 1024
+SERVER_TRY_SECONDS = 45
+_server_update_lock = threading.Lock()
+
+
+def server_version(path: Path) -> dict:
+    try:
+        raw = path.read_bytes()
+        when = int(path.stat().st_mtime)
+    except OSError:
+        return {}
+    return {"sha": hashlib.sha256(raw).hexdigest()[:10], "when": when, "when_text": seen_text({"last_seen": when})}
+
+
+def server_info() -> dict:
+    return {"now": server_version(SERVER_FILE), "prev": server_version(SERVER_PREV) if SERVER_PREV.is_file() else {}}
+
+
+def restart_server_soon(why: str) -> None:
+    """Start this server again (the same command, so the file as it is now) once the answer has gone."""
+    def again() -> None:
+        time.sleep(1.5)
+        print(why, flush=True)
+        for fd in range(3, 4096):                  # (the listening socket closed, so the new start can bind it)
+            try:
+                os.set_inheritable(fd, False)
+            except OSError:
+                pass
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+    threading.Thread(target=again, daemon=True).start()
+
+
+def server_try(text: str, password: str) -> str:
+    """Start this control_server.py on the side (another port, a copy of the data): "" when its panel opened and its
+    apps' side answered, else why not (with the end of what it printed)."""
+    work = DATA_DIR / "update-check"
+    shutil.rmtree(work, ignore_errors=True)
+    (work / "data").mkdir(parents=True)
+    candidate = work / SERVER_FILE.name
+    candidate.write_text(text, encoding="utf-8")
+    for name in BACKUP_FILES:
+        if (DATA_DIR / name).is_file():
+            shutil.copy2(DATA_DIR / name, work / "data" / name)
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    env = dict(os.environ, CONTROL_DATA=str(work / "data"), CONTROL_HOST="127.0.0.1", CONTROL_PORT=str(port),
+               CONTROL_PUBLIC_HOST="127.0.0.1", CONTROL_RELAY="http://127.0.0.1:9", PYTHONDONTWRITEBYTECODE="1")
+    log = open(work / "out.log", "wb")
+    proc = subprocess.Popen([sys.executable, str(candidate)], cwd=str(work), env=env, stdin=subprocess.DEVNULL,
+                            stdout=log, stderr=subprocess.STDOUT)
+    why = ""
+    try:
+        end = time.time() + SERVER_TRY_SECONDS
+        while True:
+            if proc.poll() is not None:
+                why = "توقف قبل أن يعمل."
+                break
+            try:
+                socket.create_connection(("127.0.0.1", port), timeout=1).close()
+                break
+            except OSError:
+                if time.time() > end:
+                    why = "لم يبدأ خلال وقت التجربة."
+                    break
+                time.sleep(0.5)
+        if not why:
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE            # (its own certificate, on this same machine)
+            opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()),
+                                                 urllib.request.HTTPSHandler(context=context))
+            base = f"https://127.0.0.1:{port}"
+            opener.open(f"{base}/{ADMIN}/login", data=urllib.parse.urlencode({"password": password}).encode(), timeout=20).read()
+            page = opener.open(f"{base}/{ADMIN}", timeout=30).read().decode("utf-8", "replace")
+            answer = json.loads(opener.open(urllib.request.Request(f"{base}/{API}/check", data=b'{"token":""}',
+                                                                   headers={"Content-Type": "application/json"}), timeout=20).read())
+            if 'id="p-users"' not in page:
+                why = "فتحت لوحته، لكن صفحتها لم تكتمل."
+            elif answer.get("ok") is not True:
+                why = "لم يُجب التطبيقات كما يجب."
+    except Exception as exc:                               # (it answered with an error, or not at all)
+        why = f"تعذّر فتح لوحته ({type(exc).__name__}: {str(exc)[:120]})."
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        log.close()
+        if why:
+            try:
+                tail = [line for line in (work / "out.log").read_text("utf-8", "replace").splitlines() if line.strip()][-4:]
+            except OSError:
+                tail = []
+            if tail:
+                why += " آخر ما كتبه: " + " | ".join(line.strip()[:200] for line in tail)
+        shutil.rmtree(work, ignore_errors=True)
+    return why
+
+
+SERVER_UPDATED_PAGE = r"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow">
+<meta http-equiv="refresh" content="8;url={{back}}"><title>{{title}}</title>
+<style>body{margin:0;min-height:100vh;display:grid;place-items:center;padding:16px;background:#eef2f1;color:#10201f;font:15px/1.7 system-ui,sans-serif}
+.box{background:#fff;border:1px solid #dce4e2;border-radius:18px;padding:22px;max-width:520px}h1{font-size:19px;margin:0 0 8px}
+a{color:#0f6b66;font-weight:600}bdi{font-family:ui-monospace,monospace}</style></head><body><div class="box">
+<h1>{{title}}</h1><p>{{text}}</p><p>الإصدار <bdi dir="ltr">{{sha}}</bdi>. تُفتح اللوحة وحدها بعد ثوانٍ، أو <a href="{{back}}">افتحها الآن</a>.</p>
+</div></body></html>"""
+
+
+def _server_update_text() -> tuple[str, str]:
+    """The new file from the form (the file, or its link): its text, or "" and why not."""
+    upload = request.files.get("file")
+    link = (request.form.get("url") or "").strip()
+    raw = b""
+    if upload and upload.filename:
+        raw = upload.read(SERVER_MAX + 1)
+    elif link:
+        if not re.fullmatch(r"https://\S{4,2000}", link):
+            return "", "الرابط يجب أن يبدأ بـ https://"
+        try:
+            with urllib.request.urlopen(urllib.request.Request(link, headers={"User-Agent": "control-server-update"}),
+                                        timeout=30) as answer:
+                raw = answer.read(SERVER_MAX + 1)
+        except Exception as exc:
+            return "", f"تعذّر تنزيل الملف من الرابط ({type(exc).__name__})."
+    else:
+        return "", "اختر ملف control_server.py أو الصق رابطه."
+    if not raw:
+        return "", "الملف فارغ."
+    if len(raw) > SERVER_MAX:
+        return "", "الملف أكبر من المسموح (٨ ميجابايت)."
+    try:
+        text = raw.decode("utf-8").lstrip("\ufeff")
+    except UnicodeDecodeError:
+        return "", "هذا ليس ملفًا نصيًّا (UTF-8)."
+    if 'DASHBOARD = r"""' not in text or "def backup_pack" not in text or "def api_task_start" not in text:
+        return "", "هذا ليس ملف لوحة التحكم (control_server.py). تأكد أنه هو، لا سكربت التطبيق."
+    try:
+        compile(text, SERVER_FILE.name, "exec")
+    except SyntaxError as exc:
+        return "", f"في الملف خطأ في السطر {exc.lineno}: {exc.msg}."
+    return text, ""
+
+
+@app.post(f"/{ADMIN}/server/update")
+def server_update():
+    """«تحديث لوحة التحكم»: the new file tried on the side, then put in place of this one, and the server started again."""
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    if not password_ok(request.form.get("password") or ""):
+        flash("bad", "كلمة المرور غير صحيحة. لم يتغيّر شيء.")
+        return redirect(f"/{ADMIN}#script")
+    text, why = _server_update_text()
+    if why:
+        flash("bad", why + " لم يتغيّر شيء.")
+        return redirect(f"/{ADMIN}#script")
+    if hashlib.sha256(text.encode("utf-8")).hexdigest()[:10] == server_version(SERVER_FILE).get("sha"):
+        flash("ok", "هذا الملف هو نفسه الذي يعمل الآن. لم يتغيّر شيء.")
+        return redirect(f"/{ADMIN}#script")
+    if not _server_update_lock.acquire(blocking=False):
+        flash("bad", "تحديث آخر يجري الآن. انتظر قليلًا.")
+        return redirect(f"/{ADMIN}#script")
+    try:
+        why = server_try(text, request.form.get("password") or "")
+        if why:
+            flash("bad", "لم يُحدَّث: الملف الجديد لم يعمل في التجربة. " + why[:700])
+            return redirect(f"/{ADMIN}#script")
+        old = server_version(SERVER_FILE).get("sha", "")
+        try:
+            shutil.copy2(SERVER_FILE, SERVER_PREV)
+            temporary = SERVER_FILE.with_name(SERVER_FILE.name + ".new")
+            temporary.write_text(text, encoding="utf-8")
+            os.replace(temporary, SERVER_FILE)
+        except OSError as exc:
+            flash("bad", f"تعذّر وضع الملف الجديد مكان القديم ({exc.strerror or exc}). لم يتغيّر شيء.")
+            return redirect(f"/{ADMIN}#script")
+    finally:
+        _server_update_lock.release()
+    new = server_version(SERVER_FILE).get("sha", "")
+    restart_server_soon(f"حُدِّثت لوحة التحكم ({old} ← {new}): يُعاد تشغيل الخادم…")
+    return render_template_string(SERVER_UPDATED_PAGE, title="تم التحديث", sha=new, back=f"/{ADMIN}#script",
+                                  text="جُرّب الملف الجديد ونجح، ووُضع مكان القديم (محفوظًا كإصدار سابق)، ويُعاد تشغيل الخادم الآن.")
+
+
+@app.post(f"/{ADMIN}/server/rollback")
+def server_rollback():
+    """«الرجوع للإصدار السابق»: the previous file back in place (and this one kept as the previous), then a restart."""
+    if not logged_in():
+        return redirect(f"/{ADMIN}")
+    if not password_ok(request.form.get("password") or ""):
+        flash("bad", "كلمة المرور غير صحيحة. لم يتغيّر شيء.")
+        return redirect(f"/{ADMIN}#script")
+    if not SERVER_PREV.is_file():
+        flash("bad", "لا يوجد إصدار سابق محفوظ.")
+        return redirect(f"/{ADMIN}#script")
+    with _server_update_lock:
+        try:
+            temporary = SERVER_FILE.with_name(SERVER_FILE.name + ".new")
+            shutil.copy2(SERVER_PREV, temporary)
+            shutil.copy2(SERVER_FILE, SERVER_PREV)
+            os.replace(temporary, SERVER_FILE)
+        except OSError as exc:
+            flash("bad", f"تعذّر الرجوع ({exc.strerror or exc}). لم يتغيّر شيء.")
+            return redirect(f"/{ADMIN}#script")
+    new = server_version(SERVER_FILE).get("sha", "")
+    restart_server_soon(f"رجعت لوحة التحكم للإصدار السابق ({new}): يُعاد تشغيل الخادم…")
+    return render_template_string(SERVER_UPDATED_PAGE, title="تم الرجوع للإصدار السابق", sha=new, back=f"/{ADMIN}#script",
+                                  text="وُضع الإصدار السابق مكان الحالي (والحالي محفوظ كإصدار سابق)، ويُعاد تشغيل الخادم الآن.")
 
 
 @app.post(f"/{ADMIN}/logout")

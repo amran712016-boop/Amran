@@ -275,6 +275,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
       --ic-sparkle: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linejoin='round'%3E%3Cpath d='M11 3.5 12.9 9 18.5 11l-5.6 2L11 18.5 9.1 13 3.5 11l5.6-2z'/%3E%3Cpath d='M18.5 15.5l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9z'/%3E%3C/svg%3E");
       --ic-user: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round'%3E%3Ccircle cx='12' cy='8' r='4'/%3E%3Cpath d='M4 21a8 8 0 0 1 16 0'/%3E%3C/svg%3E");
       --ic-target: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Ccircle cx='12' cy='12' r='5'/%3E%3Ccircle cx='12' cy='12' r='1' fill='%23000'/%3E%3C/svg%3E");
+      --ic-lock: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='5' y='11' width='14' height='10' rx='2'/%3E%3Cpath d='M8 11V7a4 4 0 0 1 8 0v4'/%3E%3C/svg%3E");
+      --ic-unlock: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='5' y='11' width='14' height='10' rx='2'/%3E%3Cpath d='M8 11V7a4 4 0 0 1 7.6-1.7'/%3E%3C/svg%3E");
       --ic-chart: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 3v18h18'/%3E%3Cpath d='m7 15 4-4 3 3 5-6'/%3E%3C/svg%3E");
       --ic-layers: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m12 2 10 5-10 5L2 7z'/%3E%3Cpath d='m2 17 10 5 10-5M2 12l10 5 10-5'/%3E%3C/svg%3E");
       --ic-key: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='7.5' cy='15.5' r='4.5'/%3E%3Cpath d='m10.7 12.3 9.8-9.8M17 6l3 3M14.5 8.5l2 2'/%3E%3C/svg%3E");
@@ -387,6 +389,7 @@ EMBEDDED_PAGE = r'''<!doctype html>
     .i-chart { --m: var(--ic-chart); } .i-layers { --m: var(--ic-layers); } .i-key { --m: var(--ic-key); }
     .i-clip { --m: var(--ic-clip); } .i-send { --m: var(--ic-send); } .i-headset { --m: var(--ic-headset); }
     .i-terminal { --m: var(--ic-terminal); } .i-hash { --m: var(--ic-hash); }
+    .i-lock { --m: var(--ic-lock); } .i-unlock { --m: var(--ic-unlock); }
 
     /* ------------------------------------------------------------------ hero */
     .mast {
@@ -894,7 +897,28 @@ EMBEDDED_PAGE = r'''<!doctype html>
       mask: var(--ic-target) center / contain no-repeat;
       pointer-events: none;
     }
-    .stop-row input { padding-right: 34px; }
+    .stop-row input { padding-right: 34px; padding-left: 42px; }
+    /* its lock: open (as at first) the link is emptied once a task starts; locked it stays */
+    .stop-lock {
+      position: absolute;
+      top: 50%;
+      left: 6px;
+      display: grid;
+      place-items: center;
+      width: 32px;
+      height: 32px;
+      margin-top: -16px;
+      padding: 0;
+      border: 0;
+      border-radius: 9px;
+      background: none;
+      color: var(--text-4);
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+    .stop-lock .i { width: 15px; height: 15px; }
+    .stop-lock[aria-pressed="true"] { color: var(--brand); background: var(--brand-soft); }
+    .stop-lock:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
 
     /* ------------------------------------------------------------------ «الإجراءات»: four tiles */
     .choices { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
@@ -1769,6 +1793,8 @@ EMBEDDED_PAGE = r'''<!doctype html>
           <div id="stop-row" class="stop-row">
             <input id="stop-tweet" name="stop_tweet" type="text" maxlength="300" autocomplete="off" spellcheck="false"
                    placeholder="رابط التغريدة المحددة" aria-label="التغريدة المحددة">
+            <button id="stop-lock" class="stop-lock" type="button" aria-pressed="false" aria-label="قفل الرابط: يبقى بعد التنفيذ"
+                    title="مفتوح: يُمسح الرابط بعد بدء المهمة"><i class="i i-unlock" aria-hidden="true"></i></button>
           </div>
         </section>
 
@@ -2021,6 +2047,24 @@ EMBEDDED_PAGE = r'''<!doctype html>
   const tokenField = document.getElementById("auth_token");
   function lockToken() {}
   const stopField = document.getElementById("stop-tweet");
+  // Its lock: open (as at first) the link is emptied once a task starts; locked it stays for the next task.
+  // Kept on this phone.
+  const stopLock = document.getElementById("stop-lock");
+  let stopLocked = false;
+  try { stopLocked = localStorage.getItem("x_stop_lock") === "1"; } catch (_) {}
+  function paintStopLock() {
+    stopLock.setAttribute("aria-pressed", String(stopLocked));
+    stopLock.querySelector(".i").className = "i " + (stopLocked ? "i-lock" : "i-unlock");
+    stopLock.title = stopLocked ? "مقفل: يبقى الرابط بعد بدء المهمة" : "مفتوح: يُمسح الرابط بعد بدء المهمة";
+    stopLock.setAttribute("aria-label", stopLocked ? "فتح القفل: يُمسح الرابط بعد التنفيذ" : "قفل الرابط: يبقى بعد التنفيذ");
+  }
+  paintStopLock();
+  stopLock.addEventListener("click", () => {
+    stopLocked = !stopLocked;
+    try { localStorage.setItem("x_stop_lock", stopLocked ? "1" : "0"); } catch (_) {}
+    paintStopLock();
+    showNotice(stopLocked ? "قُفل رابط التغريدة المحددة: يبقى بعد التنفيذ." : "فُتح القفل: يُمسح رابط التغريدة المحددة بعد بدء المهمة.", true);
+  });
   const pinField = document.getElementById("chat-pin");
   const groupsButton = document.getElementById("groups-button");
   const waitGroups = document.getElementById("wait-groups");
@@ -4077,14 +4121,14 @@ EMBEDDED_PAGE = r'''<!doctype html>
         reply_voice: selectedVoice()
       };
       if (byLinks) task.links = links;
-      else Object.assign(task, {group: selectedGroup, stop_tweet: stopRaw});
+      else Object.assign(task, {group: selectedGroup, stop_tweet: stopRaw, keep_stop: stopLocked});
       if (fast) task.fast = true;
       const started = await postJson("/group-run", task, 90000);
       if (!started.success || !started.job_id || !started.job_key) {
         showNotice(started.message || "تعذّر بدء التنفيذ.", false);
         return;
       }
-      if (!byLinks) {                       // (the task has its tweet: the box is emptied for the next one)
+      if (!byLinks && !stopLocked) {        // (the task has its tweet: the box is emptied for the next one, unless locked)
         stopField.value = "";
         snapshotActive();
         pushScreen();
@@ -14056,7 +14100,7 @@ def group_run_endpoint(access_path: str):
             auth_token=auth_token,
             chat_pin=pin,
             group=group_name,
-            stop_tweet="",                   # (the task keeps its tweet; the page's box is emptied for the next one)
+            stop_tweet=stop_raw if data.get("keep_stop") is True else "",   # (emptied for the next one, unless locked)
             actions=requested_actions,
             job_id=job_id,
             job_key=job_key,

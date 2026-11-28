@@ -2597,6 +2597,11 @@ input::placeholder{color:var(--mut);opacity:.8}
 .kp dt{font-size:12px;color:#a3cbc6;line-height:1.5}
 .kp dd{font-size:20px;font-weight:500;line-height:1.4;font-variant-numeric:tabular-nums}
 .kpa{display:block;margin-top:1px;font-size:11px;line-height:1.4;color:#a3cbc6;font-variant-numeric:tabular-nums;white-space:nowrap}
+.hta{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end}.hta form{margin:0}
+.setb{display:grid;gap:8px;padding-bottom:12px}.setb .card{margin:0;border-radius:12px;background:var(--soft)}.setb .prc{padding:0 12px}
+@media(max-width:599px){.hero{padding:12px 14px 0;margin-top:12px;border-radius:16px}.tot b{font-size:32px}.hb{height:34px;padding:0 10px;font-size:12.5px}.ratio{margin-top:10px;height:6px}.rl{margin-top:5px;font-size:12px}.kp{margin-top:10px}.kp div{padding:7px 0 8px;padding-inline-start:10px}.kp dt{font-size:11px}.kp dd{font-size:16px}.kpa{font-size:10px}}
+.nm .st{font-size:0;gap:0}.ls{display:inline-flex;align-items:center;gap:3px}.ls .i{width:12px;height:12px}
+@media(max-width:599px){.hbt{display:none}.hta .hb{width:36px;padding:0;justify-content:center}}
 
 /* ---- search, filter, sort ---- */
 .tb{position:sticky;top:0;z-index:10;display:flex;gap:8px;padding:10px 0 8px;margin-top:4px;background:var(--bg)}
@@ -2618,14 +2623,23 @@ input::placeholder{color:var(--mut);opacity:.8}
 .sort:focus-within{outline:2px solid var(--pri);outline-offset:2px}
 
 /* ---- one user ---- */
-.list{display:grid;grid-template-columns:minmax(0,1fr);gap:10px}
-.u{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:12px 10px;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:14px}
-.who{display:flex;gap:12px;align-items:center;min-width:0}
-.av{width:44px;height:44px;border-radius:14px;display:grid;place-items:center;flex:none;font-weight:600;font-size:18px;line-height:1;background:hsl(var(--h,174) 50% 50%/.15);color:hsl(var(--h,174) 62% 33%)}
+.list{display:grid;grid-template-columns:minmax(0,1fr);gap:8px}
+/* a user: one short row (name, state, balance, ⋮, switch); a tap on the name opens the rest under it */
+.u{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:10px 8px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:9px 10px 9px 12px;transition:border-color .2s,box-shadow .2s}
+.u.open{border-color:var(--dash);box-shadow:0 6px 18px -12px rgba(0,0,0,.35)}
+.who{display:flex;gap:10px;align-items:center;min-width:0;min-height:44px;cursor:pointer;border-radius:10px;-webkit-tap-highlight-color:transparent}
+.who:focus-visible{outline:2px solid var(--pri);outline-offset:2px}
+.who>.i{flex:none;width:16px;height:16px;margin-inline-start:auto;color:var(--mut);transition:transform .2s}
+.u.open .who>.i{transform:rotate(180deg)}
+.ub{grid-column:1/-1;display:none;gap:12px;padding:4px 0 2px;border-top:1px solid var(--line);padding-top:12px}
+.u.open .ub{display:grid}
+.sb b{font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}.sb.pp b{color:var(--pri)}.sb.low b{color:var(--bad)}
+.ibm{width:38px;height:38px;border-radius:11px}
+.av{width:40px;height:40px;border-radius:12px;display:grid;place-items:center;flex:none;font-weight:600;font-size:16px;line-height:1;background:hsl(var(--h,174) 50% 50%/.15);color:hsl(var(--h,174) 62% 33%)}
 [data-theme=dark] .av{color:hsl(var(--h,174) 58% 72%)}
 .nm{min-width:0}
-.nm h3{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.nm p{display:flex;flex-wrap:wrap;align-items:center;column-gap:9px;font-size:12.5px;line-height:1.6;color:var(--mut)}
+.nm h3{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:15px}
+.nm p{display:flex;flex-wrap:wrap;align-items:center;column-gap:8px;font-size:12px;line-height:1.55;color:var(--mut)}
 .st{display:inline-flex;align-items:center;gap:5px;font-weight:600;color:var(--pri)}
 .st::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor}
 .sw{position:relative;width:52px;height:32px;padding:0;border:0;border-radius:99px;background:var(--off);flex:none;transition:background .2s}
@@ -2723,7 +2737,7 @@ html.loading .ldpill{display:flex}
 .fl{list-style:none;margin:8px 0 0;padding:0;display:grid;gap:4px;font-size:12.5px}.fl li{padding:6px 10px;border-radius:8px;background:var(--soft);overflow-wrap:anywhere}
 .prc{padding:0 16px}.prc summary{display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center;min-height:54px;list-style:none;cursor:pointer}
 .prc summary::-webkit-details-marker{display:none}.prc summary>.i{order:1;margin-inline-start:auto;width:18px;height:18px;color:var(--mut);transition:transform .2s}
-.prc[open] summary>.i{transform:rotate(180deg)}.prc-h{display:flex;gap:8px;align-items:center}.prc-h .i{width:18px;height:18px;color:var(--pri)}
+.prc[open]>summary>.i{transform:rotate(180deg)}.prc-h{display:flex;gap:8px;align-items:center}.prc-h .i{width:18px;height:18px;color:var(--pri)}
 .prc-s{order:2;display:flex;flex-wrap:wrap;gap:4px 10px;font-size:12.5px;color:var(--mut);flex-basis:100%;margin-top:-6px;padding-bottom:12px}.prc form{padding-bottom:16px}.prc .mut{margin:0 0 4px;font-size:13px}
 .pr-ta{min-height:300px;font-size:14px;line-height:1.75}.pm{display:inline-block;font:12px/1.6 ui-monospace,Menlo,Consolas,monospace;padding:0 6px;border-radius:6px;background:var(--soft);border:1px solid var(--line);color:var(--ink)}
 .prt{margin:2px 0 14px;padding:14px;border:1px dashed var(--line);border-radius:14px}.prt .l{margin-top:0}.prt-r{display:flex;gap:8px;margin-top:8px}.prt-r .fs{flex:1;height:44px}.prt-r .btn{flex:none;min-width:96px}
@@ -2748,7 +2762,7 @@ html.loading .ldpill{display:flex}
 .bk{display:flex;gap:8px;align-items:center;font-size:14px;margin:10px 0 0;color:var(--pri)}.bk.none{color:var(--warn)}.bk .i{width:18px;height:18px;flex:none}
 .ckl{display:flex;gap:10px;align-items:center;margin:14px 0 0;font-size:14px;cursor:pointer}
 :root{--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a}[data-theme=dark]{--s1:#3987e5;--s2:#d95926;--s3:#199e70}
-.hch{margin:12px 0 4px}.hch .i{width:17px;height:17px}
+.hch{margin:0}.hch .i{width:17px;height:17px}
 .ask.ch{max-width:620px}.ch-h{display:flex;align-items:center;justify-content:space-between;gap:10px}
 .ch-seg{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;margin-top:12px;padding:4px;border-radius:12px;background:var(--soft)}
 .ch-seg button{height:34px;border:0;border-radius:9px;background:none;color:var(--mut);font:inherit;font-size:13px;font-weight:600;cursor:pointer}
@@ -2897,6 +2911,8 @@ main{padding-bottom:56px}
 <symbol id="i-reset" viewBox="0 0 24 24"><path d="M1 4v6h6"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></symbol>
 <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></symbol>
 <symbol id="i-chev" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+<symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+<symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></symbol>
 <symbol id="i-users" viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
 <symbol id="i-key" viewBox="0 0 24 24"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m11.4 11.6 9.6-9.6M17 6l3 3M14 9l2 2"/></symbol>
 <symbol id="i-code" viewBox="0 0 24 24"><path d="M16 18l6-6-6-6M8 6l-6 6 6 6"/></symbol>
@@ -2939,10 +2955,10 @@ main{padding-bottom:56px}
 <section class="hero" aria-label="ملخّص المستخدمين">
 <div>
 <div class="ht"><div class="tot"><b>{{stats.users}}</b><span>مستخدم</span></div>
-{% if stats.comments %}<form method="post" action="/{{admin}}/reset-cost-all" data-title="تصفير كل التكاليف؟" data-confirm="سيُصفَّر عدّاد التعليقات والتكلفة لكل المستخدمين، ويبقى محسوبًا في «منذ البداية» أعلى الصفحة." data-yes="تصفير التكاليف" data-kind="danger" data-toast="تم تصفير كل التكاليف"><button class="hb">{{ic('reset')}}تصفير التكاليف</button></form>{% endif %}</div>
+<div class="hta"><button type="button" class="hb hch" id="ch-open" data-open="chart" aria-label="الرسم البياني">{{ic('chart')}}<span class="hbt">الرسم البياني</span></button>
+{% if stats.comments %}<form method="post" action="/{{admin}}/reset-cost-all" data-title="تصفير كل التكاليف؟" data-confirm="سيُصفَّر عدّاد التعليقات والتكلفة لكل المستخدمين، ويبقى محسوبًا في «منذ البداية» أعلى الصفحة." data-yes="تصفير التكاليف" data-kind="danger" data-toast="تم تصفير كل التكاليف"><button class="hb" aria-label="تصفير التكاليف">{{ic('reset')}}<span class="hbt">تصفير التكاليف</span></button></form>{% endif %}</div></div>
 <div class="ratio" aria-hidden="true"><i style="width:{{ stats.active * 100 / stats.users }}%"></i></div>
 <div class="rl"><span><b>{{stats.active}}</b> يعمل</span><span><b>{{stats.users - stats.active}}</b> موقوف</span></div>
-<button type="button" class="hb hch" id="ch-open" data-open="chart">{{ic('chart')}}الرسم البياني</button>
 </div>
 <dl class="kp">
 <div><dt>أجهزة مربوطة</dt><dd>{{stats.bound}}</dd></div>
@@ -2954,7 +2970,9 @@ main{padding-bottom:56px}
 </dl>
 </section>
 {% set pn = {'comment': 'تعليق', 'like': 'إعجاب', 'repost': 'إعادة نشر', 'bookmark': 'مرجعية'} %}
-<details class="card prc"><summary><span class="prc-h">{{ic('key')}}<b>أسعار الخدمات</b></span><span class="prc-s">{% for k in ['comment', 'like', 'repost', 'bookmark'] %}<span>{{pn[k]}} <bdi dir="ltr">${{ '%g'|format(prices[k]) }}</bdi></span>{% endfor %}<span>حساب جديد <bdi dir="ltr">${{ '%g'|format(welcome) }}</bdi></span></span>{{ic('chev')}}</summary>
+<details class="card prc setg" id="setg"><summary><span class="prc-h">{{ic('sliders')}}<b>الإعدادات</b></span><span class="prc-s"><span>الأسعار</span><span>الدفع</span><span>سرعة التنفيذ</span><span>الأجهزة</span><span>البرومبت</span></span>{{ic('chev')}}</summary>
+<div class="setb">
+<details class="card prc" id="pz-card"><summary><span class="prc-h">{{ic('key')}}<b>أسعار الخدمات</b></span><span class="prc-s">{% for k in ['comment', 'like', 'repost', 'bookmark'] %}<span>{{pn[k]}} <bdi dir="ltr">${{ '%g'|format(prices[k]) }}</bdi></span>{% endfor %}<span>حساب جديد <bdi dir="ltr">${{ '%g'|format(welcome) }}</bdi></span></span>{{ic('chev')}}</summary>
 <form method="post" action="/{{admin}}/prices" data-toast="تم حفظ الأسعار"><p class="mut">سعر كل خدمة ناجحة بالدولار، و0 للمجانية. «آجل»: تُجمع التكلفة. «مسبق»: تُخصم من الرصيد، ولا تبدأ مهمة إن لم يكفِ لأرخص خدماتها؛ والمهمة التي بدأت تكمل إلى آخرها ولو نفد الرصيد في نصها (يصير بالسالب، وتسدّه الشحنة التالية). السعر الجديد يُطبَّق من الآن، وما حُسب قبله يبقى. ولتجعل خدمة مجانية لمستخدم بعينه: خياراته ← «خدمات مجانية».</p>
 <div class="prg">{% for k in ['comment', 'like', 'repost', 'bookmark'] %}<label class="prf"><span>{{pn[k]}}</span><input class="fs" name="{{k}}" dir="ltr" inputmode="decimal" autocomplete="off" value="{{ '%g'|format(prices[k]) }}"></label>{% endfor %}</div>
 <label class="prf prw"><span>رصيد الحساب الجديد</span><input class="fs" name="welcome" dir="ltr" inputmode="decimal" autocomplete="off" value="{{ '%g'|format(welcome) }}"></label>
@@ -2975,7 +2993,7 @@ main{padding-bottom:56px}
 <button class="btn wide" style="margin-top:14px">حفظ</button></form>
 {% if pay.has_key %}<div class="row" style="display:flex;gap:8px;margin-top:10px"><form method="post" action="/{{admin}}/binance/test" style="flex:1"><button class="btn ghost wide">اختبار الاتصال</button></form>
 <form method="post" action="/{{admin}}/binance/forget" style="flex:1" data-title="حذف مفتاح Binance؟" data-confirm="يتوقف التحقق التلقائي، وتصلك طلبات الشحن في «رسائل العملاء»." data-yes="حذف" data-kind="danger" data-toast="حُذف المفتاح"><button class="btn ghost wide">حذف المفتاح</button></form></div>{% endif %}</details>
-<details class="card prc"><summary><span class="prc-h">{{ic('sort')}}<b>سرعة التنفيذ</b></span><span class="prc-s"><span>كتابة التعليق <bdi dir="ltr">{{ '%g'|format(pace.typing[0]) }}–{{ '%g'|format(pace.typing[1]) }}</bdi> ث</span><span>بين الأزرار <bdi dir="ltr">{{ '%g'|format(pace.gap[0]) }}–{{ '%g'|format(pace.gap[1]) }}</bdi> ث</span><span>بعد التحميل <bdi dir="ltr">{{ '%g'|format(pace.settle[0]) }}–{{ '%g'|format(pace.settle[1]) }}</bdi> ث</span>{% if pace.in_page_on %}<span>فتح سريع <bdi dir="ltr">{{ pace.in_page[0] }}–{{ pace.in_page[1] }}</bdi> تغريدات</span>{% else %}<span>فتح سريع: متوقف</span>{% endif %}</span>{{ic('chev')}}</summary>
+<details class="card prc" id="pc-card"><summary><span class="prc-h">{{ic('sort')}}<b>سرعة التنفيذ</b></span><span class="prc-s"><span>كتابة التعليق <bdi dir="ltr">{{ '%g'|format(pace.typing[0]) }}–{{ '%g'|format(pace.typing[1]) }}</bdi> ث</span><span>بين الأزرار <bdi dir="ltr">{{ '%g'|format(pace.gap[0]) }}–{{ '%g'|format(pace.gap[1]) }}</bdi> ث</span><span>بعد التحميل <bdi dir="ltr">{{ '%g'|format(pace.settle[0]) }}–{{ '%g'|format(pace.settle[1]) }}</bdi> ث</span>{% if pace.in_page_on %}<span>فتح سريع <bdi dir="ltr">{{ pace.in_page[0] }}–{{ pace.in_page[1] }}</bdi> تغريدات</span>{% else %}<span>فتح سريع: متوقف</span>{% endif %}</span>{{ic('chev')}}</summary>
 <form method="post" action="/{{admin}}/pace" data-toast="تم حفظ سرعة التنفيذ"><p class="mut">بالثواني، ويختار التطبيق كل مرة رقمًا عشوائيًا بين «من» و«إلى». تُطبَّق على كل المستخدمين من مهمتهم التالية.</p>
 <p class="l">مدة كتابة التعليق كله</p>
 <div class="prg"><label class="prf"><span>من</span><input class="fs" name="typing_from" dir="ltr" inputmode="decimal" autocomplete="off" value="{{ '%g'|format(pace.typing[0]) }}"></label><label class="prf"><span>إلى</span><input class="fs" name="typing_to" dir="ltr" inputmode="decimal" autocomplete="off" value="{{ '%g'|format(pace.typing[1]) }}"></label></div>
@@ -3022,6 +3040,7 @@ var d=new FormData(f);d.append('tweet',tw);d.append('voice',document.getElementB
 fetch('/{{admin}}/prompt/try',{method:'POST',body:d,credentials:'same-origin'}).then(function(r){return r.json()}).then(function(j){
 if(j.ok){show(j.comment,false,'\u2066'+j.chars+' / '+j.limit+'\u2069 حرف',j.tweet)}else{show(j.error||'تعذّرت التجربة.',true)}}).catch(function(){show('تعذّر الاتصال بالخادم.',true)}).then(function(){go.disabled=false})})})();</script>
 </details>
+</div></details>
 <div class="tb">
 <label class="search">{{ic('search')}}<input id="q" type="search" placeholder="ابحث بالاسم أو الرمز" aria-label="ابحث بالاسم أو الرمز" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="search"><button type="button" class="qx" id="qx" aria-label="مسح البحث" hidden>{{ic('x')}}</button></label>
 <button class="btn add" type="button" data-open="nu" aria-label="إضافة مستخدم">{{ic('plus')}}<span>إضافة<span class="wd"> مستخدم</span></span></button>
@@ -3035,10 +3054,12 @@ if(j.ok){show(j.comment,false,'\u2066'+j.chars+' / '+j.limit+'\u2069 حرف',j.t
 <div class="list" id="list">
 {% for c in codes %}{% set hue = (c.id[:2]|int(0,16)) * 360 // 256 %}
 <article class="u{{ '' if c.active else ' off' }}" data-id="{{c.id}}" data-s="{{ 'on' if c.active else 'off' }}" data-name="{{c.label}}" data-code="{{c.code}}" data-bound="{{ '1' if c.device_count else '' }}" data-pay="{{c.pay}}" data-bal="{{ usd(c.balance) }}" data-free="{{ c.free|join(',') }}" data-acct="{{c.account_user}}" data-n="{{c.usage.total}}" data-x="{{ c.acts.repost + c.acts.like + c.acts.bookmark }}" data-seen="{{c.last_seen or 0}}" data-q="{{ (c.label ~ ' ' ~ c.code ~ ' ' ~ c.code|replace('-','') ~ ' ' ~ c.usage.accounts|map(attribute='name')|join(' '))|lower }}">
-<div class="who"><div class="av" style="--h:{{hue}}" aria-hidden="true">{{ (c.label or '؟')[:1] }}</div>
-<div class="nm"><h3>{{ c.label or 'بدون اسم' }}{% if c.account_user %}<span class="tg">حساب</span>{% endif %}{% if c.pay == 'prepaid' %}<span class="tg pp">مسبق</span>{% endif %}</h3><p><span class="st">{{ 'يعمل' if c.active else 'موقوف' }}</span><span>{% if c.last_seen %}آخر دخول {{c.last_seen_text}}{% else %}لم يدخل بعد{% endif %}</span></p></div></div>
+<div class="who" role="button" tabindex="0" aria-expanded="false"><div class="av" style="--h:{{hue}}" aria-hidden="true">{{ (c.label or '؟')[:1] }}</div>
+<div class="nm"><h3>{{ c.label or 'بدون اسم' }}{% if c.account_user %}<span class="tg">حساب</span>{% endif %}{% if c.pay == 'prepaid' %}<span class="tg pp">مسبق</span>{% endif %}</h3><p><span class="st" title="{{ 'يعمل' if c.active else 'موقوف' }}">{{ 'يعمل' if c.active else 'موقوف' }}</span><span class="ls" title="آخر دخول">{{ic('clock')}}{{ c.last_seen_text if c.last_seen else 'لم يدخل' }}</span>{% if c.pay == 'prepaid' %}<span class="sb pp{{ ' low' if c.balance < 0.05 else '' }}">رصيد <b dir="ltr">{{ usd(c.balance) }}</b></span>{% elif c.usage.cost %}<span class="sb">آجل <b dir="ltr">${{ '%.2f'|format(c.usage.cost) }}</b></span>{% endif %}</p></div>{{ic('chev')}}</div>
+<button type="button" class="ib ibm" data-more aria-label="خيارات {{ c.label or 'المستخدم' }}">{{ic('more')}}</button>
 <form method="post" action="/{{admin}}/code/toggle" data-toast="{{ 'تم إيقاف الرمز' if c.active else 'تم تشغيل الرمز' }}"><input type="hidden" name="id" value="{{c.id}}"><button class="sw{{ ' on' if c.active else '' }}" role="switch" aria-checked="{{ 'true' if c.active else 'false' }}" aria-label="رمز {{ c.label or 'بدون اسم' }} يعمل"><i></i></button></form>
-<div class="cr"><button type="button" class="code" data-copy="{{c.code}}" aria-label="نسخ الرمز {{c.code}}"><bdi>{{c.code}}</bdi>{{ic('copy')}}</button><button type="button" class="ib" data-more aria-label="خيارات {{ c.label or 'المستخدم' }}">{{ic('more')}}</button></div>
+<div class="ub">
+<div class="cr"><button type="button" class="code" data-copy="{{c.code}}" aria-label="نسخ الرمز {{c.code}}"><bdi>{{c.code}}</bdi>{{ic('copy')}}</button></div>
 {% set facts %}{% if c.pay == 'prepaid' %}<span class="bal{{ ' low' if c.balance < 0.05 else '' }}" title="الرصيد المسبق">رصيد <b dir="ltr">{{ usd(c.balance) }}</b></span>{% endif %}{% if c.free %}<span class="fre" title="خدمات مجانية لهذا المستخدم">مجاني <b>{% for k in c.free %}{{ svc[k] }}{% if not loop.last %} · {% endif %}{% endfor %}</b></span>{% endif %}<span><b>{{ '{:,}'.format(c.usage.total) }}</b> تعليق</span><span title="التكلفة التقديرية"><b>${{ '%.2f'|format(c.usage.cost) }}</b></span><span class="dev{{ ' on' if c.device_count else '' }}">{{ic('phone')}}{{c.devices_text}}</span>{% endset %}
 {% if c.usage.accounts %}<details class="acc"><summary class="facts" title="التعليقات حسب حساب X">{{facts}}{{ic('chev')}}</summary>
 <p class="alh">حسابات X ({{c.usage.accounts|length}})</p><ul class="al">
@@ -3054,6 +3075,7 @@ if(j.ok){show(j.comment,false,'\u2066'+j.chars+' / '+j.limit+'\u2069 حرف',j.t
 {% for a in c.acts.accounts %}<li><b><bdi>{{ ('@' ~ a.name) if a.name else 'حساب بلا اسم' }}</bdi></b><span><b>{{ '{:,}'.format(a.repost) }}</b> رتويت</span><span><b>{{ '{:,}'.format(a.like) }}</b> إعجاب</span><span><b>{{ '{:,}'.format(a.bookmark) }}</b> مرجعية</span></li>{% endfor %}
 </ul>{% else %}<p class="mut axe">لا يوجد حساب X في تطبيقه الآن.</p>{% endif %}</details>
 {% else %}<p class="axn">لم يرسل تطبيقه أرقام التنفيذ بعد.</p>{% endif %}
+</div>
 </article>
 {% endfor %}
 </div>
@@ -3486,6 +3508,8 @@ $('#rd-code').textContent=nc;$('#rd-copy').dataset.copy=nc;$('#rd-share').datase
 if(nu.dataset.name)$('#rd-t').textContent='أعطِ هذا الرمز لـ«'+nu.dataset.name+'» ليفتح به التطبيق. يرتبط الرمز بأول جوال يُدخَل فيه.';
 rd.showModal()}
 sort();filter();
+(take('open')||'').split(',').forEach(function(id){var u=id&&$('.u[data-id="'+id+'"]');if(u)setOpen(u,true)});
+(take('setg')||'').split(',').forEach(function(id){var d=id&&D.getElementById(id);if(d)d.open=true});
 var y=take('y');if(y)window.scrollTo(0,+y);
 var note=take('toast');if(note)toast(note);
 
@@ -3495,6 +3519,11 @@ function ok(){toast('تم النسخ');if(el&&el.classList.contains('code')){var
 function old(){var a=D.createElement('textarea');a.value=v;a.style.cssText='position:fixed;top:0;opacity:0';($('dialog[open]')||D.body).appendChild(a);a.select();var done=false;try{done=D.execCommand('copy')}catch(x){}a.remove();done?ok():toast('تعذّر النسخ. انسخه يدويًا.')}
 if(navigator.clipboard&&window.isSecureContext)navigator.clipboard.writeText(v).then(ok,old);else old()}
 if(!navigator.share)$$('[data-share]').forEach(function(b){b.hidden=true});
+
+/* a user's row: a tap on the name opens the rest under it (another tap closes it) */
+function setOpen(u,on){u.classList.toggle('open',on);var w=$('.who',u);if(w)w.setAttribute('aria-expanded',String(on))}
+D.addEventListener('click',function(e){var w=e.target.closest('.u .who');if(w){var u=w.closest('.u');setOpen(u,!u.classList.contains('open'))}});
+D.addEventListener('keydown',function(e){var w=e.target.closest&&e.target.closest('.u .who');if(w&&(e.key==='Enter'||e.key===' ')){e.preventDefault();w.click()}});
 
 /* the options sheet of one user */
 var sheet=$('#sheet'),cur=null;
@@ -3579,7 +3608,7 @@ R.classList.remove('loading');$$('.busy').forEach(function(b){b.classList.remove
 
 /* every change is a form post; risky ones ask first */
 var cf=$('#cf'),pending=null;
-function keep(f){if(f.dataset.toast)leave('toast',f.dataset.toast);
+function keep(f){if(f.dataset.toast)leave('toast',f.dataset.toast);leave('open',$$('.u.open').map(function(u){return u.dataset.id}).join(','));leave('setg',$$('#setg,#setg details').filter(function(d){return d.open}).map(function(d){return d.id}).join(','));
 if(f.hasAttribute('data-fresh'))leave('new',rows.length);
 else{leave('y',window.scrollY);if(q)leave('q',q.value)}}
 $('#cfok').onclick=function(){var f=pending;pending=null;cf.close();if(f){keep(f);loading(f);f.submit()}};

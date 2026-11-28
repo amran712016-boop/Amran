@@ -2645,7 +2645,8 @@ input::placeholder{color:var(--mut);opacity:.8}
 .hta{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end}.hta form{margin:0}
 .setb{display:grid;gap:8px;padding-bottom:12px}.setb .card{margin:0;border-radius:12px;background:var(--soft)}.setb .prc{padding:0 12px}
 @media(max-width:599px){.hero{padding:12px 14px 0;margin-top:12px;border-radius:16px}.tot b{font-size:32px}.hb{height:34px;padding:0 10px;font-size:12.5px}.ratio{margin-top:10px;height:6px}.rl{margin-top:5px;font-size:12px}.kp{margin-top:10px}.kp div{padding:7px 0 8px;padding-inline-start:10px}.kp dt{font-size:11px}.kp dd{font-size:16px}.kpa{font-size:10px}}
-.hm{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px}.hm div{display:grid;gap:1px;padding:9px 12px;border-radius:12px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12)}.hm span{font-size:12px;color:#a3cbc6}.hm b{font-size:21px;font-weight:600;line-height:1.3;font-variant-numeric:tabular-nums;color:#fff}.hm small{font-size:11px;color:#a3cbc6}
+.hm{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:12px}.hm div{display:grid;gap:1px;min-width:0;padding:9px 12px;border-radius:12px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12)}.hm span{font-size:12px;color:#a3cbc6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.hm b{font-size:20px;font-weight:600;line-height:1.3;font-variant-numeric:tabular-nums;color:#fff;overflow:hidden;text-overflow:ellipsis}.hm small{font-size:11px;color:#a3cbc6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+@media(max-width:599px){.hm{gap:6px}.hm div{padding:8px 9px}.hm span{font-size:11px}.hm b{font-size:16px}.hm small{font-size:10px}}
 .idle{margin-top:14px}.idle>summary .prc-h .tg{margin:0}.idle .list{padding-bottom:12px}.idle .u{background:var(--soft)}
 .nm .st{font-size:0;gap:0}.ls{display:inline-flex;align-items:center;gap:3px}.ls .i{width:12px;height:12px}
 @media(max-width:599px){.hbt{display:none}.hta .hb{width:36px;padding:0;justify-content:center}}
@@ -3006,8 +3007,9 @@ main{padding-bottom:56px}
 {% if stats.comments %}<form method="post" action="/{{admin}}/reset-cost-all" data-title="تصفير كل التكاليف؟" data-confirm="سيُصفَّر عدّاد التعليقات والتكلفة لكل المستخدمين، ويبقى محسوبًا في «منذ البداية» أعلى الصفحة." data-yes="تصفير التكاليف" data-kind="danger" data-toast="تم تصفير كل التكاليف"><button class="hb" aria-label="تصفير التكاليف">{{ic('reset')}}<span class="hbt">تصفير التكاليف</span></button></form>{% endif %}</div></div>
 <div class="ratio" aria-hidden="true"><i style="width:{{ stats.active * 100 / stats.users }}%"></i></div>
 <div class="rl"><span><b>{{stats.active}}</b> يعمل</span><span><b>{{stats.users - stats.active}}</b> موقوف</span></div>
-<div class="hm"><div><span>إجمالي الأرصدة</span><b dir="ltr">{{ usd(stats.balance) }}</b><small>{% if stats.debt < 0 %}ديون <bdi dir="ltr">{{ usd(stats.debt) }}</bdi>{% else %}ما لدى المستخدمين الآن{% endif %}</small></div>
-<div><span>إجمالي الدخل</span><b dir="ltr">${{ '%.2f'|format(stats.all_cost) }}</b><small>ما أنفقوه منذ البداية</small></div></div>
+<div class="hm"><div><span>أرصدة المسبق</span><b dir="ltr">{{ usd(stats.balance) }}</b><small>{% if stats.debt < 0 %}بالسالب <bdi dir="ltr">{{ usd(stats.debt) }}</bdi>{% else %}عند {{stats.prepaid_n}} مستخدم{% endif %}</small></div>
+<div><span>ديون الآجل</span><b dir="ltr">${{ '%.2f'|format(stats.later_debt) }}</b><small>على {{stats.later_n}} مستخدم</small></div>
+<div><span>إجمالي الدخل</span><b dir="ltr">${{ '%.2f'|format(stats.all_cost) }}</b><small>منذ البداية</small></div></div>
 </div>
 <dl class="kp">
 <div><dt>أجهزة مربوطة</dt><dd>{{stats.bound}}</dd></div>
@@ -3756,7 +3758,8 @@ def dashboard():
         r["active_at"] = max(acted, int(r.get("created") or 0))
         r["active_text"] = seen_text({"last_seen": acted})
         r["idle"] = now - r["active_at"] > IDLE_AFTER
-    balances = [balance_of(r) for r in rows]
+    prepaid = [r for r in rows if r["pay"] == PAY_PREPAID]
+    later = [r for r in rows if r["pay"] != PAY_PREPAID]
     stats = {"users": len(rows), "active": sum(1 for r in rows if r.get("active")),
              "bound": sum(r["device_count"] for r in rows),
              "comments": sum(r["usage"]["total"] for r in rows),
@@ -3765,8 +3768,13 @@ def dashboard():
              "bookmark": sum(r["acts"]["bookmark"] for r in rows)}
     since_start = lifetime_totals(usage_data)
     stats["all_comments"], stats["all_cost"] = since_start["comments"], since_start["cost"]
-    stats["balance"] = round(sum(b for b in balances if b > 0), 4)          # (what the users hold)
-    stats["debt"] = round(sum(b for b in balances if b < 0), 4)             # (what some owe: below zero)
+    # «مسبق»: what their balances hold now (and what the ones below zero owe); «آجل»: what they owe, their cost
+    # since it was last cleared («تصفير التكلفة», when the owner collects it).
+    stats["balance"] = round(sum(r["balance"] for r in prepaid if r["balance"] > 0), 4)
+    stats["debt"] = round(sum(r["balance"] for r in prepaid if r["balance"] < 0), 4)
+    stats["prepaid_n"] = len(prepaid)
+    stats["later_debt"] = round(sum(r["usage"]["cost"] for r in later), 4)
+    stats["later_n"] = sum(1 for r in later if r["usage"]["cost"] > 0)
     stats["idle"] = sum(1 for r in rows if r["idle"])
     notices = notice_rows(codes)
     messages = support_rows(codes)

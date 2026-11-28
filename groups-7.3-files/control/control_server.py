@@ -772,8 +772,11 @@ def record_comment(code_id: str, account: str, name: str, price: float = COST_PE
         usage = load_usage()
         code = _with_cost(usage.setdefault(code_id, {"total": 0, "accounts": {}}), "total")
         code.setdefault("accounts", {})
+        if "ccost" not in code:
+            code["ccost"] = comment_cost(code)            # (its comments before this was kept apart)
         code["total"] = int(code.get("total") or 0) + 1
         code["cost"] = round(float(code.get("cost") or 0) + price, 4)
+        code["ccost"] = round(float(code.get("ccost") or 0) + price, 4)
         services = code.setdefault("services", {})
         services["comment"] = int(services.get("comment") or 0) + 1
         who = _with_cost(code["accounts"].setdefault(account, {"n": 0, "name": ""}), "n")
@@ -838,32 +841,57 @@ def record_actions(code_id: str, items: list, prices: dict, charged: list | None
 LIFETIME_PATH = DATA_DIR / "lifetime.json"
 
 
+# «تكلفة التعليقات»: what the comments alone cost (the cost above is of every paid service). Kept apart since it
+# was added («ccost»); for what was counted before, the comments at the comment price, never more than the whole.
+def _comment_price_then() -> float:
+    return load_prices()["comment"] or COST_PER_COMMENT
+
+
+def comment_cost(row: dict, price: float | None = None) -> float:
+    """What a usage row's comments cost (since it was last cleared)."""
+    if "ccost" in row:
+        try:
+            return float(row.get("ccost") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+    whole = float(_with_cost(dict(row), "total").get("cost") or 0)
+    count = int(row.get("total") or 0)
+    return round(min(whole, count * (_comment_price_then() if price is None else price)), 4) if count else 0.0
+
+
 def _lifetime_cleared() -> dict:
     data = read_private_json(LIFETIME_PATH) or {}
     try:
-        return {"comments": int(data.get("comments") or 0), "cost": float(data.get("cost") or 0)}
+        out = {"comments": int(data.get("comments") or 0), "cost": float(data.get("cost") or 0)}
+        out["ccost"] = (float(data.get("ccost") or 0) if "ccost" in data
+                        else round(min(out["cost"], out["comments"] * _comment_price_then()), 4))
+        return out
     except (TypeError, ValueError):
-        return {"comments": 0, "cost": 0.0}
+        return {"comments": 0, "cost": 0.0, "ccost": 0.0}
 
 
 def _add_up(totals: dict, rows) -> dict:
+    price = _comment_price_then()
     for row in rows:
         if isinstance(row, dict):
             totals["comments"] += int(row.get("total") or 0)
             totals["cost"] += float(_with_cost(dict(row), "total").get("cost") or 0)
+            totals["ccost"] += comment_cost(row, price)
     return totals
 
 
 def _keep_cleared(rows) -> None:
     """(Under LOCK.) Counts about to be cleared go into the totals since the beginning."""
     totals = _add_up(_lifetime_cleared(), rows)
-    write_private_json(LIFETIME_PATH, {"version": 1, "comments": totals["comments"], "cost": round(totals["cost"], 4)})
+    write_private_json(LIFETIME_PATH, {"version": 1, "comments": totals["comments"], "cost": round(totals["cost"], 4),
+                                       "ccost": round(totals["ccost"], 4)})
 
 
 def lifetime_totals(usage: dict | None = None) -> dict:
-    """All the comments and all the cost since the beginning: what is counted now plus what was cleared."""
+    """All the comments and all the cost since the beginning: what is counted now plus what was cleared; and what
+    the comments alone cost."""
     totals = _add_up(_lifetime_cleared(), (load_usage() if usage is None else usage).values())
-    return {"comments": totals["comments"], "cost": round(totals["cost"], 2)}
+    return {"comments": totals["comments"], "cost": round(totals["cost"], 2), "comment_cost": round(totals["ccost"], 2)}
 
 
 def reset_usage(code_id: str) -> None:
@@ -889,14 +917,14 @@ def _cost(row: dict, count_key: str) -> float:
     return round(int(row.get(count_key) or 0) * COST_PER_COMMENT, 2)
 
 
-def usage_of(code_id: str, data: dict | None = None) -> dict:
+def usage_of(code_id: str, data: dict | None = None, price: float | None = None) -> dict:
     row = (data if data is not None else load_usage()).get(code_id) or {"total": 0, "accounts": {}}
     accounts = sorted(
         ({"id": key, "name": value.get("name") or "", "n": int(value.get("n") or 0), "cost": _cost(value, "n")}
          for key, value in (row.get("accounts") or {}).items() if isinstance(value, dict)),
         key=lambda item: (-item["cost"], -item["n"]))
     total = int(row.get("total") or 0)
-    return {"total": total, "cost": _cost(row, "total"), "accounts": accounts}
+    return {"total": total, "cost": _cost(row, "total"), "ccost": round(comment_cost(row, price), 2), "accounts": accounts}
 
 
 def usage_by_account(code_id: str, user: dict | None = None) -> dict:
@@ -3020,7 +3048,7 @@ main{padding-bottom:56px}
 <dl class="kp">
 <div><dt>أجهزة مربوطة</dt><dd>{{stats.bound}}</dd></div>
 <div><dt>تعليقات مكتوبة</dt><dd>{{ '{:,}'.format(stats.comments) }}</dd><small class="kpa">منذ البداية <bdi dir="ltr">{{ '{:,}'.format(stats.all_comments) }}</bdi></small></div>
-<div><dt>التكلفة</dt><dd>${{ '%.2f'|format(stats.cost) }}</dd><small class="kpa">منذ البداية <bdi dir="ltr">${{ '%.2f'|format(stats.all_cost) }}</bdi></small></div>
+<div><dt>تكلفة التعليقات</dt><dd>${{ '%.2f'|format(stats.ccost) }}</dd><small class="kpa">منذ البداية <bdi dir="ltr">${{ '%.2f'|format(stats.all_ccost) }}</bdi></small></div>
 <div><dt>الرتويت</dt><dd>{{ '{:,}'.format(stats.repost) }}</dd></div>
 <div><dt>الإعجاب</dt><dd>{{ '{:,}'.format(stats.like) }}</dd></div>
 <div><dt>المرجعية</dt><dd>{{ '{:,}'.format(stats.bookmark) }}</dd></div>
@@ -3745,7 +3773,9 @@ def dashboard():
         codes = load_codes()
     acts_data = load_acts()
     usage_data = load_usage()
-    rows = [dict(c, last_seen_text=seen_text(c), usage=usage_of(c["id"], usage_data), acts=acts_of(c["id"], acts_data)) for c in codes]
+    cprice = _comment_price_then()
+    rows = [dict(c, last_seen_text=seen_text(c), usage=usage_of(c["id"], usage_data, cprice), acts=acts_of(c["id"], acts_data))
+            for c in codes]
     activity, now = load_activity(), int(time.time())
     for r in rows:
         r["pay"] = pay_of(r)
@@ -3775,6 +3805,8 @@ def dashboard():
              "bookmark": sum(r["acts"]["bookmark"] for r in rows)}
     since_start = lifetime_totals(usage_data)
     stats["all_comments"], stats["all_cost"] = since_start["comments"], since_start["cost"]
+    stats["ccost"] = round(sum(r["usage"]["ccost"] for r in rows), 2)       # («تكلفة التعليقات»: the comments only)
+    stats["all_ccost"] = since_start["comment_cost"]
     # «مسبق»: what their balances hold now (and what the ones below zero owe); «آجل»: what they owe, their cost
     # since it was last cleared («تصفير التكلفة», when the owner collects it).
     stats["balance"] = round(sum(r["balance"] for r in prepaid if r["balance"] > 0), 4)
